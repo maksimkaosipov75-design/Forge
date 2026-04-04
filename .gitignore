@@ -1,0 +1,35 @@
+# Dependencies
+venv/
+__pycache__/
+*.pyc
+
+# Environment
+.env
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Projects data
+projects.json
+
+# Logs
+logs/
+
+# Other project files (not part of bridge)
+OUTPUT_PATTERNS.md
+README_RUTUBE.md
+TEST_RESULTS.md
+VIDEOGRAB_README.md
+build.sh
+install_videograb.sh
+rutube_downloader
+rutube_downloader.nim
+rutube_downloader.nimble
+test_rutube.nim
+videograb
+videograb.nim

@@ -7,17 +7,22 @@ from typing import Optional, Callable
 log = logging.getLogger(__name__)
 
 
+DEFAULT_TIMEOUT = 600  # 10 минут
+
+
 class QwenProcessManager:
     """
     Запускает qwen с --output-format stream-json.
     Реальный стриминг: thinking, text, tool_calls в реальном времени.
     """
 
-    def __init__(self, cli_path: str, on_output: Callable[[str], None]):
+    def __init__(self, cli_path: str, on_output: Callable[[str], None], timeout: int = DEFAULT_TIMEOUT):
         self.cli_path = cli_path
         self.on_output = on_output
+        self.timeout = timeout
         self._running = False
         self._session_active = False
+        self._proc: Optional[asyncio.subprocess.Process] = None
         self._stream_callback: Optional[Callable[[str], None]] = None
         self._final_result_callback: Optional[Callable[[str], None]] = None
 
@@ -54,11 +59,19 @@ class QwenProcessManager:
             stderr=asyncio.subprocess.PIPE,
             cwd=str(work_dir),
         )
+        self._proc = proc
         log.info(f"Процесс запущен PID={proc.pid}, cwd={work_dir}")
 
         # Читаем stdout — stream-json идёт построчно в реальном времени
         while True:
-            line = await proc.stdout.readline()
+            try:
+                line = await asyncio.wait_for(proc.stdout.readline(), timeout=self.timeout)
+            except asyncio.TimeoutError:
+                log.error(f"Таймаут {self.timeout}с — убиваю процесс PID={proc.pid}")
+                proc.kill()
+                await proc.wait()
+                self._proc = None
+                return -1
             if not line:
                 break
 
@@ -69,6 +82,7 @@ class QwenProcessManager:
             try:
                 d = json.loads(raw)
             except json.JSONDecodeError:
+                log.debug(f"Невалидный JSON от qwen: {raw[:200]}")
                 continue
 
             t = d.get("type", "")
@@ -128,6 +142,7 @@ class QwenProcessManager:
                 log.info(f"Qwen stderr: {text}")
 
         await proc.wait()
+        self._proc = None
         self._session_active = True
         log.info(f"Процесс завершился с кодом {proc.returncode}")
         return proc.returncode
@@ -142,6 +157,11 @@ class QwenProcessManager:
         self.on_output(event)
 
     async def stop(self):
+        if self._proc and self._proc.returncode is None:
+            log.info(f"Убиваю активный процесс PID={self._proc.pid}")
+            self._proc.kill()
+            await self._proc.wait()
+            self._proc = None
         self._running = False
         self._session_active = False
         log.info("Сессия сброшена")

@@ -1,3 +1,4 @@
+import html
 import os
 import json
 import logging
@@ -6,6 +7,11 @@ from typing import Optional
 from dataclasses import dataclass, field, asdict
 
 log = logging.getLogger(__name__)
+
+
+def _esc(text) -> str:
+    """Escape HTML special characters in dynamic content."""
+    return html.escape(str(text))
 
 
 @dataclass
@@ -44,11 +50,11 @@ class FileManager:
         """Установить рабочую директорию."""
         p = Path(path).expanduser().resolve()
         if not p.exists():
-            return f"❌ Путь не существует: {p}"
+            return f"❌ Путь не существует: {_esc(p)}"
         if not p.is_dir():
-            return f"❌ Это не директория: {p}"
+            return f"❌ Это не директория: {_esc(p)}"
         self.working_dir = p
-        return f"📂 Рабочая директория: `{p}`"
+        return f"📂 Рабочая директория: <code>{_esc(p)}</code>"
 
     def get_working_dir(self) -> Path:
         return self.working_dir
@@ -56,13 +62,16 @@ class FileManager:
     def list_dir(self, path: str = None) -> str:
         """Содержимое директории."""
         target = Path(path).expanduser().resolve() if path else self.working_dir
+        if path:
+            if err := self._check_path_safe(target):
+                return err
         if not target.exists():
-            return f"❌ Путь не существует: {target}"
+            return f"❌ Путь не существует: {_esc(target)}"
         if not target.is_dir():
-            return f"❌ Это не директория: {target}"
+            return f"❌ Это не директория: {_esc(target)}"
 
         items = sorted(target.iterdir(), key=lambda x: (not x.is_dir(), x.name.lower()))
-        lines = [f"📁 `{target}`\n"]
+        lines = [f"📁 <code>{_esc(target)}</code>\n"]
 
         for item in items:
             icon = "📂" if item.is_dir() else "📄"
@@ -72,9 +81,17 @@ class FileManager:
                     size = f" ({self._format_size(item.stat().st_size)})"
                 except OSError:
                     pass
-            lines.append(f"{icon} `{item.name}`{size}")
+            lines.append(f"{icon} <code>{_esc(item.name)}</code>{size}")
 
         return "\n".join(lines)
+
+    def _check_path_safe(self, target: Path) -> Optional[str]:
+        """Проверяет, что путь не выходит за пределы рабочей директории."""
+        try:
+            target.resolve().relative_to(self.working_dir.resolve())
+            return None
+        except ValueError:
+            return f"❌ Доступ запрещён: путь выходит за рабочую директорию"
 
     def read_file(self, path: str, max_lines: int = 100) -> str:
         """Прочитать файл."""
@@ -83,12 +100,14 @@ class FileManager:
             target = self.working_dir / target
         target = target.resolve()
 
+        if err := self._check_path_safe(target):
+            return err
         if not target.exists():
-            return f"❌ Файл не найден: `{target.name}`"
+            return f"❌ Файл не найден: <code>{_esc(target.name)}</code>"
         if target.is_dir():
-            return f"❌ Это директория: `{target.name}`"
+            return f"❌ Это директория: <code>{_esc(target.name)}</code>"
         if target.stat().st_size > 100_000:
-            return f"❌ Файл слишком большой: `{target.name}` ({self._format_size(target.stat().st_size)})"
+            return f"❌ Файл слишком большой: <code>{_esc(target.name)}</code> ({self._format_size(target.stat().st_size)})"
 
         try:
             with open(target, "r", encoding="utf-8", errors="replace") as f:
@@ -96,19 +115,19 @@ class FileManager:
             shown = lines[:max_lines]
             text = "".join(shown)
             suffix = f"\n\n... (ещё {len(lines) - max_lines} строк)" if len(lines) > max_lines else ""
-            return f"📄 `{target.name}`:\n```\n{text}\n```{suffix}"
+            return f"📄 <code>{_esc(target.name)}</code>:\n<pre>{_esc(text)}</pre>{suffix}"
         except PermissionError:
-            return f"❌ Нет прав на чтение: `{target.name}`"
+            return f"❌ Нет прав на чтение: <code>{_esc(target.name)}</code>"
         except Exception as e:
-            return f"❌ Ошибка чтения: {e}"
+            return f"❌ Ошибка чтения: {_esc(e)}"
 
     def tree(self, path: str = None, max_depth: int = 3, current_depth: int = 0) -> str:
         """Дерево файлов."""
         target = Path(path).expanduser().resolve() if path else self.working_dir
         if not target.exists() or not target.is_dir():
-            return f"❌ Директория не найдена: {target}"
+            return f"❌ Директория не найдена: {_esc(target)}"
 
-        lines = [f"📁 `{target}`"]
+        lines = [f"📁 <code>{_esc(target)}</code>"]
         self._build_tree(target, lines, max_depth, current_depth, prefix="")
         return "\n".join(lines)
 
@@ -124,7 +143,7 @@ class FileManager:
             is_last = i == len(items) - 1
             connector = "└── " if is_last else "├── "
             icon = "📂" if item.is_dir() else "📄"
-            lines.append(f"{prefix}{connector}{icon} `{item.name}`")
+            lines.append(f"{prefix}{connector}{icon} <code>{_esc(item.name)}</code>")
 
             if item.is_dir():
                 extension = "    " if is_last else "│   "
@@ -134,24 +153,24 @@ class FileManager:
         """Сохранить проект."""
         p = Path(path).expanduser().resolve()
         if not p.exists():
-            return f"❌ Путь не существует: {p}"
+            return f"❌ Путь не существует: {_esc(p)}"
         self.projects[name] = Project(name=name, path=str(p))
         self.current_project = self.projects[name]
         self.working_dir = p
         self._save_projects()
-        return f"✅ Проект `{name}` сохранён: `{p}`"
+        return f"✅ Проект <code>{_esc(name)}</code> сохранён: <code>{_esc(p)}</code>"
 
     def load_project(self, name: str) -> str:
         """Загрузить проект."""
         if name not in self.projects:
-            available = ", ".join(self.projects.keys()) or "нет"
-            return f"❌ Проект `{name}` не найден. Доступные: {available}"
+            available = ", ".join(_esc(k) for k in self.projects.keys()) or "нет"
+            return f"❌ Проект <code>{_esc(name)}</code> не найден. Доступные: {available}"
         proj = self.projects[name]
         if not Path(proj.path).exists():
-            return f"❌ Путь проекта не существует: `{proj.path}`"
+            return f"❌ Путь проекта не существует: <code>{_esc(proj.path)}</code>"
         self.current_project = proj
         self.working_dir = Path(proj.path)
-        return f"📂 Загружен проект `{name}`: `{proj.path}`"
+        return f"📂 Загружен проект <code>{_esc(name)}</code>: <code>{_esc(proj.path)}</code>"
 
     def list_projects(self) -> str:
         """Список проектов."""
@@ -159,14 +178,14 @@ class FileManager:
             return "📋 Нет сохранённых проектов."
         lines = ["📋 Проекты:\n"]
         for name, proj in self.projects.items():
-            current = " ← **текущий**" if self.current_project and self.current_project.name == name else ""
-            lines.append(f"• `{name}` → `{proj.path}`{current}")
+            current = " ← <b>текущий</b>" if self.current_project and self.current_project.name == name else ""
+            lines.append(f"• <code>{_esc(name)}</code> → <code>{_esc(proj.path)}</code>{current}")
         return "\n".join(lines)
 
     def get_project_context(self) -> str:
         """Контекст текущего проекта."""
         if not self.current_project:
-            return f"📂 Рабочая директория: `{self.working_dir}`\nПроект не выбран."
+            return f"📂 Рабочая директория: <code>{_esc(self.working_dir)}</code>\nПроект не выбран."
 
         proj = self.current_project
         # Считаем файлы
@@ -178,8 +197,8 @@ class FileManager:
             total_files = total_dirs = "?"
 
         return (
-            f"📂 Проект: `{proj.name}`\n"
-            f"📍 Путь: `{proj.path}`\n"
+            f"📂 Проект: <code>{_esc(proj.name)}</code>\n"
+            f"📍 Путь: <code>{_esc(proj.path)}</code>\n"
             f"📄 Файлов: {total_files} | 📁 Директорий: {total_dirs}"
         )
 

@@ -69,6 +69,110 @@ def _expand_file_mentions(prompt: str, cwd: str) -> str:
 
 _git_status_cache: dict[str, tuple[float, str]] = {}
 
+# ---------------------------------------------------------------------------
+# Markdown → Rich markup converter
+# ---------------------------------------------------------------------------
+
+def _md_inline_to_rich(text: str) -> str:
+    """Convert inline markdown to Rich markup. Assumes [ is already escaped."""
+    # Remove markdown links [text](url) → text  (before escaping [ below)
+    text = _re.sub(r'\[([^\]]*)\]\([^)]*\)', r'\1', text)
+    text = _re.sub(r'\[([^\]]*)\]\[[^\]]*\]', r'\1', text)
+
+    # Extract inline code before escaping brackets
+    code_segs: list[str] = []
+
+    def _save_code(m: _re.Match) -> str:
+        code_segs.append(m.group(1))
+        return f"\x00CODE{len(code_segs) - 1}\x00"
+
+    text = _re.sub(r'`([^`]+)`', _save_code, text)
+
+    # Escape remaining [ so Rich doesn't mis-parse them
+    text = text.replace("[", "\\[")
+
+    # Bold+italic ***text***
+    text = _re.sub(r'\*\*\*(.+?)\*\*\*', r'[bold italic]\1[/bold italic]', text)
+    # Bold **text** or __text__
+    text = _re.sub(r'\*\*(.+?)\*\*', r'[bold]\1[/bold]', text)
+    text = _re.sub(r'__(.+?)__', r'[bold]\1[/bold]', text)
+    # Italic *text* (not bold) or _text_
+    text = _re.sub(r'(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)', r'[italic]\1[/italic]', text)
+    text = _re.sub(r'(?<!\w)_(?!_)(.+?)_(?!\w)', r'[italic]\1[/italic]', text)
+
+    # Restore inline code with a distinct color
+    for i, code in enumerate(code_segs):
+        escaped = code.replace("[", "\\[")
+        text = text.replace(f"\x00CODE{i}\x00", f"[bold #88dd88]{escaped}[/bold #88dd88]")
+
+    return text
+
+
+def _md_to_rich(text: str) -> str:
+    """Convert a markdown string to Rich markup for display in Textual."""
+    out: list[str] = []
+    in_code = False
+    code_buf: list[str] = []
+
+    for raw_line in text.split("\n"):
+        # Code fence detection
+        if raw_line.rstrip().startswith("```"):
+            if not in_code:
+                in_code = True
+            else:
+                in_code = False
+                block = "\n".join(f"  {l}" for l in code_buf)
+                out.append("[#888888]" + block.replace("[", "\\[") + "[/#888888]")
+                code_buf = []
+            continue
+        if in_code:
+            code_buf.append(raw_line)
+            continue
+
+        stripped = raw_line.lstrip()
+        indent = len(raw_line) - len(stripped)
+        pfx = " " * indent
+
+        # Horizontal rule
+        if _re.fullmatch(r'[-*_]{3,}', stripped):
+            out.append("[dim]" + "─" * 42 + "[/dim]")
+            continue
+        # Headings
+        if stripped.startswith("#### "):
+            out.append(pfx + "[bold dim]" + _md_inline_to_rich(stripped[5:]) + "[/bold dim]")
+            continue
+        if stripped.startswith("### "):
+            out.append(pfx + "[bold]" + _md_inline_to_rich(stripped[4:]) + "[/bold]")
+            continue
+        if stripped.startswith("## "):
+            out.append(pfx + "[bold underline]" + _md_inline_to_rich(stripped[3:]) + "[/bold underline]")
+            continue
+        if stripped.startswith("# "):
+            out.append(pfx + "[bold underline bright_white]" + _md_inline_to_rich(stripped[2:]) + "[/bold underline bright_white]")
+            continue
+        # Blockquote
+        if stripped.startswith("> "):
+            out.append(pfx + "[dim italic]▎ " + _md_inline_to_rich(stripped[2:]) + "[/dim italic]")
+            continue
+        # Unordered list
+        if stripped.startswith(("- ", "* ", "+ ")):
+            out.append(pfx + "  • " + _md_inline_to_rich(stripped[2:]))
+            continue
+        # Ordered list
+        m = _re.match(r'^(\d+)\.\s+(.*)', stripped)
+        if m:
+            out.append(pfx + f"  {m.group(1)}. " + _md_inline_to_rich(m.group(2)))
+            continue
+        # Plain line
+        out.append(_md_inline_to_rich(raw_line))
+
+    # Unclosed code block
+    if code_buf:
+        block = "\n".join(f"  {l}" for l in code_buf)
+        out.append("[#888888]" + block.replace("[", "\\[") + "[/#888888]")
+
+    return "\n".join(out)
+
 
 def _git_status_short(cwd: str) -> str:
     """Return a short git status string, cached for 5 seconds."""
@@ -180,7 +284,7 @@ def _file_diff_text(file_path: str, is_new: bool, max_lines: int = 35, add_color
 def run_textual_shell(container, chat_id: int = 0):
     try:
         from textual.app import App, ComposeResult
-        from textual.containers import Container, Horizontal
+        from textual.containers import Container, Horizontal, VerticalScroll
         from textual.reactive import reactive
         from textual.suggester import Suggester
         from textual.widget import Widget
@@ -194,6 +298,7 @@ def run_textual_shell(container, chat_id: int = 0):
         "/help": ("Shell", "Show available commands"),
         "/home": ("Shell", "Return to the start page"),
         "/new": ("Shell", "Reset the shell workspace"),
+        "/clear": ("Shell", "Clear the stream output"),
         "/provider": ("Providers", "Switch the default provider"),
         "/providers": ("Providers", "List available providers"),
         "/status": ("Status", "Show current shell/session status"),
@@ -255,11 +360,16 @@ def run_textual_shell(container, chat_id: int = 0):
             height: 1fr;
         }
 
-        #stream {
+        #stream-scroll {
             border: round #6aa7ff;
-            padding: 0 1;
             height: 1fr;
             width: 1fr;
+        }
+
+        #stream {
+            padding: 0 1;
+            height: auto;
+            width: 100%;
         }
 
         #side {
@@ -318,7 +428,8 @@ def run_textual_shell(container, chat_id: int = 0):
             yield TitleWidget(self._titlebar_text(), id="titlebar")
             with Container(id="workspace"):
                 with Horizontal():
-                    yield StreamWidget("Ready.", id="stream")
+                    with VerticalScroll(id="stream-scroll"):
+                        yield StreamWidget("Ready.", id="stream")
                     yield SideWidget(self._side_text(), id="side")
             yield StatusLineWidget("", id="statusline")
             yield Input(
@@ -437,7 +548,7 @@ def run_textual_shell(container, chat_id: int = 0):
 
         def _apply_provider_theme(self):
             color = self._provider_color()
-            self.query_one("#stream", StreamWidget).styles.border = ("round", color)
+            self.query_one("#stream-scroll", VerticalScroll).styles.border = ("round", color)
             self.query_one("#input", Input).styles.border = ("round", color)
 
         def _refresh_all(self):
@@ -494,59 +605,68 @@ def run_textual_shell(container, chat_id: int = 0):
                     pass
             self.query_one("#statusline", StatusLineWidget).update(self._status_renderable())
 
+        def _scroll_to_bottom(self):
+            scroll = self.query_one("#stream-scroll", VerticalScroll)
+            scroll.scroll_end(animate=False)
+
         def _set_stream(self, content: str):
             """Replace stream content and sync _stream_lines."""
             self._stream_lines = content.splitlines() if content else []
             self._last_stream_was_text = False
             self.query_one("#stream", StreamWidget).update(content)
+            self.call_after_refresh(self._scroll_to_bottom)
 
         def _append_stream(self, *lines: str):
             self._last_stream_was_text = False
             self._stream_lines.extend(line for line in lines if line is not None)
-            self._stream_lines = self._stream_lines[-40:]
+            self._stream_lines = self._stream_lines[-300:]
             self.query_one("#stream", StreamWidget).update("\n".join(self._stream_lines))
+            self.call_after_refresh(self._scroll_to_bottom)
 
         def _append_stream_event(self, line: str):
             """Format and append a stream event line to the stream widget."""
             color = self._provider_color()
             if line.startswith("💬 "):
-                chunk = line[2:].strip()
+                # Escape [ so Rich doesn't mis-parse raw markdown from the model
+                chunk = line[2:].strip().replace("[", "\\[")
                 if self._last_stream_was_text and self._stream_lines:
                     # Merge with the previous text line — streaming arrives as small chunks
                     self._stream_lines[-1] = self._stream_lines[-1] + chunk
                 else:
                     self._stream_lines.append("  " + chunk)
                     self._last_stream_was_text = True
-                self._stream_lines = self._stream_lines[-40:]
+                self._stream_lines = self._stream_lines[-300:]
                 self.query_one("#stream", StreamWidget).update("\n".join(self._stream_lines))
+                self.call_after_refresh(self._scroll_to_bottom)
                 return
             # Any non-text event ends the current text run
             self._last_stream_was_text = False
             if line.startswith("🔧 Использую: ") or line.startswith("🔧 "):
                 tool = line.split(": ", 1)[-1].strip() if ": " in line else line[2:].strip()
-                formatted = f"  [{color}]✦[/] [dim]{tool}[/dim]"
+                formatted = f"  [{color}]✦[/] [dim]{tool.replace('[', chr(92) + '[')}[/dim]"
             elif line.startswith(("✏️ ", "📂 ")):
-                formatted = f"  [{color}]✦[/] [dim]{line[2:].strip()}[/dim]"
+                formatted = f"  [{color}]✦[/] [dim]{line[2:].strip().replace('[', chr(92) + '[')}[/dim]"
             elif line.startswith("👁️ "):
-                formatted = f"  [dim]{line[2:].strip()}[/dim]"
+                formatted = f"  [dim]{line[2:].strip().replace('[', chr(92) + '[')}[/dim]"
             elif line.startswith("🐚 "):
                 cmd = line[2:].strip()
                 for pfx in ("Запускаю: ", "Running: "):
                     if cmd.startswith(pfx):
                         cmd = cmd[len(pfx):]
                         break
-                formatted = f"  [{color}]$[/] [dim]{cmd}[/dim]"
+                formatted = f"  [{color}]$[/] [dim]{cmd.replace('[', chr(92) + '[')}[/dim]"
             elif line.startswith("⚙️ "):
-                formatted = f"  [dim]{line[2:].strip()}[/dim]"
+                formatted = f"  [dim]{line[2:].strip().replace('[', chr(92) + '[')}[/dim]"
             elif line.startswith(("❌ ", "✅ ")):
-                formatted = f"  [dim]{line}[/dim]"
+                formatted = f"  [dim]{line.replace('[', chr(92) + '[')}[/dim]"
             elif line.startswith(("🧠 ", "🏁 ", "🔢 ")):
                 return  # skip thinking, raw completion markers, and token counts
             else:
                 return
             self._stream_lines.append(formatted)
-            self._stream_lines = self._stream_lines[-40:]
+            self._stream_lines = self._stream_lines[-300:]
             self.query_one("#stream", StreamWidget).update("\n".join(self._stream_lines))
+            self.call_after_refresh(self._scroll_to_bottom)
 
         def _add_timeline(self, message: str):
             self.timeline_entries.append(message)
@@ -654,21 +774,22 @@ def run_textual_shell(container, chat_id: int = 0):
                 self._set_stream("Ready.")
                 self._refresh_all()
                 return
+            if command == "/clear":
+                self._set_stream("")
+                self._add_timeline("Stream cleared.")
+                return
             if command == "/help":
                 self._add_timeline("Opened help.")
-                stream.update(
+                self._set_stream(
                     "\n".join(
                         [
                             "/help",
-                            "/home",
-                            "/new",
+                            "/home · /new",
+                            "/clear",
                             "/provider <qwen|codex|claude>",
-                            "/status",
-                            "/limits",
-                            "/runs",
-                            "/remote-control",
-                            "/remote-control status",
-                            "/remote-control stop",
+                            "/status · /limits",
+                            "/runs · /show <n>",
+                            "/remote-control [status|stop|logs]",
                             "/plan <task>",
                             "/orchestrate <task>",
                         ]
@@ -677,13 +798,13 @@ def run_textual_shell(container, chat_id: int = 0):
                 return
             if command == "/provider":
                 if not arg:
-                    stream.update(f"provider: {session.current_provider}")
+                    self._set_stream(f"provider: {session.current_provider}")
                     return
                 from providers import is_supported_provider, normalize_provider_name
 
                 provider = normalize_provider_name(arg)
                 if not is_supported_provider(provider):
-                    stream.update(f"Unsupported provider: {arg}")
+                    self._set_stream(f"Unsupported provider: {arg}")
                     return
                 session.current_provider = provider
                 container.save_session(session)
@@ -691,10 +812,10 @@ def run_textual_shell(container, chat_id: int = 0):
                 self._apply_provider_theme()
                 self._add_timeline(f"Provider set to {provider}.")
                 self._refresh_all()
-                stream.update(f"Default provider set to {provider}.")
+                self._set_stream(f"Default provider set to {provider}.")
                 return
             if command == "/providers":
-                stream.update(
+                self._set_stream(
                     "\n".join(
                         f"{name} · {path}"
                         for name, path in container.provider_paths.items()
@@ -703,7 +824,7 @@ def run_textual_shell(container, chat_id: int = 0):
                 return
             if command == "/status":
                 self._add_timeline("Viewed status.")
-                stream.update(
+                self._set_stream(
                     "\n".join(
                         [
                             f"provider: {session.current_provider}",
@@ -729,15 +850,15 @@ def run_textual_shell(container, chat_id: int = 0):
                         if health.last_failure.retry_at:
                             line += f" · retry {health.last_failure.retry_at}"
                     provider_lines.append(line)
-                stream.update("\n".join(provider_lines))
+                self._set_stream("\n".join(provider_lines))
                 return
             if command == "/runs":
                 self._add_timeline("Viewed runs.")
                 runs = container.recent_runs(session, limit=10)
                 if not runs:
-                    stream.update("No runs yet.")
+                    self._set_stream("No runs yet.")
                     return
-                stream.update(
+                self._set_stream(
                     "\n".join(
                         f"{index}. {run.status_emoji} {run.mode} [{run.provider_summary or 'mixed'}]"
                         for index, run in enumerate(runs, start=1)
@@ -746,16 +867,16 @@ def run_textual_shell(container, chat_id: int = 0):
                 return
             if command == "/show":
                 if not arg:
-                    stream.update("Usage: /show <index>")
+                    self._set_stream("Usage: /show <index>")
                     return
                 try:
                     index = int(arg)
                 except ValueError:
-                    stream.update("Run index must be a number.")
+                    self._set_stream("Run index must be a number.")
                     return
                 run = container.run_by_index(session, index)
                 if run is None:
-                    stream.update(f"Run {index} not found.")
+                    self._set_stream(f"Run {index} not found.")
                     return
                 details = [
                     f"run_id: {run.run_id}",
@@ -776,24 +897,24 @@ def run_textual_shell(container, chat_id: int = 0):
                         f"- {item.subtask_id}: {item.title} [{item.provider}] ({item.status})"
                         for item in run.subtasks
                     )
-                stream.update("\n".join(details))
+                self._set_stream("\n".join(details))
                 return
             if command == "/artifacts":
                 artifacts = container.latest_artifact_files(session)
                 if not artifacts:
-                    stream.update("No artifacts found.")
+                    self._set_stream("No artifacts found.")
                     return
-                stream.update("\n".join(str(item) for item in artifacts))
+                self._set_stream("\n".join(str(item) for item in artifacts))
                 return
             if command == "/plan":
                 if not arg:
-                    stream.update("Usage: /plan <task>")
+                    self._set_stream("Usage: /plan <task>")
                     return
                 plan = container.build_planner(session).build_plan(arg)
                 session.last_plan = plan
                 container.save_session(session)
                 self._add_timeline(f"Planned: {arg[:48]}")
-                stream.update(
+                self._set_stream(
                     "\n".join(
                         [
                             f"complexity: {plan.complexity}",
@@ -809,7 +930,7 @@ def run_textual_shell(container, chat_id: int = 0):
                 return
             if command == "/orchestrate":
                 if not arg:
-                    stream.update("Usage: /orchestrate <task>")
+                    self._set_stream("Usage: /orchestrate <task>")
                     return
                 await self._run_orchestration(arg)
                 return
@@ -822,19 +943,19 @@ def run_textual_shell(container, chat_id: int = 0):
                     try:
                         status = manager.start()
                     except RuntimeError as exc:
-                        stream.update(str(exc))
+                        self._set_stream(str(exc))
                         return
                     self.remote_state = "running" if status.is_running else "stopped"
                     self._add_timeline("Remote control started.")
                     self._refresh_all()
-                    stream.update(f"Remote control started. log: {status.log_path}")
+                    self._set_stream(f"Remote control started. log: {status.log_path}")
                     return
                 if action == "status":
                     status = manager.load_status()
                     self.remote_state = "running" if status.is_running else "stopped"
                     self._add_timeline("Checked remote-control status.")
                     self._refresh_all()
-                    stream.update(
+                    self._set_stream(
                         "\n".join(
                             [
                                 f"running: {'yes' if status.is_running else 'no'}",
@@ -849,16 +970,16 @@ def run_textual_shell(container, chat_id: int = 0):
                     self.remote_state = "running" if status.is_running else "stopped"
                     self._add_timeline("Remote control stopped.")
                     self._refresh_all()
-                    stream.update("Remote control stopped.")
+                    self._set_stream("Remote control stopped.")
                     return
                 if action == "logs":
                     logs = manager.tail_logs()
-                    stream.update(logs or "No remote-control logs yet.")
+                    self._set_stream(logs or "No remote-control logs yet.")
                     return
-                stream.update("Usage: /remote-control [status|stop|logs]")
+                self._set_stream("Usage: /remote-control [status|stop|logs]")
                 return
 
-            stream.update(f"Unknown command: {raw}")
+            self._set_stream(f"Unknown command: {raw}")
 
         async def _run_prompt(self, prompt: str):
             from providers import normalize_provider_name
@@ -918,7 +1039,7 @@ def run_textual_shell(container, chat_id: int = 0):
                 *diff_lines,
             ]
             if result.answer_text.strip():
-                final_parts += ["", result.answer_text.strip()[:3000]]
+                final_parts += ["", _md_to_rich(result.answer_text.strip()[:3000])]
             final_parts += [
                 "",
                 f"  {status_icon} [{color}]{provider_name}[/]  [dim]{duration}[/dim]",
@@ -1041,13 +1162,13 @@ def run_textual_shell(container, chat_id: int = 0):
                 for f in subtask.changed_files[:6]:
                     result_lines.extend(_file_diff_text(f, is_new=False, add_color=subtask_color))
                 if subtask.answer_text.strip():
-                    excerpt = subtask.answer_text.strip()[:300].replace("\n", " ")
+                    excerpt = subtask.answer_text.strip()[:300].replace("\n", " ").replace("[", "\\[")
                     result_lines.append(f"  [dim]> {excerpt}[/dim]")
 
             if task_run.review_answer:
-                result_lines += ["", "[bold]Review:[/bold]", task_run.review_answer.strip()[:600]]
+                result_lines += ["", "[bold]Review:[/bold]", _md_to_rich(task_run.review_answer.strip()[:600])]
             elif aggregate_result.answer_text.strip():
-                result_lines += ["", aggregate_result.answer_text.strip()[:2000]]
+                result_lines += ["", _md_to_rich(aggregate_result.answer_text.strip()[:2000])]
 
             self._append_stream(*result_lines)
 

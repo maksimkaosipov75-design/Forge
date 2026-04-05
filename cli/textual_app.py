@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json as _json
 import re as _re
 import subprocess as _subprocess
 import time as _time
@@ -319,14 +320,40 @@ def run_textual_shell(container, chat_id: int = 0):
             self.commands = list(COMMANDS.keys())
 
         async def get_suggestion(self, value: str) -> str | None:
-            if not value.startswith("/"):
+            # Slash command completion
+            if value.startswith("/") and " " not in value.strip():
+                lowered = value.casefold()
+                for command in self.commands:
+                    if command.casefold().startswith(lowered):
+                        return command
                 return None
-            if " " in value.strip():
-                return None
-            lowered = value.casefold()
-            for command in self.commands:
-                if command.casefold().startswith(lowered):
-                    return command
+
+            # @file completion — match last @token in value
+            m = _re.search(r'@([\w./\-]*)$', value)
+            if m:
+                partial = m.group(1)
+                try:
+                    session = container.get_session(chat_id)
+                    base = Path(session.file_mgr.get_working_dir())
+                    if "/" in partial:
+                        parent = base / Path(partial).parent
+                        stem = Path(partial).name
+                    else:
+                        parent = base
+                        stem = partial
+                    matches = sorted(
+                        p for p in parent.iterdir()
+                        if p.name.startswith(stem) and not p.name.startswith(".")
+                    )
+                    if matches:
+                        first = matches[0]
+                        rel = str(first.relative_to(base))
+                        if first.is_dir():
+                            rel += "/"
+                        return value[: m.start(1)] + rel
+                except Exception:
+                    pass
+
             return None
 
     class TitleWidget(Static):
@@ -339,6 +366,9 @@ def run_textual_shell(container, chat_id: int = 0):
         pass
 
     class StatusLineWidget(Static):
+        pass
+
+    class MultilinePreview(Static):
         pass
 
     class BridgeTextualApp(App):
@@ -390,6 +420,19 @@ def run_textual_shell(container, chat_id: int = 0):
             display: block;
         }
 
+        #multiline-preview {
+            height: auto;
+            max-height: 6;
+            padding: 0 2;
+            background: #1a1d25;
+            color: #9aa3b2;
+            display: none;
+        }
+
+        #multiline-preview.active {
+            display: block;
+        }
+
         #input {
             dock: bottom;
             margin: 0 1 0 1;
@@ -413,6 +456,8 @@ def run_textual_shell(container, chat_id: int = 0):
             self._input_history: list[str] = []
             self._history_pos: int = -1
             self._history_draft: str = ""  # saves current draft when navigating history
+            self._multiline_buffer: list[str] = []  # accumulates lines for multi-line input
+            self._ctx_input_tokens: int = 0  # last known context size from API
 
         def _provider_color(self) -> str:
             mapping = {
@@ -432,15 +477,49 @@ def run_textual_shell(container, chat_id: int = 0):
                         yield StreamWidget("Ready.", id="stream")
                     yield SideWidget(self._side_text(), id="side")
             yield StatusLineWidget("", id="statusline")
+            yield MultilinePreview("", id="multiline-preview")
             yield Input(
-                placeholder="/help · /provider <name> · /orchestrate <task> · /remote-control",
+                placeholder="/help · @file · Shift+Enter for multiline · /orchestrate <task>",
                 id="input",
                 suggester=SlashCommandSuggester(),
             )
 
+        @property
+        def _history_path(self) -> Path:
+            return Path(".session_data") / "cli_history.json"
+
+        def _load_history(self):
+            try:
+                data = _json.loads(self._history_path.read_text())
+                self._input_history = data.get("history", [])[-100:]
+            except Exception:
+                pass
+
+        def _save_history(self):
+            try:
+                self._history_path.parent.mkdir(parents=True, exist_ok=True)
+                self._history_path.write_text(
+                    _json.dumps({"history": self._input_history[-100:]}, ensure_ascii=False)
+                )
+            except Exception:
+                pass
+
         def on_mount(self):
+            self._load_history()
             self._sync_remote_state()
             self._apply_provider_theme()
+            self._refresh_all()
+            # Auto-refresh sidebar health every 30s
+            self.set_interval(30, self._auto_refresh)
+
+        def on_unmount(self):
+            self._save_history()
+
+        def _auto_refresh(self):
+            """Periodic background refresh: git status, provider health sidebar."""
+            # Invalidate git status cache so next titlebar update picks up changes
+            cwd = str(container.get_session(chat_id).file_mgr.get_working_dir())
+            _git_status_cache.pop(cwd, None)
             self._refresh_all()
 
         def _titlebar_text(self) -> str:
@@ -450,9 +529,11 @@ def run_textual_shell(container, chat_id: int = 0):
             spec = specialties.get(self.current_provider, "general")
             git = _git_status_short(cwd)
             git_part = f"  git:{git}" if git else ""
+            ctx_tok = self._ctx_input_tokens
+            ctx_part = f"  ctx:~{ctx_tok // 1000}k" if ctx_tok >= 1000 else (f"  ctx:{ctx_tok}" if ctx_tok else "")
             return (
                 f">_ {self.current_provider.upper()} [{spec}]  "
-                f"{cwd}{git_part}  "
+                f"{cwd}{git_part}{ctx_part}  "
                 f"mode:{self.current_mode}  remote:{self.remote_state}"
             )
 
@@ -599,10 +680,20 @@ def run_textual_shell(container, chat_id: int = 0):
             elif line.startswith("🔢 "):
                 try:
                     parts = line[2:].strip().split(",")
-                    self._status_state["input_tokens"] = int(parts[0])
-                    self._status_state["output_tokens"] = int(parts[1]) if len(parts) > 1 else 0
+                    inp = int(parts[0])
+                    out = int(parts[1]) if len(parts) > 1 else 0
+                    self._status_state["input_tokens"] = inp
+                    self._status_state["output_tokens"] = out
+                    # Update context tracker for titlebar
+                    if inp > self._ctx_input_tokens:
+                        self._ctx_input_tokens = inp
+                        self.query_one("#titlebar", TitleWidget).update(self._titlebar_text())
                 except (ValueError, IndexError):
                     pass
+            elif line.startswith("❌ ") and "retry" in line.lower():
+                # Auto-retry event — surface in status bar
+                short = line[2:].strip()[:60]
+                self._status_state["action"] = f"⟳ {short}"
             self.query_one("#statusline", StatusLineWidget).update(self._status_renderable())
 
         def _scroll_to_bottom(self):
@@ -688,9 +779,36 @@ def run_textual_shell(container, chat_id: int = 0):
         def action_show_help(self) -> None:
             asyncio.create_task(self._handle_command("/help"))
 
+        def _update_multiline_preview(self):
+            preview = self.query_one("#multiline-preview", MultilinePreview)
+            if self._multiline_buffer:
+                lines = "\n".join(f"  {l}" for l in self._multiline_buffer)
+                n = len(self._multiline_buffer)
+                preview.update(f"[dim]multiline ({n} lines — Enter to send, Esc to cancel):[/dim]\n{lines}")
+                preview.add_class("active")
+            else:
+                preview.update("")
+                preview.remove_class("active")
+
         async def on_key(self, event) -> None:
             if event.key == "?":
                 await self._handle_command("/help")
+                return
+            if event.key == "escape":
+                if self._multiline_buffer:
+                    self._multiline_buffer = []
+                    self._update_multiline_preview()
+                    event.prevent_default()
+                    return
+            if event.key == "shift+enter":
+                input_widget = self.query_one("#input", Input)
+                val = input_widget.value
+                if val.strip():
+                    self._multiline_buffer.append(val)
+                    input_widget.value = ""
+                    self.current_input = ""
+                    self._update_multiline_preview()
+                event.prevent_default()
                 return
             if event.key == "ctrl+c":
                 if self._active_runtime is not None:
@@ -738,14 +856,25 @@ def run_textual_shell(container, chat_id: int = 0):
             self._history_pos = -1
             self._history_draft = ""
             self.query_one("#side", SideWidget).update(self._side_text())
+
+            # Merge multiline buffer if active
+            if self._multiline_buffer:
+                parts = self._multiline_buffer + ([value] if value else [])
+                value = "\n".join(parts)
+                self._multiline_buffer = []
+                self._update_multiline_preview()
+
             if not value:
                 return
 
             # Push to history (deduplicate consecutive identical entries)
-            if not self._input_history or self._input_history[-1] != value:
-                self._input_history.append(value)
+            # Store the first line as history key for multi-line prompts
+            history_key = value.split("\n")[0][:120]
+            if not self._input_history or self._input_history[-1] != history_key:
+                self._input_history.append(history_key)
                 if len(self._input_history) > 100:
                     self._input_history = self._input_history[-100:]
+            self._save_history()
 
             suggestion = getattr(event.input, "_suggestion", "")
             if value.startswith("/") and " " not in value and suggestion and suggestion != value:

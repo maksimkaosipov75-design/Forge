@@ -2,13 +2,122 @@ from __future__ import annotations
 
 import asyncio
 import re as _re
+import subprocess as _subprocess
+import time as _time
 from pathlib import Path
 
 _HTML_TAG = _re.compile(r"<[^>]+>")
 
+_LANG_MAP = {
+    "py": "python", "js": "javascript", "ts": "typescript",
+    "rs": "rust", "go": "go", "sh": "bash", "json": "json",
+    "yaml": "yaml", "yml": "yaml", "toml": "toml", "md": "markdown",
+    "html": "html", "css": "css", "sql": "sql", "nim": "nim",
+}
+
 
 def _strip_html(text: str) -> str:
     return _HTML_TAG.sub("", text)
+
+
+def _action_from_event(line: str) -> str | None:
+    """Map a stream event to a short action label for the status line."""
+    if line.startswith("🔧 Использую: ") or line.startswith("🔧 "):
+        tool = line.split(": ", 1)[-1].strip() if ": " in line else line[2:].strip()
+        return (tool[:38] + "…") if len(tool) > 38 else tool + "…"
+    if line.startswith(("✏️ ", "📂 ")):
+        parts = line[2:].strip().split()
+        return f"Writing {Path(parts[-1]).name}…" if parts else "Writing…"
+    if line.startswith("👁️ "):
+        parts = line[2:].strip().split()
+        return f"Reading {Path(parts[-1]).name}…" if parts else "Reading…"
+    if line.startswith("🐚 "):
+        cmd = line[2:].strip()
+        for pfx in ("Запускаю: ", "Running: "):
+            if cmd.startswith(pfx):
+                cmd = cmd[len(pfx):]
+                break
+        return f"$ {cmd[:38]}…" if len(cmd) > 38 else f"$ {cmd}"
+    if line.startswith("⚙️ "):
+        return "Initializing…"
+    if line.startswith("💬 "):
+        return "Writing…"
+    return None
+
+
+def _git_diff(path: Path) -> str | None:
+    for args in (
+        ["git", "diff", "HEAD", "--", str(path)],
+        ["git", "diff", "--", str(path)],
+    ):
+        try:
+            out = _subprocess.run(
+                args, capture_output=True, text=True,
+                cwd=str(path.parent), timeout=4,
+            ).stdout
+            if out.strip():
+                return out
+        except Exception:
+            pass
+    return None
+
+
+def _file_diff_text(file_path: str, is_new: bool, max_lines: int = 35) -> list[str]:
+    """Return markup lines for a file diff/preview (for Textual Static)."""
+    path = Path(file_path)
+    if not path.exists():
+        return []
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return []
+
+    icon = "[green]+[/green]" if is_new else "[yellow]~[/yellow]"
+    try:
+        n = len(path.read_text(errors="replace").splitlines()) if size < 500_000 else 0
+    except Exception:
+        n = 0
+    size_note = f"  [dim]({n} lines)[/dim]" if n else ""
+    lines = [f"\n  {icon} [bold]{path.name}[/bold]{size_note}"]
+
+    if size > 200_000:
+        lines.append("  [dim](file too large to preview)[/dim]")
+        return lines
+
+    if not is_new:
+        diff = _git_diff(path)
+        if diff:
+            hunk_lines = [
+                ln for ln in diff.splitlines()
+                if not ln.startswith(("diff ", "index ", "--- ", "+++ "))
+            ][:max_lines]
+            for ln in hunk_lines:
+                if ln.startswith("+"):
+                    lines.append(f"  [green]{ln}[/green]")
+                elif ln.startswith("-"):
+                    lines.append(f"  [red]{ln}[/red]")
+                elif ln.startswith("@@"):
+                    lines.append(f"  [cyan]{ln}[/cyan]")
+                else:
+                    lines.append(f"  [dim]{ln}[/dim]")
+            if len(hunk_lines) == max_lines:
+                lines.append(f"  [dim]... (truncated)[/dim]")
+            return lines
+        # no git diff — fall through to content
+
+    try:
+        content = path.read_text(errors="replace").splitlines()
+        shown = content[:max_lines]
+        prefix = "[green]+ " if is_new else "  "
+        suffix_close = "[/green]" if is_new else ""
+        for ln in shown:
+            safe = ln.replace("[", "\\[")
+            lines.append(f"  {prefix}{safe}{suffix_close}")
+        if len(content) > max_lines:
+            lines.append(f"  [dim]... ({len(content) - max_lines} more lines)[/dim]")
+    except Exception:
+        pass
+    return lines
 
 
 def run_textual_shell(container, chat_id: int = 0):
@@ -67,6 +176,9 @@ def run_textual_shell(container, chat_id: int = 0):
     class SideWidget(Static):
         pass
 
+    class StatusLineWidget(Static):
+        pass
+
     class BridgeTextualApp(App):
         CSS = """
         Screen {
@@ -99,6 +211,18 @@ def run_textual_shell(container, chat_id: int = 0):
             width: 34;
         }
 
+        #statusline {
+            height: 1;
+            padding: 0 2;
+            background: #111318;
+            color: #9aa3b2;
+            display: none;
+        }
+
+        #statusline.active {
+            display: block;
+        }
+
         #input {
             dock: bottom;
             margin: 0 1 0 1;
@@ -114,6 +238,8 @@ def run_textual_shell(container, chat_id: int = 0):
             super().__init__(*args, **kwargs)
             self.timeline_entries: list[str] = ["Shell ready."]
             self.orchestration_steps: list[str] = []
+            self._status_state: dict = {"action": "Starting…", "tokens": 0, "start": 0.0}
+            self._status_timer = None
 
         def _provider_color(self) -> str:
             mapping = {
@@ -131,6 +257,7 @@ def run_textual_shell(container, chat_id: int = 0):
                 with Horizontal():
                     yield StreamWidget("Ready.", id="stream")
                     yield SideWidget(self._side_text(), id="side")
+            yield StatusLineWidget("", id="statusline")
             yield Input(
                 placeholder="/help · /provider <name> · /orchestrate <task> · /remote-control",
                 id="input",
@@ -252,11 +379,80 @@ def run_textual_shell(container, chat_id: int = 0):
             self.query_one("#titlebar", TitleWidget).update(self._titlebar_text())
             self.query_one("#side", SideWidget).update(self._side_text())
 
+        def _status_renderable(self) -> str:
+            elapsed = _time.monotonic() - self._status_state["start"]
+            mins = int(elapsed // 60)
+            secs = int(elapsed % 60)
+            time_str = f"{mins}m {secs}s" if mins else f"{secs}s"
+            tokens = self._status_state["tokens"]
+            tok_str = f"↑ {tokens / 1000:.1f}k" if tokens >= 1000 else f"↑ {tokens}"
+            color = self._provider_color()
+            action = self._status_state["action"]
+            return f"[{color}]◆[/] {action}  [dim]({time_str} · {tok_str} tokens)[/dim]"
+
+        def _show_status_line(self, provider: str | None = None):
+            self._status_state["start"] = _time.monotonic()
+            sl = self.query_one("#statusline", StatusLineWidget)
+            sl.add_class("active")
+            sl.update(self._status_renderable())
+            if self._status_timer is not None:
+                self._status_timer.stop()
+            self._status_timer = self.set_interval(0.5, self._tick_status)
+
+        def _tick_status(self):
+            sl = self.query_one("#statusline", StatusLineWidget)
+            sl.update(self._status_renderable())
+
+        def _hide_status_line(self):
+            if self._status_timer is not None:
+                self._status_timer.stop()
+                self._status_timer = None
+            sl = self.query_one("#statusline", StatusLineWidget)
+            sl.remove_class("active")
+            sl.update("")
+
+        def _update_status_event(self, line: str):
+            action = _action_from_event(line)
+            if action:
+                self._status_state["action"] = action
+            if line.startswith("💬 "):
+                self._status_state["tokens"] += max(1, len(line[2:]) // 4)
+            self.query_one("#statusline", StatusLineWidget).update(self._status_renderable())
+
         def _append_stream(self, *lines: str):
             stream = self.query_one("#stream", StreamWidget)
             current = str(stream.renderable or "").splitlines()
             current.extend(line for line in lines if line is not None)
-            stream.update("\n".join(current[-30:]))
+            stream.update("\n".join(current[-40:]))
+
+        def _append_stream_event(self, line: str):
+            """Format and append a stream event line to the stream widget."""
+            color = self._provider_color()
+            if line.startswith("💬 "):
+                formatted = "  " + line[2:].strip()
+            elif line.startswith("🔧 Использую: ") or line.startswith("🔧 "):
+                tool = line.split(": ", 1)[-1].strip() if ": " in line else line[2:].strip()
+                formatted = f"  [{color}]✦[/] [dim]{tool}[/dim]"
+            elif line.startswith(("✏️ ", "📂 ")):
+                formatted = f"  [{color}]✦[/] [dim]{line[2:].strip()}[/dim]"
+            elif line.startswith("👁️ "):
+                formatted = f"  [dim]{line[2:].strip()}[/dim]"
+            elif line.startswith("🐚 "):
+                cmd = line[2:].strip()
+                for pfx in ("Запускаю: ", "Running: "):
+                    if cmd.startswith(pfx):
+                        cmd = cmd[len(pfx):]
+                        break
+                formatted = f"  [{color}]$[/] [dim]{cmd}[/dim]"
+            elif line.startswith("⚙️ "):
+                formatted = f"  [dim]{line[2:].strip()}[/dim]"
+            elif line.startswith(("❌ ", "✅ ")):
+                formatted = f"  [dim]{line}[/dim]"
+            elif line.startswith(("🧠 ", "🏁 ")):
+                return  # skip thinking and raw completion markers
+            else:
+                return
+            self._append_stream(formatted)
 
         def _add_timeline(self, message: str):
             self.timeline_entries.append(message)
@@ -536,41 +732,57 @@ def run_textual_shell(container, chat_id: int = 0):
             stream = self.query_one("#stream", StreamWidget)
             self.current_mode = "single"
             self._set_orchestration_steps([])
-            self._add_timeline(f"Started single task via {provider_name}.")
+            self._add_timeline(f"Started: {prompt[:48]}")
             self._refresh_all()
-            stream_lines: list[str] = [f"Running with {provider_name}..."]
 
-            async def status_callback(text: str):
-                if text:
-                    clean = _strip_html(text).strip()
-                    for line in clean.splitlines():
-                        line = line.strip()
-                        if line:
-                            stream_lines.append(line)
-                    self._add_timeline(clean[:72])
-                    stream.update("\n".join(stream_lines[-25:]))
+            cwd = str(session.file_mgr.get_working_dir())
+            color = self._provider_color()
+            stream.update(
+                f"[{color}]◆[/] [{color}]{provider_name}[/]  [dim]{cwd}[/dim]\n"
+                f"  [dim]{prompt[:120]}[/dim]\n"
+            )
+
+            self._status_state = {"action": "Starting…", "tokens": 0, "start": 0.0}
+            self._show_status_line(provider_name)
+
+            def stream_event_callback(line: str):
+                self._update_status_event(line)
+                self._append_stream_event(line)
 
             result = await container.execution_service.execute_provider_task(
                 session=session,
                 runtime=runtime,
                 provider_name=provider_name,
                 prompt=prompt,
-                status_callback=status_callback,
+                stream_event_callback=stream_event_callback,
             )
+            self._hide_status_line()
             container.remember_task_result(session, result)
             self.current_mode = "idle"
-            self._add_timeline(f"Finished single task exit_code={result.exit_code}.")
+            self._add_timeline(f"Done exit_code={result.exit_code}.")
             self._refresh_all()
-            stream.update(
-                "\n".join(
-                    [
-                        *stream_lines[-10:],
-                        "",
-                        f"exit_code: {result.exit_code}",
-                        result.answer_text[:3000],
-                    ]
-                )
-            )
+
+            # File diffs
+            diff_lines: list[str] = []
+            for f in result.new_files:
+                diff_lines.extend(_file_diff_text(f, is_new=True))
+            for f in result.changed_files:
+                diff_lines.extend(_file_diff_text(f, is_new=False))
+
+            # Final result
+            status_icon = f"[{color}]✓[/]" if result.exit_code == 0 else "[red]✗[/red]"
+            duration = getattr(result, "duration_text", "")
+            final_parts = [
+                "",
+                *diff_lines,
+            ]
+            if result.answer_text.strip():
+                final_parts += ["", result.answer_text.strip()[:3000]]
+            final_parts += [
+                "",
+                f"  {status_icon} [{color}]{provider_name}[/]  [dim]{duration}[/dim]",
+            ]
+            self._append_stream(*final_parts)
 
         async def _run_orchestration(self, prompt: str):
             session = container.get_session(chat_id)
@@ -592,18 +804,24 @@ def run_textual_shell(container, chat_id: int = 0):
                 ]
             )
             cwd = str(session.file_mgr.get_working_dir())
-            stream_lines: list[str] = [
-                f"strategy: {plan.strategy}",
-                f"cwd: {cwd}",
-                *[
-                    f"  {index}. {item.title} [{item.suggested_provider}]"
-                    for index, item in enumerate(plan.subtasks, start=1)
-                ],
-                "",
-                "Starting orchestration...",
-            ]
-            stream.update("\n".join(stream_lines))
+            color = self._provider_color()
+            stream.update(
+                "\n".join([
+                    f"[{color}]◆[/] orchestrate  [dim]{cwd}[/dim]",
+                    f"  [dim]{prompt[:120]}[/dim]",
+                    "",
+                    f"  strategy: {plan.strategy}",
+                    *[
+                        f"  [dim]{i}. {item.title} [{item.suggested_provider}][/dim]"
+                        for i, item in enumerate(plan.subtasks, start=1)
+                    ],
+                ])
+            )
             current_step = {"index": -1}
+            step_start = [_time.monotonic()]
+
+            self._status_state = {"action": "Planning…", "tokens": 0, "start": 0.0}
+            self._show_status_line()
 
             async def status_callback(text: str):
                 if not text:
@@ -615,39 +833,41 @@ def run_textual_shell(container, chat_id: int = 0):
                     if current_step["index"] >= 0:
                         self._mark_orchestration_step(current_step["index"], "done")
                     current_step["index"] = next_index
-                    self._mark_orchestration_step(current_step["index"], "running")
-                    # Emit step header with folder context
-                    stream_lines.append("")
-                    stream_lines.append(f"{'─' * 40}")
-                    stream_lines.append(clean)
-                    stream_lines.append(f"folder: {cwd}")
+                    self._mark_orchestration_step(next_index, "running")
+                    subtask = plan.subtasks[next_index]
+                    step_start[0] = _time.monotonic()
+                    self._status_state.update({"action": f"Step {next_index+1}/{len(plan.subtasks)}…", "tokens": 0, "start": step_start[0]})
+                    step_color = self._provider_color()
+                    self._append_stream(
+                        "",
+                        f"[dim]{'─' * 38}[/dim]",
+                        f"[{step_color}]▶[/] [bold]Step {next_index+1}/{len(plan.subtasks)}[/bold]  {subtask.title}  [dim][{subtask.suggested_provider}][/dim]",
+                        f"  [dim]{cwd}[/dim]",
+                    )
                 elif "собирает итог" in lowered:
                     if 0 <= current_step["index"] < len(plan.subtasks):
                         self._mark_orchestration_step(current_step["index"], "done")
                     self._mark_orchestration_step(len(plan.subtasks), "running")
-                    stream_lines.append("")
-                    stream_lines.append(f"{'─' * 40}")
-                    stream_lines.append(clean)
+                    self._status_state.update({"action": "Synthesizing…", "tokens": 0, "start": _time.monotonic()})
+                    self._append_stream("", f"[dim]{'─' * 38}[/dim]", f"[{color}]▶[/] [bold]Synthesis[/bold]")
                 elif "выполняет review" in lowered:
                     self._mark_orchestration_step(len(plan.subtasks), "done")
                     self._mark_orchestration_step(len(plan.subtasks) + 1, "running")
-                    stream_lines.append("")
-                    stream_lines.append(f"{'─' * 40}")
-                    stream_lines.append(clean)
-                else:
-                    # Model commentary / tool activity lines
-                    for line in clean.splitlines():
-                        line = line.strip()
-                        if line:
-                            stream_lines.append(line)
+                    self._status_state.update({"action": "Reviewing…", "tokens": 0, "start": _time.monotonic()})
+                    self._append_stream("", f"[dim]{'─' * 38}[/dim]", f"[{color}]▶[/] [bold]Review[/bold]")
                 self._add_timeline(clean[:72])
-                stream.update("\n".join(stream_lines[-30:]))
+
+            def stream_event_callback(line: str):
+                self._update_status_event(line)
+                self._append_stream_event(line)
 
             task_run, aggregate_result = await container.orchestrator_service.run_orchestrated_task(
                 session=session,
                 plan=plan,
                 status_callback=status_callback,
+                stream_event_callback=stream_event_callback,
             )
+            self._hide_status_line()
             self.current_mode = "idle"
             if 0 <= current_step["index"] < len(plan.subtasks):
                 self._mark_orchestration_step(current_step["index"], "done")
@@ -656,34 +876,31 @@ def run_textual_shell(container, chat_id: int = 0):
                 len(plan.subtasks) + 1,
                 "done" if task_run.review_answer else "skipped",
             )
-            self._add_timeline(f"Finished orchestration status={task_run.status}.")
+            self._add_timeline(f"Done status={task_run.status}.")
             self._refresh_all()
 
-            # Build final summary with per-subtask file changes and model answers
-            final_lines: list[str] = [
-                f"{'═' * 40}",
-                f"status: {task_run.status}  cwd: {cwd}",
+            # Per-subtask file diffs
+            result_lines: list[str] = [
                 "",
+                f"[dim]{'═' * 38}[/dim]",
+                f"status: {task_run.status}  [dim]{cwd}[/dim]",
             ]
             for subtask in task_run.subtasks:
-                status_icon = "✓" if subtask.status == "success" else "✗"
-                final_lines.append(f"{status_icon} [{subtask.provider}] {subtask.title}")
-                if subtask.new_files:
-                    final_lines.append("  + " + "  + ".join(Path(f).name for f in subtask.new_files[:6]))
-                if subtask.changed_files:
-                    final_lines.append("  ~ " + "  ~ ".join(Path(f).name for f in subtask.changed_files[:6]))
+                st_icon = "[green]✓[/green]" if subtask.status == "success" else "[red]✗[/red]"
+                result_lines.append(f"\n  {st_icon} [{self._provider_color()}]{subtask.provider}[/]  [dim]{subtask.title}[/dim]")
+                for f in subtask.new_files[:6]:
+                    result_lines.extend(_file_diff_text(f, is_new=True))
+                for f in subtask.changed_files[:6]:
+                    result_lines.extend(_file_diff_text(f, is_new=False))
                 if subtask.answer_text.strip():
                     excerpt = subtask.answer_text.strip()[:300].replace("\n", " ")
-                    final_lines.append(f"  > {excerpt}")
-                final_lines.append("")
+                    result_lines.append(f"  [dim]> {excerpt}[/dim]")
 
             if task_run.review_answer:
-                final_lines.append("Review:")
-                final_lines.append(task_run.review_answer.strip()[:600])
+                result_lines += ["", "[bold]Review:[/bold]", task_run.review_answer.strip()[:600]]
             elif aggregate_result.answer_text.strip():
-                final_lines.append("Result:")
-                final_lines.append(aggregate_result.answer_text.strip()[:1800])
+                result_lines += ["", aggregate_result.answer_text.strip()[:2000]]
 
-            stream.update("\n".join(final_lines))
+            self._append_stream(*result_lines)
 
     BridgeTextualApp().run()

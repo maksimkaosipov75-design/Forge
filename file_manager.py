@@ -28,7 +28,7 @@ class FileManager:
         self.projects_file = projects_file
         self.projects: dict[str, Project] = {}
         self.current_project: Optional[Project] = None
-        self.working_dir = Path.cwd()
+        self.working_dir = Path.home()
         self._load_projects()
 
     def _load_projects(self):
@@ -127,7 +127,7 @@ class FileManager:
         if not target.exists() or not target.is_dir():
             return f"❌ Директория не найдена: {_esc(target)}"
 
-        lines = [f"📁 <code>{_esc(target)}</code>"]
+        lines = [f"{target}"]
         self._build_tree(target, lines, max_depth, current_depth, prefix="")
         return "\n".join(lines)
 
@@ -143,7 +143,7 @@ class FileManager:
             is_last = i == len(items) - 1
             connector = "└── " if is_last else "├── "
             icon = "📂" if item.is_dir() else "📄"
-            lines.append(f"{prefix}{connector}{icon} <code>{_esc(item.name)}</code>")
+            lines.append(f"{prefix}{connector}{icon} {item.name}")
 
             if item.is_dir():
                 extension = "    " if is_last else "│   "

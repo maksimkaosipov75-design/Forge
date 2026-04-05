@@ -1,4 +1,5 @@
 import re
+from html import escape
 from dataclasses import dataclass, field
 from typing import List, Optional
 from enum import Enum
@@ -36,6 +37,7 @@ class AgentState:
     tool_use_count: int = 0
     last_file_action: str = ""
     last_file_path: str = ""
+    last_tool_name: str = ""
 
 
 class LogParser:
@@ -92,6 +94,7 @@ class LogParser:
             if event.category == ActionCategory.TOOL:
                 self.state.tool_use_count += 1
                 self.state.is_busy = True
+                self.state.last_tool_name = event.tool_name or event.text or "tool"
 
                 # Определяем тип инструмента и файл
                 if event.tool_name in ("write_file", "edit"):
@@ -108,7 +111,7 @@ class LogParser:
                     self.state.current_action = f"👁️ Читает {event.file_path or '?'}"
 
                 elif event.tool_name == "run_shell_command":
-                    self.state.current_action = f"🐚 Запускает команду"
+                    self.state.current_action = "🐚 Запускает команду"
                     if event.text:
                         cmd = event.text[:50]
                         self.state.commands_run.append(cmd)
@@ -117,9 +120,7 @@ class LogParser:
                     self.state.current_action = f"🔧 {event.tool_name}"
 
             elif event.category == ActionCategory.THINKING:
-                # Thinking — обновляем статус, но не считаем шагом
-                preview = event.text[:80] + "..." if len(event.text) > 80 else event.text
-                # Не показываем thinking как текущее действие — только в логе
+                # Thinking в статус не выносим, чтобы не засорять UI.
                 pass
 
             elif event.category == ActionCategory.DONE:
@@ -177,23 +178,24 @@ class LogParser:
     def _parse_stream_event(self, line: str) -> Optional[StreamEvent]:
         """Парсит строку как stream-json событие."""
         if line.startswith("🧠 "):
-            return StreamEvent(category=ActionCategory.THINKING, text=line[2:])
+            return StreamEvent(category=ActionCategory.THINKING, text=line[2:].strip())
         elif line.startswith("💬 "):
-            return StreamEvent(category=ActionCategory.TEXT, text=line[2:])
+            return StreamEvent(category=ActionCategory.TEXT, text=line[2:].strip())
         elif line.startswith("🔧 Использую: "):
-            tool = line[6:]
-            return StreamEvent(category=ActionCategory.TOOL, text="", tool_name=tool.lower())
+            tool = line[len("🔧 Использую: "):].strip()
+            return StreamEvent(category=ActionCategory.TOOL, text=tool, tool_name=tool.lower())
         elif line.startswith("🔧 "):
-            return StreamEvent(category=ActionCategory.TOOL, text=line[2:])
+            tool_text = line[2:].strip()
+            return StreamEvent(category=ActionCategory.TOOL, text=tool_text, tool_name=tool_text.lower())
         elif line.startswith("⚙️ "):
-            return StreamEvent(category=ActionCategory.SYSTEM, text=line[2:])
+            return StreamEvent(category=ActionCategory.SYSTEM, text=line[2:].strip())
         elif line.startswith("🏁 "):
-            return StreamEvent(category=ActionCategory.DONE, text=line[2:])
+            return StreamEvent(category=ActionCategory.DONE, text=line[2:].strip())
         return None
 
     def get_status_text(self) -> str:
         s = self.state
-        status = f"📊 Статус: {s.current_action}\n"
+        status = f"📊 Статус: {escape(s.current_action)}\n"
 
         # Прогресс-бар
         if s.is_busy and s.tool_use_count > 0:
@@ -204,32 +206,36 @@ class LogParser:
         if s.total_steps > 0:
             status += f"📈 Прогресс: {s.completed_steps}/{s.total_steps}\n"
         if s.files_touched:
-            status += f"📁 Файлы: {', '.join(s.files_touched[-5:])}\n"
+            status += f"📁 Файлы: {escape(', '.join(s.files_touched[-5:]))}\n"
         if s.last_error:
-            status += f"❌ Ошибка: {s.last_error[:80]}\n"
+            status += f"❌ Ошибка: {escape(s.last_error[:80])}\n"
         status += f"{'🟢 Занят' if s.is_busy else '🔴 Свободен'}"
         return status
 
     def get_progress_summary(self) -> str:
-        """Формирует компактное резюме для стриминга.
-        Формат: текущее действие + счётчик + последние инструменты."""
+        """Формирует компактное резюме для стриминга."""
         s = self.state
 
         parts = []
 
-        # Текущее действие
         if s.current_action and s.current_action != "Ожидание команды":
             parts.append(f"<b>{s.current_action}</b>")
 
-        # Прогресс-бар
         if s.is_busy and s.tool_use_count > 0:
             blocks = min(s.tool_use_count, 10)
             bar = "█" * blocks + "░" * (10 - blocks)
-            parts.append(f"[{bar}] {s.tool_use_count} действий")
+            parts.append(f"<code>[{bar}]</code> использовано инструментов: {s.tool_use_count}")
 
-        # Последнее действие с файлом
+        if s.last_tool_name:
+            parts.append(f"🔧 Текущий шаг: <code>{self._escape_html(self._shorten(s.last_tool_name, 48))}</code>")
+
         if s.last_file_path:
-            parts.append(f"📂 {s.last_file_path}")
+            parts.append(f"📂 Файл: <code>{self._escape_html(self._shorten(s.last_file_path, 72))}</code>")
+
+        # Include last model commentary line so callers can show what the model said
+        recent_text = [e.text for e in s.events if e.category == ActionCategory.TEXT]
+        if recent_text:
+            parts.append(f"💬 {self._escape_html(self._shorten(recent_text[-1], 240))}")
 
         return "\n".join(parts)
 
@@ -263,11 +269,17 @@ class LogParser:
         """Очищает полный буфер для новой задачи."""
         self.full_buffer.clear()
         self.final_result = ""
-        # Очищаем события, но сохраняем файлы
+        self.state.raw_buffer.clear()
         self.state.events.clear()
         self.state.tool_use_count = 0
         self.state.last_file_action = ""
         self.state.last_file_path = ""
+        self.state.last_tool_name = ""
+        self.state.current_action = "Ожидание команды"
+        self.state.completed_steps = 0
+        self.state.total_steps = 0
+        self.state.last_error = ""
+        self.state.is_busy = False
 
     def mark_position(self) -> int:
         """Запоминаем текущую позицию в буфере."""
@@ -302,7 +314,7 @@ class LogParser:
         return None
 
     def format_final_response(self, result_text: str, files_new: list = None, files_changed: list = None) -> str:
-        """Форматирует финальный ответ с Markdown."""
+        """Форматирует финальный ответ для Telegram HTML."""
         parts = []
 
         if files_new:
@@ -324,6 +336,12 @@ class LogParser:
             parts.append(f"<b>📋 Ответ:</b>\n\n<pre>{escaped}</pre>")
 
         return "\n".join(parts)
+
+    @staticmethod
+    def _shorten(text: str, limit: int) -> str:
+        if len(text) <= limit:
+            return text
+        return text[: limit - 1] + "…"
 
     @staticmethod
     def _escape_html(text: str) -> str:

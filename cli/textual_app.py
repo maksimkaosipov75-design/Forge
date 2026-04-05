@@ -292,6 +292,7 @@ def run_textual_shell(container, chat_id: int = 0):
             self.orchestration_steps: list[str] = []
             self._status_state: dict = {"action": "Starting…", "tokens": 0, "start": 0.0, "input_tokens": 0, "output_tokens": 0}
             self._status_timer = None
+            self._stream_lines: list[str] = []  # owned copy of stream widget content
             self._active_runtime = None  # for Ctrl+C cancel
             self._input_history: list[str] = []
             self._history_pos: int = -1
@@ -487,11 +488,15 @@ def run_textual_shell(container, chat_id: int = 0):
                     pass
             self.query_one("#statusline", StatusLineWidget).update(self._status_renderable())
 
+        def _set_stream(self, content: str):
+            """Replace stream content and sync _stream_lines."""
+            self._stream_lines = content.splitlines() if content else []
+            self.query_one("#stream", StreamWidget).update(content)
+
         def _append_stream(self, *lines: str):
-            stream = self.query_one("#stream", StreamWidget)
-            current = str(stream.renderable or "").splitlines()
-            current.extend(line for line in lines if line is not None)
-            stream.update("\n".join(current[-40:]))
+            self._stream_lines.extend(line for line in lines if line is not None)
+            self._stream_lines = self._stream_lines[-40:]
+            self.query_one("#stream", StreamWidget).update("\n".join(self._stream_lines))
 
         def _append_stream_event(self, line: str):
             """Format and append a stream event line to the stream widget."""
@@ -625,7 +630,7 @@ def run_textual_shell(container, chat_id: int = 0):
                 self.current_mode = "idle"
                 self._set_orchestration_steps([])
                 self._add_timeline("Workspace reset.")
-                stream.update("Ready.")
+                self._set_stream("Ready.")
                 self._refresh_all()
                 return
             if command == "/help":
@@ -850,7 +855,7 @@ def run_textual_shell(container, chat_id: int = 0):
             cwd = str(session.file_mgr.get_working_dir())
             expanded_prompt = _expand_file_mentions(prompt, cwd)
             color = self._provider_color()
-            stream.update(
+            self._set_stream(
                 f"[{color}]◆[/] [{color}]{provider_name}[/]  [dim]{cwd}[/dim]\n"
                 f"  [dim]{prompt[:120]}[/dim]\n"
             )
@@ -921,7 +926,7 @@ def run_textual_shell(container, chat_id: int = 0):
             )
             cwd = str(session.file_mgr.get_working_dir())
             color = self._provider_color()
-            stream.update(
+            self._set_stream(
                 "\n".join([
                     f"[{color}]◆[/] orchestrate  [dim]{cwd}[/dim]",
                     f"  [dim]{prompt[:120]}[/dim]",

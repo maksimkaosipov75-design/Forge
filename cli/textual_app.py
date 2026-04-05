@@ -298,6 +298,7 @@ def run_textual_shell(container, chat_id: int = 0):
             self._status_state: dict = {"action": "Starting…", "tokens": 0, "start": 0.0, "input_tokens": 0, "output_tokens": 0}
             self._status_timer = None
             self._stream_lines: list[str] = []  # owned copy of stream widget content
+            self._last_stream_was_text: bool = False  # for merging consecutive 💬 chunks
             self._active_runtime = None  # for Ctrl+C cancel
             self._input_history: list[str] = []
             self._history_pos: int = -1
@@ -496,9 +497,11 @@ def run_textual_shell(container, chat_id: int = 0):
         def _set_stream(self, content: str):
             """Replace stream content and sync _stream_lines."""
             self._stream_lines = content.splitlines() if content else []
+            self._last_stream_was_text = False
             self.query_one("#stream", StreamWidget).update(content)
 
         def _append_stream(self, *lines: str):
+            self._last_stream_was_text = False
             self._stream_lines.extend(line for line in lines if line is not None)
             self._stream_lines = self._stream_lines[-40:]
             self.query_one("#stream", StreamWidget).update("\n".join(self._stream_lines))
@@ -507,8 +510,19 @@ def run_textual_shell(container, chat_id: int = 0):
             """Format and append a stream event line to the stream widget."""
             color = self._provider_color()
             if line.startswith("💬 "):
-                formatted = "  " + line[2:].strip()
-            elif line.startswith("🔧 Использую: ") or line.startswith("🔧 "):
+                chunk = line[2:].strip()
+                if self._last_stream_was_text and self._stream_lines:
+                    # Merge with the previous text line — streaming arrives as small chunks
+                    self._stream_lines[-1] = self._stream_lines[-1] + chunk
+                else:
+                    self._stream_lines.append("  " + chunk)
+                    self._last_stream_was_text = True
+                self._stream_lines = self._stream_lines[-40:]
+                self.query_one("#stream", StreamWidget).update("\n".join(self._stream_lines))
+                return
+            # Any non-text event ends the current text run
+            self._last_stream_was_text = False
+            if line.startswith("🔧 Использую: ") or line.startswith("🔧 "):
                 tool = line.split(": ", 1)[-1].strip() if ": " in line else line[2:].strip()
                 formatted = f"  [{color}]✦[/] [dim]{tool}[/dim]"
             elif line.startswith(("✏️ ", "📂 ")):
@@ -530,7 +544,9 @@ def run_textual_shell(container, chat_id: int = 0):
                 return  # skip thinking, raw completion markers, and token counts
             else:
                 return
-            self._append_stream(formatted)
+            self._stream_lines.append(formatted)
+            self._stream_lines = self._stream_lines[-40:]
+            self.query_one("#stream", StreamWidget).update("\n".join(self._stream_lines))
 
         def _add_timeline(self, message: str):
             self.timeline_entries.append(message)
@@ -866,6 +882,7 @@ def run_textual_shell(container, chat_id: int = 0):
             )
 
             self._status_state = {"action": "Starting…", "tokens": 0, "start": 0.0, "input_tokens": 0, "output_tokens": 0}
+            self._last_stream_was_text = False
             self._show_status_line(provider_name)
 
             def stream_event_callback(line: str):
@@ -947,6 +964,7 @@ def run_textual_shell(container, chat_id: int = 0):
             step_start = [_time.monotonic()]
 
             self._status_state = {"action": "Planning…", "tokens": 0, "start": 0.0, "input_tokens": 0, "output_tokens": 0}
+            self._last_stream_was_text = False
             self._show_status_line()
 
             async def status_callback(text: str):

@@ -114,8 +114,12 @@ def _git_diff(path: Path) -> str | None:
     return None
 
 
-def _file_diff_text(file_path: str, is_new: bool, max_lines: int = 35) -> list[str]:
-    """Return markup lines for a file diff/preview (for Textual Static)."""
+def _file_diff_text(file_path: str, is_new: bool, max_lines: int = 35, add_color: str = "green") -> list[str]:
+    """Return markup lines for a file diff/preview.
+
+    add_color controls the color of added lines (+ lines and new-file content).
+    Use the provider's accent color so diffs are visually attributed per agent.
+    """
     path = Path(file_path)
     if not path.exists():
         return []
@@ -124,7 +128,7 @@ def _file_diff_text(file_path: str, is_new: bool, max_lines: int = 35) -> list[s
     except OSError:
         return []
 
-    icon = "[green]+[/green]" if is_new else "[yellow]~[/yellow]"
+    icon = f"[{add_color}]+[/{add_color}]" if is_new else "[yellow]~[/yellow]"
     try:
         n = len(path.read_text(errors="replace").splitlines()) if size < 500_000 else 0
     except Exception:
@@ -145,11 +149,11 @@ def _file_diff_text(file_path: str, is_new: bool, max_lines: int = 35) -> list[s
             ][:max_lines]
             for ln in hunk_lines:
                 if ln.startswith("+"):
-                    lines.append(f"  [green]{ln}[/green]")
+                    lines.append(f"  [{add_color}]{ln}[/{add_color}]")
                 elif ln.startswith("-"):
                     lines.append(f"  [red]{ln}[/red]")
                 elif ln.startswith("@@"):
-                    lines.append(f"  [cyan]{ln}[/cyan]")
+                    lines.append(f"  [dim]{ln}[/dim]")
                 else:
                     lines.append(f"  [dim]{ln}[/dim]")
             if len(hunk_lines) == max_lines:
@@ -160,11 +164,12 @@ def _file_diff_text(file_path: str, is_new: bool, max_lines: int = 35) -> list[s
     try:
         content = path.read_text(errors="replace").splitlines()
         shown = content[:max_lines]
-        prefix = "[green]+ " if is_new else "  "
-        suffix_close = "[/green]" if is_new else ""
         for ln in shown:
             safe = ln.replace("[", "\\[")
-            lines.append(f"  {prefix}{safe}{suffix_close}")
+            if is_new:
+                lines.append(f"  [{add_color}]+ {safe}[/{add_color}]")
+            else:
+                lines.append(f"  [dim]{safe}[/dim]")
         if len(content) > max_lines:
             lines.append(f"  [dim]... ({len(content) - max_lines} more lines)[/dim]")
     except Exception:
@@ -881,12 +886,12 @@ def run_textual_shell(container, chat_id: int = 0):
             self._add_timeline(f"Done exit_code={result.exit_code}.")
             self._refresh_all()
 
-            # File diffs
+            # File diffs — use provider's accent color for added lines
             diff_lines: list[str] = []
             for f in result.new_files:
-                diff_lines.extend(_file_diff_text(f, is_new=True))
+                diff_lines.extend(_file_diff_text(f, is_new=True, add_color=color))
             for f in result.changed_files:
-                diff_lines.extend(_file_diff_text(f, is_new=False))
+                diff_lines.extend(_file_diff_text(f, is_new=False, add_color=color))
 
             # Final result
             status_icon = f"[{color}]✓[/]" if result.exit_code == 0 else "[red]✗[/red]"
@@ -1009,11 +1014,14 @@ def run_textual_shell(container, chat_id: int = 0):
             ]
             for subtask in task_run.subtasks:
                 st_icon = "[green]✓[/green]" if subtask.status == "success" else "[red]✗[/red]"
-                result_lines.append(f"\n  {st_icon} [{self._provider_color()}]{subtask.provider}[/]  [dim]{subtask.title}[/dim]")
+                subtask_color = {
+                    "qwen": "#b07cff", "codex": "#6aa7ff", "claude": "#ff9e57",
+                }.get(subtask.provider, "#6aa7ff")
+                result_lines.append(f"\n  {st_icon} [{subtask_color}]{subtask.provider}[/]  [dim]{subtask.title}[/dim]")
                 for f in subtask.new_files[:6]:
-                    result_lines.extend(_file_diff_text(f, is_new=True))
+                    result_lines.extend(_file_diff_text(f, is_new=True, add_color=subtask_color))
                 for f in subtask.changed_files[:6]:
-                    result_lines.extend(_file_diff_text(f, is_new=False))
+                    result_lines.extend(_file_diff_text(f, is_new=False, add_color=subtask_color))
                 if subtask.answer_text.strip():
                     excerpt = subtask.answer_text.strip()[:300].replace("\n", " ")
                     result_lines.append(f"  [dim]> {excerpt}[/dim]")

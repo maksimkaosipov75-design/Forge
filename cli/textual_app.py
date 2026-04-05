@@ -45,6 +45,58 @@ def _action_from_event(line: str) -> str | None:
     return None
 
 
+def _expand_file_mentions(prompt: str, cwd: str) -> str:
+    """Replace @path/to/file with the file content inline."""
+    import re
+    base = Path(cwd)
+
+    def replacer(m: _re.Match) -> str:
+        raw_path = m.group(1)
+        candidate = Path(raw_path)
+        if not candidate.is_absolute():
+            candidate = base / raw_path
+        try:
+            if candidate.is_file() and candidate.stat().st_size < 200_000:
+                content = candidate.read_text(errors="replace")
+                rel = raw_path
+                return f"@{rel}\n```\n{content}\n```"
+        except Exception:
+            pass
+        return m.group(0)
+
+    return _re.sub(r"@([\w./\-]+)", replacer, prompt)
+
+
+_git_status_cache: dict[str, tuple[float, str]] = {}
+
+
+def _git_status_short(cwd: str) -> str:
+    """Return a short git status string, cached for 5 seconds."""
+    now = _time.monotonic()
+    cached = _git_status_cache.get(cwd)
+    if cached and now - cached[0] < 5.0:
+        return cached[1]
+    try:
+        result = _subprocess.run(
+            ["git", "status", "--short", "--branch"],
+            capture_output=True, text=True, cwd=cwd, timeout=2,
+        )
+        lines = result.stdout.strip().splitlines()
+        if not lines:
+            status = ""
+        else:
+            branch_line = lines[0]  # e.g. "## main...origin/main"
+            branch = branch_line.lstrip("#").strip().split("…")[0].split(".")[0].strip()
+            changed = len([l for l in lines[1:] if l.strip()])
+            status = branch
+            if changed:
+                status += f" *{changed}"
+    except Exception:
+        status = ""
+    _git_status_cache[cwd] = (now, status)
+    return status
+
+
 def _git_diff(path: Path) -> str | None:
     for args in (
         ["git", "diff", "HEAD", "--", str(path)],
@@ -238,8 +290,12 @@ def run_textual_shell(container, chat_id: int = 0):
             super().__init__(*args, **kwargs)
             self.timeline_entries: list[str] = ["Shell ready."]
             self.orchestration_steps: list[str] = []
-            self._status_state: dict = {"action": "Starting…", "tokens": 0, "start": 0.0}
+            self._status_state: dict = {"action": "Starting…", "tokens": 0, "start": 0.0, "input_tokens": 0, "output_tokens": 0}
             self._status_timer = None
+            self._active_runtime = None  # for Ctrl+C cancel
+            self._input_history: list[str] = []
+            self._history_pos: int = -1
+            self._history_draft: str = ""  # saves current draft when navigating history
 
         def _provider_color(self) -> str:
             mapping = {
@@ -274,9 +330,11 @@ def run_textual_shell(container, chat_id: int = 0):
             cwd = str(session.file_mgr.get_working_dir())
             specialties = {"qwen": "python·data", "codex": "backend·refactor", "claude": "ui·writing"}
             spec = specialties.get(self.current_provider, "general")
+            git = _git_status_short(cwd)
+            git_part = f"  git:{git}" if git else ""
             return (
                 f">_ {self.current_provider.upper()} [{spec}]  "
-                f"{cwd}  "
+                f"{cwd}{git_part}  "
                 f"mode:{self.current_mode}  remote:{self.remote_state}"
             )
 
@@ -384,7 +442,10 @@ def run_textual_shell(container, chat_id: int = 0):
             mins = int(elapsed // 60)
             secs = int(elapsed % 60)
             time_str = f"{mins}m {secs}s" if mins else f"{secs}s"
-            tokens = self._status_state["tokens"]
+            # Prefer real API token counts; fall back to estimated
+            out_tok = self._status_state.get("output_tokens", 0)
+            est_tok = self._status_state.get("tokens", 0)
+            tokens = out_tok if out_tok else est_tok
             tok_str = f"↑ {tokens / 1000:.1f}k" if tokens >= 1000 else f"↑ {tokens}"
             color = self._provider_color()
             action = self._status_state["action"]
@@ -417,6 +478,13 @@ def run_textual_shell(container, chat_id: int = 0):
                 self._status_state["action"] = action
             if line.startswith("💬 "):
                 self._status_state["tokens"] += max(1, len(line[2:]) // 4)
+            elif line.startswith("🔢 "):
+                try:
+                    parts = line[2:].strip().split(",")
+                    self._status_state["input_tokens"] = int(parts[0])
+                    self._status_state["output_tokens"] = int(parts[1]) if len(parts) > 1 else 0
+                except (ValueError, IndexError):
+                    pass
             self.query_one("#statusline", StatusLineWidget).update(self._status_renderable())
 
         def _append_stream(self, *lines: str):
@@ -448,8 +516,8 @@ def run_textual_shell(container, chat_id: int = 0):
                 formatted = f"  [dim]{line[2:].strip()}[/dim]"
             elif line.startswith(("❌ ", "✅ ")):
                 formatted = f"  [dim]{line}[/dim]"
-            elif line.startswith(("🧠 ", "🏁 ")):
-                return  # skip thinking and raw completion markers
+            elif line.startswith(("🧠 ", "🏁 ", "🔢 ")):
+                return  # skip thinking, raw completion markers, and token counts
             else:
                 return
             self._append_stream(formatted)
@@ -477,6 +545,41 @@ def run_textual_shell(container, chat_id: int = 0):
         async def on_key(self, event) -> None:
             if event.key == "?":
                 await self._handle_command("/help")
+                return
+            if event.key == "ctrl+c":
+                if self._active_runtime is not None:
+                    runtime_to_stop = self._active_runtime
+                    self._active_runtime = None
+                    asyncio.create_task(runtime_to_stop.manager.stop())
+                    self._append_stream("  [yellow]↩ Cancelled[/yellow]")
+                    self._hide_status_line()
+                    self.current_mode = "idle"
+                return
+            input_widget = self.query_one("#input", Input)
+            if event.key == "up":
+                if not self._input_history:
+                    return
+                if self._history_pos == -1:
+                    self._history_draft = input_widget.value
+                    self._history_pos = len(self._input_history) - 1
+                elif self._history_pos > 0:
+                    self._history_pos -= 1
+                input_widget.value = self._input_history[self._history_pos]
+                input_widget.cursor_position = len(input_widget.value)
+                event.prevent_default()
+                return
+            if event.key == "down":
+                if self._history_pos == -1:
+                    return
+                if self._history_pos < len(self._input_history) - 1:
+                    self._history_pos += 1
+                    input_widget.value = self._input_history[self._history_pos]
+                else:
+                    self._history_pos = -1
+                    input_widget.value = self._history_draft
+                input_widget.cursor_position = len(input_widget.value)
+                event.prevent_default()
+                return
 
         async def on_input_changed(self, event: Input.Changed) -> None:
             self.current_input = event.value
@@ -486,9 +589,17 @@ def run_textual_shell(container, chat_id: int = 0):
             value = event.value.strip()
             event.input.value = ""
             self.current_input = ""
+            self._history_pos = -1
+            self._history_draft = ""
             self.query_one("#side", SideWidget).update(self._side_text())
             if not value:
                 return
+
+            # Push to history (deduplicate consecutive identical entries)
+            if not self._input_history or self._input_history[-1] != value:
+                self._input_history.append(value)
+                if len(self._input_history) > 100:
+                    self._input_history = self._input_history[-100:]
 
             suggestion = getattr(event.input, "_suggestion", "")
             if value.startswith("/") and " " not in value and suggestion and suggestion != value:
@@ -731,18 +842,20 @@ def run_textual_shell(container, chat_id: int = 0):
             runtime = await container.ensure_runtime_started(session, provider_name)
             stream = self.query_one("#stream", StreamWidget)
             self.current_mode = "single"
+            self._active_runtime = runtime
             self._set_orchestration_steps([])
             self._add_timeline(f"Started: {prompt[:48]}")
             self._refresh_all()
 
             cwd = str(session.file_mgr.get_working_dir())
+            expanded_prompt = _expand_file_mentions(prompt, cwd)
             color = self._provider_color()
             stream.update(
                 f"[{color}]◆[/] [{color}]{provider_name}[/]  [dim]{cwd}[/dim]\n"
                 f"  [dim]{prompt[:120]}[/dim]\n"
             )
 
-            self._status_state = {"action": "Starting…", "tokens": 0, "start": 0.0}
+            self._status_state = {"action": "Starting…", "tokens": 0, "start": 0.0, "input_tokens": 0, "output_tokens": 0}
             self._show_status_line(provider_name)
 
             def stream_event_callback(line: str):
@@ -753,10 +866,11 @@ def run_textual_shell(container, chat_id: int = 0):
                 session=session,
                 runtime=runtime,
                 provider_name=provider_name,
-                prompt=prompt,
+                prompt=expanded_prompt,
                 stream_event_callback=stream_event_callback,
             )
             self._hide_status_line()
+            self._active_runtime = None
             container.remember_task_result(session, result)
             self.current_mode = "idle"
             self._add_timeline(f"Done exit_code={result.exit_code}.")
@@ -790,7 +904,9 @@ def run_textual_shell(container, chat_id: int = 0):
             self.current_mode = "orchestrated"
             self._add_timeline("Started orchestration.")
             self._refresh_all()
-            plan = container.build_planner(session).build_plan(prompt)
+            cwd_for_expand = str(session.file_mgr.get_working_dir())
+            expanded_prompt = _expand_file_mentions(prompt, cwd_for_expand)
+            plan = container.build_planner(session).build_plan(expanded_prompt)
             session.last_plan = plan
             container.save_session(session)
             self._set_orchestration_steps(
@@ -820,7 +936,7 @@ def run_textual_shell(container, chat_id: int = 0):
             current_step = {"index": -1}
             step_start = [_time.monotonic()]
 
-            self._status_state = {"action": "Planning…", "tokens": 0, "start": 0.0}
+            self._status_state = {"action": "Planning…", "tokens": 0, "start": 0.0, "input_tokens": 0, "output_tokens": 0}
             self._show_status_line()
 
             async def status_callback(text: str):
@@ -868,6 +984,7 @@ def run_textual_shell(container, chat_id: int = 0):
                 stream_event_callback=stream_event_callback,
             )
             self._hide_status_line()
+            self._active_runtime = None
             self.current_mode = "idle"
             if 0 <= current_step["index"] < len(plan.subtasks):
                 self._mark_orchestration_step(current_step["index"], "done")

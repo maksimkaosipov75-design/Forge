@@ -151,6 +151,11 @@ class QwenProcessManager(BaseProcessManager):
             duration_ms = payload.get("duration_ms", 0)
             events.append(f"🏁 Завершено ({subtype}): {duration_ms}ms")
             final_text = payload.get("result", "") or None
+            usage = payload.get("usage") or {}
+            input_tokens = usage.get("input_tokens") or usage.get("inputTokens") or 0
+            output_tokens = usage.get("output_tokens") or usage.get("outputTokens") or 0
+            if input_tokens or output_tokens:
+                events.append(f"🔢 {input_tokens},{output_tokens}")
 
         return events, final_text
 
@@ -427,7 +432,13 @@ class ClaudeProcessManager(BaseProcessManager):
             subtype = payload.get("subtype", "success")
             duration_ms = payload.get("duration_ms", 0)
             result_text = payload.get("result", "") or None
-            return [f"🏁 Завершено ({subtype}): {duration_ms}ms"], result_text
+            usage = payload.get("usage") or {}
+            input_tokens = usage.get("input_tokens") or usage.get("inputTokens") or 0
+            output_tokens = usage.get("output_tokens") or usage.get("outputTokens") or 0
+            events = [f"🏁 Завершено ({subtype}): {duration_ms}ms"]
+            if input_tokens or output_tokens:
+                events.append(f"🔢 {input_tokens},{output_tokens}")
+            return events, result_text
 
         if payload_type == "error":
             message = payload.get("message", "")

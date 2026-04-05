@@ -293,7 +293,7 @@ class LogParser:
     def get_actionable_line(self, line: str) -> str:
         """Извлекает значимую строку действия из stream-json вывода."""
         # Stream-json уже имеет чистые события с эмодзи
-        if line.startswith(("⚙️", "🧠", "💬", "🔧", "🏁")):
+        if line.startswith(("⚙️", "🧠", "💬", "🔧", "🏁", "🔢", "✏️", "📂", "👁️", "🐚", "❌", "✅")):
             return line
         if line.startswith("__READY__"):
             return None

@@ -60,6 +60,13 @@ def _clipboard_paste() -> str:
                 return result.stdout
         except Exception:
             pass
+    # Fallback: read from temp file written by _clipboard_copy()
+    try:
+        tmp = Path("/tmp/bridge-clipboard.txt")
+        if tmp.exists():
+            return tmp.read_text(encoding="utf-8")
+    except Exception:
+        pass
     return ""
 
 _LANG_MAP = {
@@ -892,6 +899,12 @@ def run_textual_shell(container, chat_id: int = 0):
                 text = _clipboard_paste()
                 if text:
                     self._paste_into_input(text)
+                else:
+                    self._append_stream(
+                        "  [dim]Ctrl+V: clipboard empty or no tool available.[/dim]",
+                        "  [dim]Install wl-clipboard:  sudo pacman -S wl-clipboard[/dim]",
+                        "  [dim]Or use Ctrl+Shift+V (terminal bracketed-paste) to paste directly.[/dim]",
+                    )
                 event.prevent_default()
                 return
             if event.key == "ctrl+y":

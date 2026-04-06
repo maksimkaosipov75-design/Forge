@@ -2,7 +2,7 @@ from pathlib import Path
 
 from config import Settings, settings as default_settings
 from file_manager import FileManager
-from orchestrator import RuleBasedOrchestrator
+from orchestrator import AIOrchestrator, RuleBasedOrchestrator
 from parser import LogParser
 from process_manager import (
     ClaudeProcessManager,
@@ -124,6 +124,20 @@ class RuntimeContainer:
         if session is not None:
             available = list(dict.fromkeys(list(session.runtimes.keys()) + available))
         return RuleBasedOrchestrator(available)
+
+    def build_ai_planner(self, session: ChatSession | None = None) -> AIOrchestrator:
+        available = list(self.provider_paths.keys())
+        if session is not None:
+            available = list(dict.fromkeys(list(session.runtimes.keys()) + available))
+        fallback = RuleBasedOrchestrator(available)
+        return AIOrchestrator(available, fallback)
+
+    def pick_planning_provider(self, session: ChatSession) -> str:
+        """Choose the best provider for AI planning (prefers claude > qwen > codex)."""
+        for preferred in ("claude", "qwen", "codex"):
+            if preferred in self.provider_paths:
+                return preferred
+        return session.current_provider
 
     def remember_task_result(self, session: ChatSession, task_result: TaskResult):
         session.last_task_result = task_result

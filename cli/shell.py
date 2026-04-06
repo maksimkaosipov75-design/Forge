@@ -202,7 +202,7 @@ class BridgeShell:
             self.ui.print_notice("Usage: /plan <task>", kind="warning")
             return
         session = self.container.get_session(self.chat_id)
-        plan = self.container.build_planner(session).build_plan(prompt)
+        plan = await self._build_plan(session, prompt)
         session.last_plan = plan
         self.container.save_session(session)
         self.ui.print_plan(plan)
@@ -256,6 +256,18 @@ class BridgeShell:
         self.ui.print_task_result_inline(result)
         self.home_visible = False
 
+    async def _build_plan(self, session, prompt: str):
+        """Try AI planner; fall back to rule-based silently."""
+        planner = self.container.build_ai_planner(session)
+        planning_provider = self.container.pick_planning_provider(session)
+        planning_runtime = await self.container.ensure_runtime_started(session, planning_provider)
+        return await planner.build_plan(
+            prompt,
+            self.container.execution_service,
+            session,
+            planning_runtime,
+        )
+
     async def orchestrate_prompt(self, prompt: str):
         if not prompt:
             self.ui.print_notice("Usage: /orchestrate <task>", kind="warning")
@@ -263,7 +275,7 @@ class BridgeShell:
 
         self.leave_home_if_needed()
         session = self.container.get_session(self.chat_id)
-        plan = self.container.build_planner(session).build_plan(prompt)
+        plan = await self._build_plan(session, prompt)
         session.last_plan = plan
         self.container.save_session(session)
         cwd = str(session.file_mgr.get_working_dir())

@@ -1,3 +1,5 @@
+import json as _json
+import re as _re
 from dataclasses import dataclass, field
 
 from providers import normalize_provider_name
@@ -12,6 +14,8 @@ class PlannedSubtask:
     suggested_provider: str
     reason: str
     depends_on: list[str] = field(default_factory=list)
+    # parallel_group: subtasks with the same value run concurrently (0 = first group)
+    parallel_group: int = 0
 
 
 @dataclass
@@ -20,6 +24,8 @@ class OrchestrationPlan:
     complexity: str
     strategy: str
     subtasks: list[PlannedSubtask] = field(default_factory=list)
+    # Set by AIOrchestrator when AI planning succeeded
+    ai_rationale: str = ""
 
 
 class RuleBasedOrchestrator:
@@ -116,3 +122,133 @@ class RuleBasedOrchestrator:
         if complexity == "complex":
             return "split into dependent subtasks, execute core layers first, then pass artifacts forward"
         return "split by specialty and keep handoff lightweight between agents"
+
+
+class AIOrchestrator:
+    """AI-driven planner: sends a planning prompt to a provider and parses the JSON plan.
+
+    Falls back to RuleBasedOrchestrator on any error.
+    """
+
+    _SPECIALTIES = {
+        "qwen": "Python, scripting, data processing, general coding",
+        "codex": "Rust, backend, systems programming, API design, refactoring",
+        "claude": "UI, GTK, CSS, writing, code review, documentation",
+    }
+
+    def __init__(self, available_providers: list[str], fallback: RuleBasedOrchestrator):
+        self.available_providers = [normalize_provider_name(p) for p in available_providers]
+        self.fallback = fallback
+
+    async def build_plan(
+        self,
+        prompt: str,
+        execution_service,
+        session,
+        runtime,
+    ) -> OrchestrationPlan:
+        """Build an AI-driven plan. Falls back to rule-based on any failure."""
+        planning_prompt = self._build_planning_prompt(prompt)
+        # Save/restore last_task_result so planning doesn't pollute session history
+        prev_result = session.last_task_result
+        try:
+            result = await execution_service.execute_provider_task(
+                session=session,
+                runtime=runtime,
+                provider_name=runtime.provider,
+                prompt=planning_prompt,
+            )
+            if result.exit_code == 0 and result.answer_text.strip():
+                plan = self._parse_response(prompt, result.answer_text)
+                if plan is not None:
+                    return plan
+        except Exception:
+            pass
+        finally:
+            session.last_task_result = prev_result
+        return self.fallback.build_plan(prompt)
+
+    def _build_planning_prompt(self, prompt: str) -> str:
+        available_str = ", ".join(self.available_providers)
+        provider_lines = "\n".join(
+            f"- {p}: {self._SPECIALTIES.get(p, 'general coding')}"
+            for p in self.available_providers
+        )
+        schema = (
+            '{"complexity":"simple|medium|complex","strategy":"one-sentence approach",'
+            '"rationale":"why this decomposition",'
+            '"subtasks":[{"id":"s1","title":"Short action title",'
+            '"description":"Specific, actionable instructions for this agent",'
+            f'"provider":"{self.available_providers[0] if self.available_providers else "qwen"}",'
+            '"reason":"why this provider","depends_on":[],"parallel_group":0}]}'
+        )
+        return (
+            "You are a task orchestrator. Output ONLY valid JSON — no markdown, no explanation.\n\n"
+            f"Available providers:\n{provider_lines}\n\n"
+            f"Task:\n{prompt}\n\n"
+            f"Output exactly this JSON structure:\n{schema}\n\n"
+            "Rules:\n"
+            "- 1 to 3 subtasks maximum\n"
+            "- parallel_group: subtasks sharing the same integer run concurrently; "
+            "increment the integer for sequential dependencies\n"
+            "- depends_on: list of subtask IDs that must finish before this one starts\n"
+            "- complexity: 'simple' for 1 subtask, 'medium' for 2, 'complex' for 3\n"
+            f"- only use these providers: {available_str}\n"
+            "- descriptions must be specific and actionable, not vague\n"
+            "- OUTPUT JSON ONLY — no other text, no code fences"
+        )
+
+    def _parse_response(self, original_prompt: str, text: str) -> OrchestrationPlan | None:
+        data = self._extract_json(text)
+        if not isinstance(data, dict) or "subtasks" not in data:
+            return None
+        subtasks: list[PlannedSubtask] = []
+        for item in data.get("subtasks", []):
+            if not isinstance(item, dict):
+                continue
+            raw_provider = item.get("provider", "")
+            provider = normalize_provider_name(raw_provider)
+            if provider not in self.available_providers and self.available_providers:
+                provider = self.available_providers[0]
+            subtasks.append(PlannedSubtask(
+                subtask_id=str(item.get("id", f"s{len(subtasks) + 1}")),
+                title=str(item.get("title", "Subtask"))[:100],
+                description=str(item.get("description", ""))[:600],
+                task_kind=str(item.get("task_kind", "general")),
+                suggested_provider=provider,
+                reason=str(item.get("reason", ""))[:200],
+                depends_on=[str(d) for d in item.get("depends_on", [])],
+                parallel_group=int(item.get("parallel_group", 0)),
+            ))
+        if not subtasks:
+            return None
+        complexity = str(data.get("complexity", "medium"))
+        if complexity not in ("simple", "medium", "complex"):
+            complexity = "medium"
+        return OrchestrationPlan(
+            prompt=original_prompt,
+            complexity=complexity,
+            strategy=str(data.get("strategy", ""))[:300],
+            subtasks=subtasks,
+            ai_rationale=str(data.get("rationale", ""))[:400],
+        )
+
+    @staticmethod
+    def _extract_json(text: str) -> dict | None:
+        text = text.strip()
+        # Strip markdown code fences if present
+        m = _re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, _re.DOTALL)
+        if m:
+            text = m.group(1)
+        try:
+            return _json.loads(text)
+        except _json.JSONDecodeError:
+            pass
+        # Try extracting first {...} block from mixed output
+        m = _re.search(r"\{.*\}", text, _re.DOTALL)
+        if m:
+            try:
+                return _json.loads(m.group(0))
+            except _json.JSONDecodeError:
+                pass
+        return None

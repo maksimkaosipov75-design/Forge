@@ -79,6 +79,8 @@ class SubtaskRun:
     new_files: list[str] = field(default_factory=list)
     changed_files: list[str] = field(default_factory=list)
     handoff_summary: str = ""
+    retry_count: int = 0
+    original_provider: str = ""
 
     @property
     def touched_files(self) -> list[str]:
@@ -108,6 +110,7 @@ class TaskRun:
     review_answer: str = ""
     handoff_artifacts: list[str] = field(default_factory=list)
     artifact_file: str = ""
+    ai_plan_rationale: str = ""
 
     @property
     def status_emoji(self) -> str:

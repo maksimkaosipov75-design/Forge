@@ -1007,6 +1007,18 @@ def run_textual_shell(container, chat_id: int = 0):
 
             await self._run_prompt(value)
 
+        async def _build_plan_ai(session, prompt: str):
+            """Try AI planner first; fall back to rule-based silently."""
+            planner = container.build_ai_planner(session)
+            planning_provider = container.pick_planning_provider(session)
+            planning_runtime = await container.ensure_runtime_started(session, planning_provider)
+            return await planner.build_plan(
+                prompt,
+                container.execution_service,
+                session,
+                planning_runtime,
+            )
+
         async def _handle_command(self, raw: str):
             stream = self.query_one("#stream", StreamWidget)
             session = container.get_session(chat_id)
@@ -1189,18 +1201,23 @@ def run_textual_shell(container, chat_id: int = 0):
                 if not arg:
                     self._set_stream("Usage: /plan <task>")
                     return
-                plan = container.build_planner(session).build_plan(arg)
+                plan = await _build_plan_ai(session, arg)
                 session.last_plan = plan
                 container.save_session(session)
                 self._add_timeline(f"Planned: {arg[:48]}")
+                ai_tag = "  [dim](AI plan)[/dim]" if plan.ai_rationale else "  [dim](rule-based)[/dim]"
                 self._set_stream(
                     "\n".join(
                         [
-                            f"complexity: {plan.complexity}",
-                            f"strategy: {plan.strategy}",
+                            f"[bold]complexity:[/bold] {plan.complexity}{ai_tag}",
+                            f"[bold]strategy:[/bold] {plan.strategy}",
+                            *(["", f"[dim]{plan.ai_rationale}[/dim]"] if plan.ai_rationale else []),
                             "",
                             *[
-                                f"{index}. {item.title} [{item.suggested_provider}]"
+                                (
+                                    f"{index}. {item.title} [{item.suggested_provider}]"
+                                    + (f"  ∥group={item.parallel_group}" if item.parallel_group else "")
+                                )
                                 for index, item in enumerate(plan.subtasks, start=1)
                             ],
                         ]
@@ -1329,45 +1346,61 @@ def run_textual_shell(container, chat_id: int = 0):
 
         async def _run_orchestration(self, prompt: str):
             session = container.get_session(chat_id)
-            stream = self.query_one("#stream", StreamWidget)
             self.current_mode = "orchestrated"
             self._add_timeline("Started orchestration.")
             self._refresh_all()
             cwd_for_expand = str(session.file_mgr.get_working_dir())
             expanded_prompt = _expand_file_mentions(prompt, cwd_for_expand)
-            plan = container.build_planner(session).build_plan(expanded_prompt)
+
+            # Show planning indicator, then build plan (AI or rule-based)
+            self._status_state = {"action": "Planning…", "tokens": 0, "start": 0.0, "input_tokens": 0, "output_tokens": 0}
+            self._show_status_line()
+            plan = await _build_plan_ai(session, expanded_prompt)
             session.last_plan = plan
             container.save_session(session)
-            self._set_orchestration_steps(
-                [
-                    *[
-                        f"[pending] {index}. {item.title} [{item.suggested_provider}]"
-                        for index, item in enumerate(plan.subtasks, start=1)
-                    ],
-                    "[pending] synthesis",
-                    "[pending] review",
-                ]
-            )
+
             cwd = str(session.file_mgr.get_working_dir())
             color = self._provider_color()
+            ai_tag = "  [dim](AI)[/dim]" if plan.ai_rationale else "  [dim](rule-based)[/dim]"
+            has_parallel = any(s.parallel_group > 0 for s in plan.subtasks)
+
+            # Show synthesis/review only if they'll actually run
+            will_synthesize = len(plan.subtasks) >= 2
+            will_review = plan.complexity == "complex"
+            step_labels = [
+                f"[pending] {i}. {item.title} [{item.suggested_provider}]"
+                + (f" ∥{item.parallel_group}" if has_parallel else "")
+                for i, item in enumerate(plan.subtasks, start=1)
+            ]
+            if will_synthesize:
+                step_labels.append("[pending] synthesis")
+            if will_review:
+                step_labels.append("[pending] review")
+            self._set_orchestration_steps(step_labels)
+
             self._set_stream(
                 "\n".join([
-                    f"[{color}]◆[/] orchestrate  [dim]{cwd}[/dim]",
+                    f"[{color}]◆[/] orchestrate{ai_tag}  [dim]{cwd}[/dim]",
                     f"  [dim]{prompt[:120]}[/dim]",
                     "",
                     f"  strategy: {plan.strategy}",
+                    *(["", f"  [dim]{plan.ai_rationale}[/dim]"] if plan.ai_rationale else []),
                     *[
-                        f"  [dim]{i}. {item.title} [{item.suggested_provider}][/dim]"
+                        "  [dim]{i}. {t} [{p}]{pg}[/dim]".format(
+                            i=i, t=item.title, p=item.suggested_provider,
+                            pg=f" ∥group={item.parallel_group}" if has_parallel else "",
+                        )
                         for i, item in enumerate(plan.subtasks, start=1)
                     ],
                 ])
             )
             current_step = {"index": -1}
             step_start = [_time.monotonic()]
+            synthesis_idx = len(plan.subtasks)
+            review_idx = synthesis_idx + (1 if will_synthesize else 0)
 
-            self._status_state = {"action": "Planning…", "tokens": 0, "start": 0.0, "input_tokens": 0, "output_tokens": 0}
+            self._status_state.update({"action": "Executing…", "tokens": 0})
             self._last_stream_was_text = False
-            self._show_status_line()
 
             async def status_callback(text: str):
                 if not text:
@@ -1393,12 +1426,15 @@ def run_textual_shell(container, chat_id: int = 0):
                 elif "собирает итог" in lowered:
                     if 0 <= current_step["index"] < len(plan.subtasks):
                         self._mark_orchestration_step(current_step["index"], "done")
-                    self._mark_orchestration_step(len(plan.subtasks), "running")
+                    if will_synthesize:
+                        self._mark_orchestration_step(synthesis_idx, "running")
                     self._status_state.update({"action": "Synthesizing…", "tokens": 0, "start": _time.monotonic()})
                     self._append_stream("", f"[dim]{'─' * 38}[/dim]", f"[{color}]▶[/] [bold]Synthesis[/bold]")
                 elif "выполняет review" in lowered:
-                    self._mark_orchestration_step(len(plan.subtasks), "done")
-                    self._mark_orchestration_step(len(plan.subtasks) + 1, "running")
+                    if will_synthesize:
+                        self._mark_orchestration_step(synthesis_idx, "done")
+                    if will_review:
+                        self._mark_orchestration_step(review_idx, "running")
                     self._status_state.update({"action": "Reviewing…", "tokens": 0, "start": _time.monotonic()})
                     self._append_stream("", f"[dim]{'─' * 38}[/dim]", f"[{color}]▶[/] [bold]Review[/bold]")
                 self._add_timeline(clean[:72])
@@ -1418,11 +1454,16 @@ def run_textual_shell(container, chat_id: int = 0):
             self.current_mode = "idle"
             if 0 <= current_step["index"] < len(plan.subtasks):
                 self._mark_orchestration_step(current_step["index"], "done")
-            self._mark_orchestration_step(len(plan.subtasks), "done")
-            self._mark_orchestration_step(
-                len(plan.subtasks) + 1,
-                "done" if task_run.review_answer else "skipped",
-            )
+            synthesis_idx = len(plan.subtasks)
+            review_idx = synthesis_idx + (1 if will_synthesize else 0)
+            if will_synthesize:
+                self._mark_orchestration_step(
+                    synthesis_idx, "done" if task_run.synthesis_answer else "skipped"
+                )
+            if will_review:
+                self._mark_orchestration_step(
+                    review_idx, "done" if task_run.review_answer else "skipped"
+                )
             self._add_timeline(f"Done status={task_run.status}.")
             self._refresh_all()
 

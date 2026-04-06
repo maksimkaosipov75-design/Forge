@@ -991,11 +991,7 @@ def create_textual_app(container, chat_id: int = 0):
                 short_cwd = cwd
 
             # ── Header ────────────────────────────────────────────────────────
-            git_part = f"  [dim]{git}[/dim]" if git else ""
             header_lines = [
-                "",
-                f"  [bold white]◆ Forge[/bold white]  [dim]v0.1  ·  {prov}  ·  {short_cwd}{git_part}[/dim]",
-                f"  [dim]{spec}[/dim]",
                 "",
                 SEP,
             ]

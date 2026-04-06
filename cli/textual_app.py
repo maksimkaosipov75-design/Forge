@@ -582,15 +582,15 @@ def create_textual_app(container, chat_id: int = 0):
     class BridgeTextualApp(App):
         CSS = """
         Screen {
-            background: #111111;
-            color: #e8e8e8;
+            background: #1e1e1e;
+            color: #d4d4d4;
         }
 
         #titlebar {
             height: 1;
             padding: 0 2;
-            background: #111111;
-            color: #666666;
+            background: #1e1e1e;
+            color: #6a6a6a;
         }
 
         #workspace {
@@ -604,8 +604,8 @@ def create_textual_app(container, chat_id: int = 0):
             border: none;
             scrollbar-size-vertical: 0;
             scrollbar-size-horizontal: 0;
-            scrollbar-background: #111111;
-            scrollbar-color: #111111;
+            scrollbar-background: #1e1e1e;
+            scrollbar-color: #1e1e1e;
         }
 
         #stream {
@@ -622,8 +622,8 @@ def create_textual_app(container, chat_id: int = 0):
         #statusline {
             height: 1;
             padding: 0 2;
-            background: #111111;
-            color: #555555;
+            background: #1e1e1e;
+            color: #5a5a5a;
             display: none;
         }
 
@@ -635,8 +635,8 @@ def create_textual_app(container, chat_id: int = 0):
             height: auto;
             max-height: 6;
             padding: 0 2;
-            background: #1a1a1a;
-            color: #666666;
+            background: #252526;
+            color: #6a6a6a;
             display: none;
         }
 
@@ -663,8 +663,8 @@ def create_textual_app(container, chat_id: int = 0):
         #autoscroll-indicator {
             height: 1;
             padding: 0 2;
-            background: #1a1a1a;
-            color: #555555;
+            background: #252526;
+            color: #5a5a5a;
             display: none;
         }
 
@@ -677,8 +677,8 @@ def create_textual_app(container, chat_id: int = 0):
             margin: 0 1 0 1;
             height: auto;
             max-height: 11;
-            background: #1a1a1a;
-            border: round #333333;
+            background: #252526;
+            border: round #3a3a3a;
             padding: 0 0;
             display: none;
             overflow-y: hidden;

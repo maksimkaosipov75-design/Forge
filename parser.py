@@ -15,7 +15,7 @@ class ActionCategory(Enum):
 
 @dataclass
 class StreamEvent:
-    """Одно событие стриминга."""
+    """A single streaming event."""
     category: ActionCategory
     text: str
     tool_name: Optional[str] = None
@@ -32,12 +32,16 @@ class AgentState:
     commands_run: List[str] = field(default_factory=list)
     raw_buffer: List[str] = field(default_factory=list)
     is_busy: bool = False
-    # Группированные события для прогресс-бара
+    # Grouped events for progress bar
     events: List[StreamEvent] = field(default_factory=list)
     tool_use_count: int = 0
     last_file_action: str = ""
     last_file_path: str = ""
     last_tool_name: str = ""
+    last_input_tokens: int = 0
+    last_output_tokens: int = 0
+    total_input_tokens: int = 0
+    total_output_tokens: int = 0
 
 
 class LogParser:
@@ -175,6 +179,17 @@ class LogParser:
             self.state.current_action = "✅ Задача завершена"
             self.state.is_busy = False
 
+        if line.startswith("🔢 "):
+            payload = line[2:].strip()
+            parts = [item.strip() for item in payload.split(",", maxsplit=1)]
+            if len(parts) == 2 and all(part.isdigit() for part in parts):
+                input_tokens = int(parts[0])
+                output_tokens = int(parts[1])
+                self.state.last_input_tokens = input_tokens
+                self.state.last_output_tokens = output_tokens
+                self.state.total_input_tokens += input_tokens
+                self.state.total_output_tokens += output_tokens
+
     def _parse_stream_event(self, line: str) -> Optional[StreamEvent]:
         """Парсит строку как stream-json событие."""
         if line.startswith("🧠 "):
@@ -275,6 +290,8 @@ class LogParser:
         self.state.last_file_action = ""
         self.state.last_file_path = ""
         self.state.last_tool_name = ""
+        self.state.last_input_tokens = 0
+        self.state.last_output_tokens = 0
         self.state.current_action = "Ожидание команды"
         self.state.completed_steps = 0
         self.state.total_steps = 0
@@ -336,6 +353,14 @@ class LogParser:
             parts.append(f"<b>📋 Ответ:</b>\n\n<pre>{escaped}</pre>")
 
         return "\n".join(parts)
+
+    def get_token_usage(self) -> tuple[int, int, int, int]:
+        return (
+            self.state.last_input_tokens,
+            self.state.last_output_tokens,
+            self.state.total_input_tokens,
+            self.state.total_output_tokens,
+        )
 
     @staticmethod
     def _shorten(text: str, limit: int) -> str:

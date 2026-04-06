@@ -55,6 +55,14 @@ class BridgeCliParserTests(unittest.TestCase):
         self.assertTrue(args.textual)
         self.assertIsNone(args.command)
 
+    def test_build_parser_supports_shell_flag(self):
+        parser = build_parser()
+
+        args = parser.parse_args(["--shell"])
+
+        self.assertTrue(args.shell)
+        self.assertIsNone(args.command)
+
 
 if __name__ == "__main__":
     unittest.main()

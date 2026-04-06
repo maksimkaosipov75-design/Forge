@@ -3,6 +3,7 @@ from pathlib import Path
 
 from telegram_ui import (
     build_task_buttons,
+    build_plan_preview_buttons,
     build_file_preview_messages,
     chunk_code_sections,
     compose_html_messages,
@@ -65,6 +66,16 @@ class TelegramUiTests(unittest.TestCase):
             for button in row
         ]
         self.assertIn("retry_failed_subtask", callback_data)
+
+    def test_build_plan_preview_buttons_exposes_expected_actions(self):
+        keyboard = build_plan_preview_buttons()
+
+        callback_data = [
+            button.callback_data
+            for row in keyboard.inline_keyboard
+            for button in row
+        ]
+        self.assertEqual(callback_data, ["plan_run", "plan_edit", "plan_cancel"])
 
 
 if __name__ == "__main__":

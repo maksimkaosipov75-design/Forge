@@ -15,17 +15,20 @@ DEFAULT_TIMEOUT = 600  # 10 минут
 
 
 class BaseProcessManager:
-    def __init__(self, cli_path: str, on_output: Callable[[str], None], timeout: int = DEFAULT_TIMEOUT, provider_name: str = "qwen"):
+    def __init__(self, cli_path: str, on_output: Callable[[str], None], timeout: int = DEFAULT_TIMEOUT, provider_name: str = "qwen", model_name: str = ""):
         self.cli_path = cli_path
         self.on_output = on_output
         self.timeout = timeout
         self.provider_name = normalize_provider_name(provider_name)
+        self.model_name: str = model_name  # "" = use CLI default
         self._running = False
         self._session_active = False
         self._proc: Optional[asyncio.subprocess.Process] = None
         self._stream_callback: Optional[Callable[[str], None]] = None
         self._final_result_callback: Optional[Callable[[str], None]] = None
         self.health = ProviderHealth(provider=self.provider_name)
+        # Prevents concurrent send_command calls on the same process manager
+        self._command_lock: asyncio.Lock = asyncio.Lock()
 
     async def start(self):
         self._running = True
@@ -160,6 +163,10 @@ class QwenProcessManager(BaseProcessManager):
         return events, final_text
 
     async def send_command(self, text: str, cwd: Path = None):
+        async with self._command_lock:
+            return await self._send_command_impl(text, cwd)
+
+    async def _send_command_impl(self, text: str, cwd: Path = None):
         if not self._running:
             raise RuntimeError("Менеджер не запущен")
 
@@ -169,11 +176,13 @@ class QwenProcessManager(BaseProcessManager):
             "--output-format", "stream-json",
             "--include-partial-messages",
         ]
+        if self.model_name:
+            args.extend(["-m", self.model_name])
         if self._session_active:
             args.append("--continue")
         args.append(text)
 
-        log.info(f"Запуск stream-json: {' '.join(args[:5])}... в {work_dir}")
+        log.info(f"Запуск stream-json: {' '.join(args[:6])}... в {work_dir}")
 
         proc = await asyncio.create_subprocess_exec(
             *args,
@@ -310,6 +319,10 @@ class CodexProcessManager(BaseProcessManager):
         return events, final_text
 
     async def send_command(self, text: str, cwd: Path = None):
+        async with self._command_lock:
+            return await self._send_command_impl(text, cwd)
+
+    async def _send_command_impl(self, text: str, cwd: Path = None):
         if not self._running:
             raise RuntimeError("Менеджер не запущен")
 
@@ -327,12 +340,14 @@ class CodexProcessManager(BaseProcessManager):
             "-o",
             str(output_file),
         ]
+        if self.model_name:
+            args.extend(["-m", self.model_name])
         if self._session_active:
             args.extend(["resume", "--last", text])
         else:
             args.append(text)
 
-        log.info("Запуск codex exec --json в %s", work_dir)
+        log.info("Запуск codex exec --json (model=%s) в %s", self.model_name or "default", work_dir)
 
         proc = await asyncio.create_subprocess_exec(
             *args,
@@ -414,6 +429,35 @@ class ClaudeProcessManager(BaseProcessManager):
     events to the same emoji-oriented stream already used by the bot.
     """
 
+    @staticmethod
+    def _extract_text_from_message(payload: dict) -> str:
+        direct_text = payload.get("text")
+        if isinstance(direct_text, str) and direct_text.strip():
+            return direct_text
+
+        message = payload.get("message")
+        if isinstance(message, dict):
+            content = message.get("content", [])
+            if isinstance(content, list):
+                text_parts = [
+                    item.get("text", "")
+                    for item in content
+                    if isinstance(item, dict) and item.get("type") == "text" and item.get("text")
+                ]
+                if text_parts:
+                    return "".join(text_parts)
+
+        content = payload.get("content")
+        if isinstance(content, list):
+            text_parts = [
+                item.get("text", "")
+                for item in content
+                if isinstance(item, dict) and item.get("type") == "text" and item.get("text")
+            ]
+            if text_parts:
+                return "".join(text_parts)
+        return ""
+
     @classmethod
     def parse_stream_payload(cls, payload: dict) -> tuple[list[str], Optional[str]]:
         payload_type = payload.get("type", "")
@@ -427,6 +471,26 @@ class ClaudeProcessManager(BaseProcessManager):
             max_retries = payload.get("max_retries", "?")
             error = payload.get("error", "unknown")
             return [f"❌ Claude API retry {attempt}/{max_retries}: {error}"], None
+
+        if payload_type == "system":
+            status = payload.get("status") or payload.get("message")
+            if isinstance(status, str) and status.strip():
+                return [f"⚙️ {status}"], None
+
+        if payload_type in {"assistant", "message", "text"}:
+            text = cls._extract_text_from_message(payload)
+            if text:
+                return [f"💬 {text}"], text
+
+        if payload_type in {"tool_use", "tool_call"}:
+            tool_name = payload.get("name") or payload.get("tool_name") or "tool"
+            return [f"🔧 {tool_name}"], None
+
+        if payload_type == "tool_result":
+            tool_name = payload.get("name") or payload.get("tool_name")
+            if tool_name:
+                return [f"🔧 Результат инструмента: {tool_name}"], None
+            return ["🔧 Результат инструмента"], None
 
         if payload_type == "result":
             subtype = payload.get("subtype", "success")
@@ -448,6 +512,10 @@ class ClaudeProcessManager(BaseProcessManager):
         return QwenProcessManager.parse_stream_payload(payload)
 
     async def send_command(self, text: str, cwd: Path = None):
+        async with self._command_lock:
+            return await self._send_command_impl(text, cwd)
+
+    async def _send_command_impl(self, text: str, cwd: Path = None):
         if not self._running:
             raise RuntimeError("Менеджер не запущен")
 
@@ -462,11 +530,13 @@ class ClaudeProcessManager(BaseProcessManager):
             "--permission-mode",
             "bypassPermissions",
         ]
+        if self.model_name:
+            args.extend(["--model", self.model_name])
         if self._session_active:
             args.append("-c")
         args.append(text)
 
-        log.info("Запуск claude stream-json в %s", work_dir)
+        log.info("Запуск claude stream-json (model=%s) в %s", self.model_name or "default", work_dir)
 
         proc = await asyncio.create_subprocess_exec(
             *args,
@@ -534,10 +604,16 @@ class ClaudeProcessManager(BaseProcessManager):
         return proc.returncode
 
 
-def create_process_manager(provider: str, cli_path: str, on_output: Callable[[str], None], timeout: int = DEFAULT_TIMEOUT):
+def create_process_manager(
+    provider: str,
+    cli_path: str,
+    on_output: Callable[[str], None],
+    timeout: int = DEFAULT_TIMEOUT,
+    model_name: str = "",
+):
     normalized = normalize_provider_name(provider)
     if normalized == "codex":
-        return CodexProcessManager(cli_path=cli_path, on_output=on_output, timeout=timeout, provider_name=normalized)
+        return CodexProcessManager(cli_path=cli_path, on_output=on_output, timeout=timeout, provider_name=normalized, model_name=model_name)
     if normalized == "claude":
-        return ClaudeProcessManager(cli_path=cli_path, on_output=on_output, timeout=timeout, provider_name=normalized)
-    return QwenProcessManager(cli_path=cli_path, on_output=on_output, timeout=timeout, provider_name=normalized)
+        return ClaudeProcessManager(cli_path=cli_path, on_output=on_output, timeout=timeout, provider_name=normalized, model_name=model_name)
+    return QwenProcessManager(cli_path=cli_path, on_output=on_output, timeout=timeout, provider_name=normalized, model_name=model_name)

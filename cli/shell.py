@@ -3,7 +3,17 @@ import re as _re
 import shlex
 from pathlib import Path
 
+from cli.command_catalog import grouped_help_lines
 from cli.remote_control import RemoteControlManager
+from cli.session_actions import (
+    build_commit_message,
+    clear_session_state,
+    compact_session,
+    render_todos_lines,
+    render_usage_lines,
+    run_git_commit,
+    run_review_pass,
+)
 from providers import is_supported_provider, normalize_provider_name
 
 _HTML_TAG = _re.compile(r"<[^>]+>")
@@ -91,10 +101,29 @@ class BridgeShell:
             return
         if command == "/help":
             self.leave_home_if_needed()
-            self.ui.print_shell_help()
+            self.ui.print_shell_help(grouped_help_lines())
+            return
+        if command == "/commands":
+            self.leave_home_if_needed()
+            self.ui.print_shell_help(grouped_help_lines())
             return
         if command in {"/home", "/new"}:
             self.show_home()
+            return
+        if command == "/clear":
+            self.leave_home_if_needed()
+            session = self.container.get_session(self.chat_id)
+            self.ui.print_notice(clear_session_state(session, self.container), kind="success")
+            return
+        if command == "/compact":
+            self.leave_home_if_needed()
+            session = self.container.get_session(self.chat_id)
+            if args and args[0].isdigit():
+                message = compact_session(session, keep=int(args[0]))
+            else:
+                message = compact_session(session, needle=" ".join(args).strip())
+            self.container.save_session(session)
+            self.ui.print_notice(message, kind="success")
             return
         if command == "/providers":
             self.leave_home_if_needed()
@@ -109,6 +138,37 @@ class BridgeShell:
             self.leave_home_if_needed()
             await self.show_limits()
             return
+        if command == "/usage":
+            self.leave_home_if_needed()
+            session = self.container.get_session(self.chat_id)
+            self.ui.print_block("Usage", "\n".join(render_usage_lines(session, self.container.provider_paths)), border_style="cyan")
+            return
+        if command == "/metrics":
+            self.leave_home_if_needed()
+            self.ui.print_block("Metrics", self.container.metrics.render_prometheus(), border_style="cyan")
+            return
+        if command == "/todos":
+            self.leave_home_if_needed()
+            session = self.container.get_session(self.chat_id)
+            self.ui.print_block("TODOs", "\n".join(render_todos_lines(session)), border_style="yellow")
+            return
+        if command == "/review":
+            self.leave_home_if_needed()
+            session = self.container.get_session(self.chat_id)
+            ok, provider_or_message, output = await run_review_pass(self.container, session, " ".join(args).strip())
+            if ok:
+                self.ui.print_block(f"Review · {provider_or_message}", output[:6000] or "Empty review.", border_style="yellow")
+            else:
+                detail = output or provider_or_message
+                self.ui.print_notice(detail, kind="error")
+            return
+        if command == "/commit":
+            self.leave_home_if_needed()
+            session = self.container.get_session(self.chat_id)
+            message = build_commit_message(session, " ".join(args).strip())
+            ok, output = run_git_commit(str(session.file_mgr.get_working_dir()), message)
+            self.ui.print_notice(output, kind="success" if ok else "warning")
+            return
         if command == "/provider":
             self.leave_home_if_needed()
             await self.set_provider(args)
@@ -116,6 +176,14 @@ class BridgeShell:
         if command == "/plan":
             self.leave_home_if_needed()
             await self.plan_prompt(" ".join(args).strip())
+            return
+        if command == "/run-plan":
+            self.leave_home_if_needed()
+            session = self.container.get_session(self.chat_id)
+            if session.last_plan is None:
+                self.ui.print_notice("No saved plan. Use /plan <task> first.", kind="warning")
+                return
+            await self._run_prebuilt_plan(session.last_plan)
             return
         if command == "/orchestrate":
             self.leave_home_if_needed()
@@ -278,10 +346,14 @@ class BridgeShell:
         plan = await self._build_plan(session, prompt)
         session.last_plan = plan
         self.container.save_session(session)
+        await self._run_prebuilt_plan(plan)
+
+    async def _run_prebuilt_plan(self, plan):
+        session = self.container.get_session(self.chat_id)
         cwd = str(session.file_mgr.get_working_dir())
 
         # Print plan header
-        self.ui.print_task_header(session.current_provider, cwd, f"[orchestrate] {prompt}")
+        self.ui.print_task_header(session.current_provider, cwd, f"[orchestrate] {plan.prompt}")
         for index, item in enumerate(plan.subtasks, start=1):
             self.ui.print_line(
                 f"  [dim]{index}. {item.title} [{item.suggested_provider}][/dim]"

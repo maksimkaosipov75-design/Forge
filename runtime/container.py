@@ -2,6 +2,7 @@ from pathlib import Path
 
 from config import Settings, settings as default_settings
 from file_manager import FileManager
+from metrics import MetricsCollector
 from orchestrator import AIOrchestrator, RuleBasedOrchestrator
 from parser import LogParser
 from process_manager import (
@@ -53,6 +54,7 @@ class RuntimeContainer:
         self.sessions_root.mkdir(exist_ok=True)
         self.session_store = SessionStore(self.sessions_root)
         self.sessions: dict[int, ChatSession] = {}
+        self.metrics = MetricsCollector()
         self.execution_service = ExecutionService()
         self.orchestrator_service = OrchestratorService(self, self.execution_service)
 
@@ -143,6 +145,7 @@ class RuntimeContainer:
         return session.current_provider
 
     def remember_task_result(self, session: ChatSession, task_result: TaskResult, retry_count: int = 0):
+        self.metrics.record_task(task_result.provider, task_result.exit_code, task_result.duration_ms)
         session.last_task_result = task_result
         session.history.append(task_result)
         if len(session.history) > 10:

@@ -1,10 +1,25 @@
 import logging
 from html import escape
 from pathlib import Path
+from types import SimpleNamespace
 
-from aiogram import Bot
-from aiogram.enums import ParseMode
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
+try:
+    from aiogram import Bot
+    from aiogram.enums import ParseMode
+    from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
+except ModuleNotFoundError:  # pragma: no cover - allows lightweight tests without aiogram
+    Bot = object
+    Message = object
+    ParseMode = SimpleNamespace(HTML="HTML")
+
+    class InlineKeyboardButton:
+        def __init__(self, text: str, callback_data: str | None = None):
+            self.text = text
+            self.callback_data = callback_data
+
+    class InlineKeyboardMarkup:
+        def __init__(self, inline_keyboard: list[list["InlineKeyboardButton"]]):
+            self.inline_keyboard = inline_keyboard
 
 
 log = logging.getLogger(__name__)
@@ -188,6 +203,15 @@ def build_task_buttons(
     ])
 
     return InlineKeyboardMarkup(inline_keyboard=keyboard_rows)
+
+
+def build_plan_preview_buttons(can_run: bool = True) -> InlineKeyboardMarkup:
+    action_row = []
+    if can_run:
+        action_row.append(InlineKeyboardButton(text="▶️ Запустить план", callback_data="plan_run"))
+    action_row.append(InlineKeyboardButton(text="✏️ Редактировать", callback_data="plan_edit"))
+    action_row.append(InlineKeyboardButton(text="❌ Отменить", callback_data="plan_cancel"))
+    return InlineKeyboardMarkup(inline_keyboard=[action_row])
 
 
 async def send_html_message(

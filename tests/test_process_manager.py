@@ -109,6 +109,51 @@ class ProcessManagerPayloadParsingTests(unittest.TestCase):
         self.assertEqual(events, ["❌ Claude API retry 2/10: unknown"])
         self.assertIsNone(final_text)
 
+    def test_parse_claude_text_message(self):
+        payload = {
+            "type": "assistant",
+            "message": {
+                "content": [
+                    {"type": "text", "text": "hello from claude"},
+                ]
+            },
+        }
+
+        events, final_text = ClaudeProcessManager.parse_stream_payload(payload)
+
+        self.assertEqual(events, ["💬 hello from claude"])
+        self.assertEqual(final_text, "hello from claude")
+
+    def test_parse_claude_tool_use(self):
+        payload = {"type": "tool_use", "name": "read_file"}
+
+        events, final_text = ClaudeProcessManager.parse_stream_payload(payload)
+
+        self.assertEqual(events, ["🔧 read_file"])
+        self.assertIsNone(final_text)
+
+    def test_parse_claude_tool_result(self):
+        payload = {"type": "tool_result", "name": "read_file"}
+
+        events, final_text = ClaudeProcessManager.parse_stream_payload(payload)
+
+        self.assertEqual(events, ["🔧 Результат инструмента: read_file"])
+        self.assertIsNone(final_text)
+
+    def test_parse_claude_result_includes_tokens(self):
+        payload = {
+            "type": "result",
+            "subtype": "success",
+            "duration_ms": 75,
+            "result": "done",
+            "usage": {"input_tokens": 12, "output_tokens": 34},
+        }
+
+        events, final_text = ClaudeProcessManager.parse_stream_payload(payload)
+
+        self.assertEqual(events, ["🏁 Завершено (success): 75ms", "🔢 12,34"])
+        self.assertEqual(final_text, "done")
+
 
 if __name__ == "__main__":
     unittest.main()

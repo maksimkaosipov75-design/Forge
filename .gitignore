@@ -1,5 +1,6 @@
 # Dependencies
 venv/
+.venv/
 __pycache__/
 *.pyc
 
@@ -19,6 +20,11 @@ projects.json
 
 # Logs
 logs/
+
+# Local runtime data
+.session_data/
+.codex/
+.codex
 
 # Other project files (not part of bridge)
 OUTPUT_PATTERNS.md

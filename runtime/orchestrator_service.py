@@ -1,7 +1,7 @@
 import asyncio
 import logging
+from collections import OrderedDict
 from html import escape
-from itertools import groupby
 from pathlib import Path
 from time import monotonic
 from typing import Awaitable, Callable
@@ -175,7 +175,7 @@ class OrchestratorService:
     ) -> str:
         parts = [
             "You are one agent in a multi-agent execution plan.",
-            f"Overall task:\n{plan.prompt}",
+            f"Original task:\n{plan.prompt}",
             (
                 f"Your role: {subtask.title}\n"
                 f"Task kind: {subtask.task_kind}\n"
@@ -285,6 +285,31 @@ class OrchestratorService:
                 return index
         if task_run.mode == "orchestrated" and task_run.status in {"failed", "partial"}:
             return len(task_run.subtasks)
+        return None
+
+    @staticmethod
+    def validate_plan(plan: OrchestrationPlan) -> str | None:
+        """Validate ordered-v1 orchestration semantics.
+
+        For the first public release, depends_on must reference known earlier subtasks.
+        """
+        seen_ids: list[str] = []
+        seen_set: set[str] = set()
+        for index, subtask in enumerate(plan.subtasks, start=1):
+            if not subtask.subtask_id:
+                return f"Subtask #{index} is missing subtask_id."
+            if subtask.subtask_id in seen_set:
+                return f"Duplicate subtask_id: {subtask.subtask_id}"
+            for dep in subtask.depends_on:
+                if dep not in seen_set:
+                    if dep in [item.subtask_id for item in plan.subtasks[index:]]:
+                        return (
+                            f"Subtask {subtask.subtask_id} depends on {dep}, "
+                            "but ordered-v1 orchestration requires dependencies to point only to earlier steps."
+                        )
+                    return f"Subtask {subtask.subtask_id} depends on unknown step: {dep}"
+            seen_ids.append(subtask.subtask_id)
+            seen_set.add(subtask.subtask_id)
         return None
 
     # ------------------------------------------------------------------ #
@@ -446,6 +471,7 @@ class OrchestratorService:
         started_at = monotonic()
         subtask_results: list[TaskResult] = []
         prior_subtasks = list(prior_subtasks or [])
+        plan_error = self.validate_plan(plan)
 
         task_run = TaskRun(
             run_id=f"run-{utc_now_iso()}",
@@ -460,6 +486,34 @@ class OrchestratorService:
         )
 
         cwd = str(session.file_mgr.get_working_dir())
+
+        if plan_error:
+            task_run.status = "failed"
+            task_run.finished_at = utc_now_iso()
+            task_run.duration_ms = int((monotonic() - started_at) * 1000)
+            task_run.error_text = plan_error
+            self.container.metrics.record_orchestrated_run(task_run.status)
+            aggregate_result = TaskResult(
+                provider=session.current_provider,
+                prompt=plan.prompt,
+                answer_text="",
+                exit_code=1,
+                started_at=task_run.started_at,
+                finished_at=task_run.finished_at,
+                duration_ms=task_run.duration_ms,
+                error_text=plan_error,
+            )
+            session.last_task_run = task_run
+            session.last_task_result = aggregate_result
+            session.run_history.append(task_run)
+            if len(session.run_history) > 10:
+                session.run_history = session.run_history[-10:]
+            session.history.append(aggregate_result)
+            if len(session.history) > 10:
+                session.history = session.history[-10:]
+            task_run.artifact_file = self.container.session_store.write_run_artifact(session, task_run)
+            self.container.save_session(session)
+            return task_run, aggregate_result
 
         # Restore reused subtasks from a previous (partial) run
         for preserved in prior_subtasks[:resume_from]:
@@ -491,9 +545,10 @@ class OrchestratorService:
             for global_index, subtask in enumerate(plan.subtasks, start=1)
             if global_index - 1 >= resume_from
         ]
-        groups: list[list[tuple[int, object]]] = []
-        for _pg, grp in groupby(pending, key=lambda x: x[1].parallel_group):
-            groups.append(list(grp))
+        grouped_pending: "OrderedDict[int, list[tuple[int, object]]]" = OrderedDict()
+        for item in pending:
+            grouped_pending.setdefault(item[1].parallel_group, []).append(item)
+        groups = list(grouped_pending.values())
 
         replan_attempted = False
         for group in groups:
@@ -564,6 +619,7 @@ class OrchestratorService:
             self.container.session_store.clear_checkpoint(session.chat_id)
 
         # Persist
+        self.container.metrics.record_orchestrated_run(task_run.status)
         session.last_task_run = task_run
         session.run_history.append(task_run)
         if len(session.run_history) > 10:

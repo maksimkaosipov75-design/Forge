@@ -26,6 +26,7 @@ class LogParserTests(unittest.TestCase):
         parser = LogParser()
         parser.feed("💬 hello")
         parser.feed("🔧 edit")
+        parser.feed("🔢 12,34")
         parser.set_final_result("done")
 
         parser.clear_full_buffer()
@@ -34,6 +35,16 @@ class LogParserTests(unittest.TestCase):
         self.assertEqual(parser.final_result, "")
         self.assertEqual(parser.state.tool_use_count, 0)
         self.assertEqual(parser.state.current_action, "Ожидание команды")
+        self.assertEqual(parser.state.last_input_tokens, 0)
+        self.assertEqual(parser.state.last_output_tokens, 0)
+
+    def test_feed_tracks_token_usage(self):
+        parser = LogParser()
+
+        parser.feed("🔢 12,34")
+        parser.feed("🔢 5,6")
+
+        self.assertEqual(parser.get_token_usage(), (5, 6, 17, 40))
 
 
 if __name__ == "__main__":

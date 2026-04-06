@@ -1,5 +1,6 @@
 import json
 import logging
+import sqlite3
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -19,6 +20,35 @@ class SessionStore:
     def __init__(self, sessions_root: Path):
         self.sessions_root = sessions_root
         self.sessions_root.mkdir(exist_ok=True)
+        self.db_path = self.sessions_root / "session_store.sqlite3"
+        self._init_db()
+
+    def _connect(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    def _init_db(self):
+        with self._connect() as conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS chat_state (
+                    chat_id INTEGER PRIMARY KEY,
+                    payload_json TEXT NOT NULL,
+                    updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS checkpoints (
+                    chat_id INTEGER PRIMARY KEY,
+                    payload_json TEXT NOT NULL,
+                    updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+            conn.commit()
 
     def session_file(self, chat_id: int) -> Path:
         return self.sessions_root / f"chat_{chat_id}_state.json"
@@ -29,13 +59,8 @@ class SessionStore:
         return target
 
     def load(self, session: ChatSession):
-        target = self.session_file(session.chat_id)
-        if not target.exists():
-            return
-        try:
-            payload = json.loads(target.read_text(encoding="utf-8"))
-        except Exception as exc:
-            log.warning("Failed to load session state for chat %s: %s", session.chat_id, exc)
+        payload = self._load_session_payload(session.chat_id)
+        if payload is None:
             return
 
         try:
@@ -100,8 +125,6 @@ class SessionStore:
             log.warning("Failed to hydrate session state for chat %s: %s", session.chat_id, exc)
 
     def save(self, session: ChatSession):
-        target = self.session_file(session.chat_id)
-
         # Collect current health from runtimes
         health_data: dict[str, dict] = {}
         for name, runtime in session.runtimes.items():
@@ -134,9 +157,13 @@ class SessionStore:
             "provider_stats": stats_data,
             "provider_health": health_data,
         }
-        target.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+        self._save_session_payload(session.chat_id, payload)
 
     def clear(self, chat_id: int):
+        with self._connect() as conn:
+            conn.execute("DELETE FROM chat_state WHERE chat_id = ?", (chat_id,))
+            conn.execute("DELETE FROM checkpoints WHERE chat_id = ?", (chat_id,))
+            conn.commit()
         self.session_file(chat_id).unlink(missing_ok=True)
         artifacts_dir = self.artifacts_dir(chat_id)
         for path in artifacts_dir.glob("*.md"):
@@ -154,30 +181,106 @@ class SessionStore:
 
     def write_checkpoint(self, session: "ChatSession", task_run: "TaskRun"):
         """Save in-progress TaskRun state after each subtask for crash recovery."""
-        target = self.checkpoint_file(session.chat_id)
+        payload = asdict(task_run)
         try:
-            target.write_text(
-                json.dumps(asdict(task_run), indent=2, ensure_ascii=False),
-                encoding="utf-8",
-            )
+            with self._connect() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO checkpoints (chat_id, payload_json, updated_at)
+                    VALUES (?, ?, CURRENT_TIMESTAMP)
+                    ON CONFLICT(chat_id) DO UPDATE SET
+                        payload_json = excluded.payload_json,
+                        updated_at = CURRENT_TIMESTAMP
+                    """,
+                    (session.chat_id, json.dumps(payload, ensure_ascii=False)),
+                )
+                conn.commit()
         except Exception as exc:
             log.warning("Failed to write checkpoint for chat %s: %s", session.chat_id, exc)
 
     def load_checkpoint(self, session: "ChatSession") -> "TaskRun | None":
         """Load the checkpoint for crash recovery. Returns None if not found."""
-        target = self.checkpoint_file(session.chat_id)
-        if not target.exists():
-            return None
         try:
-            data = json.loads(target.read_text(encoding="utf-8"))
-            return self._task_run_from_dict(data)
+            with self._connect() as conn:
+                row = conn.execute(
+                    "SELECT payload_json FROM checkpoints WHERE chat_id = ?",
+                    (session.chat_id,),
+                ).fetchone()
+            if row is not None:
+                data = json.loads(row["payload_json"])
+                return self._task_run_from_dict(data)
+            target = self.checkpoint_file(session.chat_id)
+            if target.exists():
+                data = json.loads(target.read_text(encoding="utf-8"))
+                self._save_checkpoint_payload(session.chat_id, data)
+                return self._task_run_from_dict(data)
+            return None
         except Exception as exc:
             log.warning("Failed to load checkpoint for chat %s: %s", session.chat_id, exc)
             return None
 
     def clear_checkpoint(self, chat_id: int):
         """Remove the checkpoint file after successful completion or manual discard."""
+        with self._connect() as conn:
+            conn.execute("DELETE FROM checkpoints WHERE chat_id = ?", (chat_id,))
+            conn.commit()
         self.checkpoint_file(chat_id).unlink(missing_ok=True)
+
+    def _load_session_payload(self, chat_id: int) -> dict[str, Any] | None:
+        try:
+            with self._connect() as conn:
+                row = conn.execute(
+                    "SELECT payload_json FROM chat_state WHERE chat_id = ?",
+                    (chat_id,),
+                ).fetchone()
+            if row is not None:
+                return json.loads(row["payload_json"])
+        except Exception as exc:
+            log.warning("Failed to load session state for chat %s from sqlite: %s", chat_id, exc)
+
+        target = self.session_file(chat_id)
+        if not target.exists():
+            return None
+        try:
+            payload = json.loads(target.read_text(encoding="utf-8"))
+            self._save_session_payload(chat_id, payload)
+            return payload
+        except Exception as exc:
+            log.warning("Failed to load session state for chat %s: %s", chat_id, exc)
+            return None
+
+    def _save_session_payload(self, chat_id: int, payload: dict[str, Any]):
+        try:
+            with self._connect() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO chat_state (chat_id, payload_json, updated_at)
+                    VALUES (?, ?, CURRENT_TIMESTAMP)
+                    ON CONFLICT(chat_id) DO UPDATE SET
+                        payload_json = excluded.payload_json,
+                        updated_at = CURRENT_TIMESTAMP
+                    """,
+                    (chat_id, json.dumps(payload, ensure_ascii=False)),
+                )
+                conn.commit()
+        except Exception as exc:
+            log.warning("Failed to save session state for chat %s into sqlite: %s", chat_id, exc)
+            target = self.session_file(chat_id)
+            target.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    def _save_checkpoint_payload(self, chat_id: int, payload: dict[str, Any]):
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO checkpoints (chat_id, payload_json, updated_at)
+                VALUES (?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(chat_id) DO UPDATE SET
+                    payload_json = excluded.payload_json,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                (chat_id, json.dumps(payload, ensure_ascii=False)),
+            )
+            conn.commit()
 
     def _prune_artifacts(self, chat_id: int):
         """Delete oldest artifacts beyond MAX_ARTIFACTS."""

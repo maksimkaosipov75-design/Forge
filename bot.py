@@ -11,6 +11,9 @@ from orchestrator import OrchestrationPlan
 from process_manager import ClaudeProcessManager, CodexProcessManager, QwenProcessManager
 from parser import LogParser
 from file_manager import FileManager
+from provider_status_http import StatusHttpServer
+from rate_limiter import RateLimiter
+from security_audit import validate_prompt
 from config import settings
 from providers import (
     get_provider_definition,
@@ -23,6 +26,7 @@ from runtime import RuntimeContainer
 from task_models import ChatSession, ProviderRuntime, QueuedTask, SubtaskRun, TaskResult, TaskRun, utc_now_iso
 from telegram_ui import (
     build_file_preview_messages,
+    build_plan_preview_buttons,
     build_task_buttons,
     chunk_code_sections,
     format_status_message,
@@ -32,6 +36,77 @@ from telegram_ui import (
 )
 
 log = logging.getLogger(__name__)
+
+MODEL_CATALOG: dict[str, list[tuple[str, str]]] = {
+    "qwen": [
+        ("qwen-coder-plus", "best quality, slower"),
+        ("qwen-coder-turbo", "fast balanced [default]"),
+        ("qwen2.5-coder-32b-instruct", "open-weights 32B"),
+        ("qwen2.5-coder-7b-instruct", "open-weights 7B, fastest"),
+        ("qwen-plus", "general purpose"),
+        ("qwen-max", "highest capability"),
+    ],
+    "codex": [
+        ("o4-mini", "fast reasoning [default]"),
+        ("o3", "full reasoning, slower"),
+        ("o3-mini", "lightweight reasoning"),
+        ("o1", "original reasoning model"),
+        ("gpt-4o", "balanced multimodal"),
+        ("gpt-4o-mini", "cheapest / fastest"),
+    ],
+    "claude": [
+        ("claude-sonnet-4-6", "best balance [default]"),
+        ("claude-opus-4-6", "highest quality, slow"),
+        ("claude-haiku-4-5-20251001", "fastest, cheapest"),
+        ("claude-sonnet-3-5", "previous gen sonnet"),
+        ("sonnet", "alias to latest sonnet"),
+        ("opus", "alias to latest opus"),
+        ("haiku", "alias to latest haiku"),
+    ],
+}
+
+
+def extract_todos(answer_text: str) -> list[str]:
+    todos: list[str] = []
+    for raw_line in (answer_text or "").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if line.startswith(("- [ ] ", "* [ ] ", "- [x] ", "* [x] ")):
+            todos.append(line)
+            continue
+        if line.startswith(("TODO:", "Todo:", "todo:")):
+            todos.append(line)
+    return todos
+
+
+def build_review_request(
+    task_prompt: str,
+    answer_text: str,
+    touched_files: list[str],
+    review_focus: str = "",
+) -> str:
+    sections = [
+        "You are reviewing the result of another coding agent.",
+        "Be concise and practical.",
+        "Report:",
+        "1. Verdict",
+        "2. Bugs or risks",
+        "3. Missing tests or validation",
+        "4. Recommended next step",
+        "",
+        "Original task:",
+        task_prompt or "(unknown)",
+        "",
+        "Touched files:",
+        "\n".join(f"- {item}" for item in touched_files[:20]) or "- none",
+        "",
+        "Result to review:",
+        answer_text or "(empty result)",
+    ]
+    if review_focus.strip():
+        sections.extend(["", f"Extra focus: {review_focus.strip()}"])
+    return "\n".join(sections)
 
 
 def create_bot_and_setup(
@@ -58,9 +133,23 @@ def create_bot_and_setup(
     default_provider = runtime_container.default_provider
     provider_paths = runtime_container.provider_paths
     session_store = runtime_container.session_store
+    rate_limiter = RateLimiter(
+        max_requests=max(1, settings.RATE_LIMIT_MAX_REQUESTS),
+        window_seconds=max(1, settings.RATE_LIMIT_WINDOW_SECONDS),
+    )
+    status_http_server: StatusHttpServer | None = None
 
     def _provider_label(provider_name: str) -> str:
         return get_provider_definition(provider_name).label
+
+    def _provider_model_label(session: ChatSession, provider_name: str) -> str:
+        configured = session.provider_models.get(provider_name, "").strip()
+        if configured:
+            return configured
+        runtime = session.runtimes.get(provider_name)
+        if runtime and getattr(runtime.manager, "model_name", ""):
+            return runtime.manager.model_name
+        return "default"
 
     def _provider_keyboard(session: ChatSession) -> InlineKeyboardMarkup:
         current = session.current_provider
@@ -170,13 +259,242 @@ def create_bot_and_setup(
         provider_commands = ", ".join(
             f"<code>/provider {name}</code>" for name in list_supported_provider_names()
         )
+        model_lines = "\n".join(
+            f"• <b>{escape(name)}</b>: <code>{escape(_provider_model_label(session, name))}</code>"
+            for name in list_supported_provider_names()
+        )
         await message.answer(
             f"🤖 Провайдер по умолчанию: <b>{escape(session.current_provider)}</b>\n"
             f"▶️ Активный провайдер: <b>{escape(session.active_provider or session.current_provider)}</b>\n"
             f"🕘 В очереди: {queue_info}\n\n"
+            f"<b>Модели</b>\n{model_lines}\n\n"
             "Можно переключить провайдера кнопками ниже или командами "
             f"{provider_commands}.",
             reply_markup=_provider_keyboard(session),
+        )
+
+    async def _reset_runtime_for_provider(session: ChatSession, provider_name: str):
+        runtime = session.runtimes.pop(provider_name, None)
+        if runtime and runtime.manager.is_running:
+            await runtime.manager.stop()
+
+    async def _send_commands_overview(message: Message):
+        await message.answer(
+            "📚 <b>Команды</b>\n\n"
+            "<b>Основные</b>\n"
+            "/help, /commands, /status, /limits, /provider, /agents\n\n"
+            "<b>Задачи</b>\n"
+            "/plan &lt;задача&gt;, /orchestrate &lt;задача&gt;, /retry_failed, /btw &lt;вопрос&gt;\n"
+            "/qwen &lt;задача&gt;, /codex &lt;задача&gt;, /claude &lt;задача&gt;\n\n"
+            "<b>История и артефакты</b>\n"
+            "/history, /runs, /artifacts 1, /diff, /todos, /usage, /metrics, /review [фокус]\n\n"
+            "<b>Сессия</b>\n"
+            "/clear, /cancel, /compact [N|фильтр]\n\n"
+            "<b>Модели и провайдеры</b>\n"
+            "/model, /model &lt;provider&gt;, /model &lt;provider&gt; &lt;model&gt;\n"
+            "/reset-provider, /commit [сообщение]\n\n"
+            "<b>Файлы</b>\n"
+            "/pwd, /ls [путь], /tree [путь], /cat &lt;файл&gt;, /cd &lt;путь&gt;"
+        )
+
+    async def _send_model_overview(session: ChatSession, message: Message, target_provider: str | None = None):
+        providers = [target_provider] if target_provider else list_supported_provider_names()
+        sections = ["<b>🧠 Модели провайдеров</b>"]
+        for provider_name in providers:
+            current = _provider_model_label(session, provider_name)
+            sections.append(f"<b>{escape(provider_name)}</b>: <code>{escape(current)}</code>")
+            catalog = MODEL_CATALOG.get(provider_name, [])
+            if catalog:
+                sections.append(
+                    "\n".join(
+                        f"• <code>{escape(model_name)}</code> — {escape(description)}"
+                        for model_name, description in catalog
+                    )
+                )
+        sections.append(
+            "Использование: <code>/model qwen qwen-coder-plus</code> или "
+            "<code>/model codex default</code>."
+        )
+        await _send_structured_reply(message, sections)
+
+    async def _send_usage_view(session: ChatSession, message: Message):
+        sections = ["<b>📊 Использование за сессию</b>"]
+        for provider_name in list_supported_provider_names():
+            runtime = session.runtimes.get(provider_name)
+            stats = session.provider_stats.get(provider_name)
+            if runtime:
+                last_in, last_out, total_in, total_out = runtime.parser.get_token_usage()
+            else:
+                last_in = last_out = total_in = total_out = 0
+            tasks = stats.total_tasks if stats else 0
+            success = stats.successful_tasks if stats else 0
+            fail = stats.failed_tasks if stats else 0
+            sections.append(
+                (
+                    f"<b>{escape(provider_name)}</b>\n"
+                    f"Модель: <code>{escape(_provider_model_label(session, provider_name))}</code>\n"
+                    f"Задач: {tasks} • успех: {success} • ошибки: {fail}\n"
+                    f"Последний usage: <code>{last_in}</code> in / <code>{last_out}</code> out\n"
+                    f"Суммарно: <code>{total_in}</code> in / <code>{total_out}</code> out"
+                )
+            )
+        sections.append(
+            "<i>Показываются токены, которые CLI реально прислал в stream. "
+            "Если провайдер их не отдавал, значения останутся нулевыми.</i>"
+        )
+        await _send_structured_reply(message, sections)
+
+    async def _send_metrics_view(message: Message):
+        payload = _render_metrics()
+        sections = [
+            "<b>📈 Metrics</b>",
+            f"<pre>{escape(payload[:3500])}</pre>",
+        ]
+        if len(payload) > 3500:
+            sections.append("<i>Вывод обрезан. Полная версия доступна через HTTP endpoint /metrics.</i>")
+        await _send_structured_reply(message, sections)
+
+    def _pick_review_provider(session: ChatSession, source_provider: str) -> str:
+        for candidate in ("claude", "codex", "qwen"):
+            if candidate != source_provider and candidate in provider_paths:
+                return candidate
+        return session.current_provider
+
+    async def _run_review_command(session: ChatSession, message: Message, review_focus: str = ""):
+        last_result = session.last_task_result
+        if not last_result.answer_text.strip() and not last_result.touched_files:
+            await message.answer("⚠️ Нечего отправлять на review: нет последнего результата.")
+            return
+
+        source_provider = last_result.provider or session.current_provider
+        review_provider = _pick_review_provider(session, source_provider)
+        await _ensure_session_started(session, review_provider)
+        runtime = _get_runtime(session, review_provider)
+
+        review_prompt = build_review_request(
+            task_prompt=last_result.prompt,
+            answer_text=last_result.answer_text,
+            touched_files=last_result.touched_files,
+            review_focus=review_focus,
+        )
+        status_msg = await message.answer(
+            "⏳ <b>Запускаю code review…</b>\n\n"
+            f"<b>Исходный провайдер:</b> <code>{escape(source_provider)}</code>\n"
+            f"<b>Reviewer:</b> <code>{escape(review_provider)}</code>"
+        )
+
+        previous_result = session.last_task_result
+        previous_active = session.active_provider
+        try:
+            session.active_provider = review_provider
+            review_result = await _execute_provider_task(
+                session=session,
+                runtime=runtime,
+                provider_name=review_provider,
+                prompt=review_prompt,
+                status_msg=status_msg,
+                status_prefix=(
+                    "⏳ <b>Выполняю review…</b>\n\n"
+                    f"<b>Reviewer:</b> <code>{escape(review_provider)}</code>"
+                ),
+            )
+        finally:
+            session.last_task_result = previous_result
+            session.active_provider = previous_active
+
+        if review_result.exit_code != 0:
+            await send_or_edit_structured_message(
+                bot,
+                message,
+                status_msg,
+                [
+                    f"⚠️ <b>Review через {_provider_label(review_provider)} завершился с ошибкой</b>",
+                    f"<pre>{escape((review_result.error_text or 'Unknown error')[:3000])}</pre>",
+                ],
+            )
+            return
+
+        if session.last_task_run:
+            session.last_task_run.review_provider = review_provider
+            session.last_task_run.review_prompt = review_prompt
+            session.last_task_run.review_answer = review_result.answer_text
+            if not session.last_task_run.answer_text.strip():
+                session.last_task_run.answer_text = previous_result.answer_text
+            session.last_task_run.artifact_file = session_store.write_run_artifact(session, session.last_task_run)
+        session_store.save(session)
+
+        sections = [
+            "<b>🔍 Review готов</b>",
+            (
+                f"<b>Исходный провайдер:</b> <code>{escape(source_provider)}</code>\n"
+                f"<b>Reviewer:</b> <code>{escape(review_provider)}</code>"
+            ),
+        ]
+        await send_or_edit_structured_message(bot, message, status_msg, sections)
+        await send_answer_chunks(
+            bot,
+            message,
+            review_result.answer_text,
+            runtime.parser._escape_html,
+            title="<b>🔍 Ответ reviewer-а</b>",
+        )
+
+    async def _run_commit_command(session: ChatSession, message: Message, commit_message: str = ""):
+        work_dir = session.file_mgr.get_working_dir()
+        rc, _, _ = await _run_git_command(work_dir, "rev-parse", "--is-inside-work-tree")
+        if rc != 0:
+            await message.answer("⚠️ Текущая директория не является git-репозиторием.")
+            return
+
+        rc, status_stdout, status_stderr = await _run_git_command(work_dir, "status", "--short")
+        if rc != 0:
+            await message.answer(f"❌ Не удалось получить git status:\n<pre>{escape(status_stderr[:3000])}</pre>")
+            return
+        if not status_stdout.strip():
+            await message.answer("🟢 Нет изменений для коммита.")
+            return
+
+        derived_message = commit_message.strip() or session.last_task_result.prompt.strip() or "AI: update project"
+        safe_message = " ".join(derived_message.split())[:120]
+        if not safe_message:
+            safe_message = "AI: update project"
+
+        status_msg = await message.answer(f"⏳ <b>Создаю git commit…</b>\n\n<code>{escape(safe_message)}</code>")
+
+        rc, add_stdout, add_stderr = await _run_git_command(work_dir, "add", "-A")
+        if rc != 0:
+            await send_or_edit_structured_message(
+                bot,
+                message,
+                status_msg,
+                [f"❌ <b>git add -A завершился с ошибкой</b>\n<pre>{escape((add_stderr or add_stdout)[:3000])}</pre>"],
+            )
+            return
+
+        rc, commit_stdout, commit_stderr = await _run_git_command(work_dir, "commit", "-m", safe_message)
+        if rc != 0:
+            combined = (commit_stderr or commit_stdout or "Unknown git commit error")[:3000]
+            await send_or_edit_structured_message(
+                bot,
+                message,
+                status_msg,
+                [f"❌ <b>git commit завершился с ошибкой</b>\n<pre>{escape(combined)}</pre>"],
+            )
+            return
+
+        rc, rev_stdout, _ = await _run_git_command(work_dir, "rev-parse", "--short", "HEAD")
+        commit_hash = rev_stdout.strip() if rc == 0 else "unknown"
+        sections = [
+            "<b>✅ Commit создан</b>",
+            f"<b>Hash:</b> <code>{escape(commit_hash)}</code>",
+            f"<b>Message:</b> <code>{escape(safe_message)}</code>",
+            f"<pre>{escape(commit_stdout[:3000])}</pre>" if commit_stdout.strip() else "",
+        ]
+        await send_or_edit_structured_message(
+            bot,
+            message,
+            status_msg,
+            [section for section in sections if section],
         )
 
     def _provider_status_lines(session: ChatSession) -> list[str]:
@@ -186,6 +504,26 @@ def create_bot_and_setup(
             lines.extend(runtime.health.summary_lines())
             lines.append("")
         return lines[:-1]
+
+    def _plain_provider_status_lines() -> list[str]:
+        lines = ["provider health"]
+        if not runtime_container.sessions:
+            lines.append("no active sessions")
+            return lines
+
+        for chat_id in sorted(runtime_container.sessions):
+            session = runtime_container.sessions[chat_id]
+            lines.append(f"chat {chat_id}:")
+            for provider_name in list_supported_provider_names():
+                runtime = _get_runtime(session, provider_name)
+                lines.extend(f"  {line}" for line in runtime.health.summary_lines())
+        return lines
+
+    def _render_metrics() -> str:
+        return runtime_container.metrics.render_prometheus(_plain_provider_status_lines())
+
+    def _render_health() -> str:
+        return "\n".join(_plain_provider_status_lines()) + "\n"
 
     async def _send_limits_view(session: ChatSession, message: Message):
         sections = ["<b>⏱️ Лимиты и доступность</b>"]
@@ -220,7 +558,20 @@ def create_bot_and_setup(
                     f"<i>{escape(subtask.reason)}</i>"
                 )
             )
-        await _send_structured_reply(message, sections)
+        eta = orchestrator_service.estimate_plan_eta(plan, session)
+        sections.append(
+            "Подтвердите запуск кнопкой ниже или отредактируйте задачу новой командой "
+            "<code>/plan &lt;обновлённая задача&gt;</code>."
+        )
+        sections.append(f"<b>Оценка времени:</b> <code>{escape(eta)}</code>")
+        status_msg = await message.answer("⏳ <b>Готовлю план…</b>")
+        await send_or_edit_structured_message(
+            bot,
+            message,
+            status_msg,
+            sections,
+            reply_markup=build_plan_preview_buttons(),
+        )
 
     def _history_lines(session: ChatSession, limit: int = 5) -> list[str]:
         lines = ["<b>🕘 Последние задачи</b>"]
@@ -594,6 +945,7 @@ def create_bot_and_setup(
         )
         await send_or_edit_structured_message(bot, message, status_msg, sections, reply_markup=keyboard)
         if task_run.answer_text.strip():
+            last_provider = task_run.subtasks[-1].provider if task_run.subtasks else session.current_provider
             runtime = _get_runtime(session, last_provider)
             await send_answer_chunks(
                 bot,
@@ -628,6 +980,37 @@ def create_bot_and_setup(
             await message.answer("⛔ Доступ запрещён.")
             return False
         return True
+
+    async def _guard_user_prompt(message: Message, prompt: str) -> bool:
+        validation = validate_prompt(prompt, max_length=settings.MAX_PROMPT_LENGTH)
+        if not validation.allowed:
+            await message.answer(
+                "⛔ <b>Запрос отклонён политикой безопасности.</b>\n"
+                f"Причина: {escape(validation.reason)}"
+            )
+            return False
+
+        user_id = str(message.from_user.id) if message.from_user else str(message.chat.id)
+        allowed, retry_after = rate_limiter.check(user_id)
+        if not allowed:
+            await message.answer(
+                "⏱️ <b>Слишком много запросов.</b>\n"
+                f"Попробуйте снова примерно через <code>{retry_after}s</code>."
+            )
+            return False
+        return True
+
+    if settings.ENABLE_STATUS_HTTP:
+        try:
+            status_http_server = StatusHttpServer(
+                host=settings.STATUS_HTTP_HOST,
+                port=settings.STATUS_HTTP_PORT,
+                health_provider=_render_health,
+                metrics_provider=_render_metrics,
+            )
+            status_http_server.start()
+        except OSError as exc:
+            log.warning("Не удалось запустить status HTTP server: %s", exc)
 
     # --- Unified message handler ---
     @router.message()
@@ -679,10 +1062,13 @@ def create_bot_and_setup(
                 "<i>Под статусом задачи тоже можно переключить провайдера кнопками.</i>\n"
                 "/status — статус и прогресс\n"
                 "/limits — лимиты и доступность агентов\n"
+                "/metrics — внутренние метрики сервиса\n"
                 "/history — последние задачи\n"
                 "/runs — последние run-ы\n"
                 "/artifacts 1 — показать артефакт run-а\n"
                 "/diff — diff последних изменений\n"
+                "/review [фокус] — отправить последний результат на code review\n"
+                "/commit [сообщение] — сделать git commit текущих изменений\n"
                 "/plan &lt;задача&gt; — черновой план оркестрации\n"
                 "/orchestrate &lt;задача&gt; — выполнить план по подзадачам\n"
                 "/retry_failed — продолжить последнюю orchestration-задачу с места сбоя\n"
@@ -691,6 +1077,16 @@ def create_bot_and_setup(
                 "/clear — сбросить сессию\n"
                 "/help — эта справка"
             )
+        elif text == "/commands":
+            await _send_commands_overview(message)
+        elif text == "/review":
+            await _run_review_command(session, message)
+        elif text.startswith("/review "):
+            await _run_review_command(session, message, text.split(None, 1)[1].strip())
+        elif text == "/commit":
+            await _run_commit_command(session, message)
+        elif text.startswith("/commit "):
+            await _run_commit_command(session, message, text.split(None, 1)[1].strip())
 
         elif text == "/ls":
             await message.answer(session.file_mgr.list_dir(None))
@@ -721,6 +1117,47 @@ def create_bot_and_setup(
             session_store.clear(session.chat_id)
             extra = f" Из очереди удалено: {dropped}." if dropped else ""
             await message.answer(f"🗑 Сессия сброшена.{extra}")
+        elif text.startswith("/compact"):
+            arg = text.split(None, 1)[1].strip() if " " in text else ""
+            if arg.isdigit():
+                keep = max(1, int(arg))
+                session.history = session.history[-keep:]
+                session.run_history = session.run_history[-keep:]
+                if session.history:
+                    session.last_task_result = session.history[-1]
+                if session.run_history:
+                    session.last_task_run = session.run_history[-1]
+                session_store.save(session)
+                await message.answer(f"🗜 История сжата. Оставлено последних записей: <b>{keep}</b>.")
+            elif arg:
+                needle = arg.lower()
+                session.history = [
+                    item for item in session.history
+                    if needle in item.prompt.lower() or needle in item.answer_text.lower()
+                ]
+                session.run_history = [
+                    item for item in session.run_history
+                    if needle in item.prompt.lower() or needle in item.answer_text.lower()
+                ]
+                if session.history:
+                    session.last_task_result = session.history[-1]
+                if session.run_history:
+                    session.last_task_run = session.run_history[-1]
+                session_store.save(session)
+                await message.answer(
+                    f"🗜 История отфильтрована по <code>{escape(arg)}</code>. "
+                    f"Записей задач: {len(session.history)}, run-ов: {len(session.run_history)}."
+                )
+            else:
+                keep = 3
+                session.history = session.history[-keep:]
+                session.run_history = session.run_history[-keep:]
+                if session.history:
+                    session.last_task_result = session.history[-1]
+                if session.run_history:
+                    session.last_task_run = session.run_history[-1]
+                session_store.save(session)
+                await message.answer(f"🗜 История сжата до последних <b>{keep}</b> записей.")
 
         elif text == "/provider":
             await _send_provider_panel(session, message)
@@ -738,6 +1175,38 @@ def create_bot_and_setup(
                     f"✅ Провайдер по умолчанию переключён на <b>{escape(requested)}</b>.",
                     reply_markup=_provider_keyboard(session),
                 )
+        elif text == "/reset-provider":
+            session.current_provider = default_provider
+            session_store.save(session)
+            await message.answer(
+                f"↩️ Провайдер по умолчанию сброшен на <b>{escape(default_provider)}</b>.",
+                reply_markup=_provider_keyboard(session),
+            )
+        elif text == "/model":
+            await _send_model_overview(session, message)
+        elif text.startswith("/model "):
+            arg = text.split(None, 1)[1].strip()
+            parts = arg.split(maxsplit=1)
+            target_provider = parts[0].lower()
+            if target_provider not in list_supported_provider_names():
+                target_provider = session.current_provider
+                new_model = arg
+            else:
+                new_model = parts[1].strip() if len(parts) > 1 else ""
+
+            if not new_model:
+                await _send_model_overview(session, message, target_provider=target_provider)
+            else:
+                if new_model.lower() == "default":
+                    new_model = ""
+                session.provider_models[target_provider] = new_model
+                await _reset_runtime_for_provider(session, target_provider)
+                session_store.save(session)
+                label = new_model or "default"
+                await message.answer(
+                    f"🧠 Для <b>{escape(target_provider)}</b> выбрана модель "
+                    f"<code>{escape(label)}</code>. Следующий запуск возьмёт её автоматически."
+                )
 
         elif text == "/status":
             queue_info = f"\n🕘 В очереди: {session.task_queue.qsize()}"
@@ -753,6 +1222,16 @@ def create_bot_and_setup(
             )
         elif text == "/limits":
             await _send_limits_view(session, message)
+        elif text == "/usage":
+            await _send_usage_view(session, message)
+        elif text == "/metrics":
+            await _send_metrics_view(message)
+        elif text == "/todos":
+            todos = extract_todos(session.last_task_result.answer_text)
+            if not todos:
+                await message.answer("📝 В последнем ответе TODO-список не найден.")
+            else:
+                await _send_structured_reply(message, ["<b>📝 TODO из последнего ответа</b>", *todos[:20]])
 
         elif text == "/history":
             if not session.run_history and not session.history:
@@ -791,11 +1270,16 @@ def create_bot_and_setup(
         elif text in ("/diff --full", "/diff full"):
             await _send_diff(session, message, mode="full")
         elif text.startswith("/plan "):
-            await _send_orchestration_plan(session, message, text[6:].strip())
+            plan_prompt = text[6:].strip()
+            if not await _guard_user_prompt(message, plan_prompt):
+                return
+            await _send_orchestration_plan(session, message, plan_prompt)
         elif text == "/plan":
             await message.answer("📝 Использование: <code>/plan &lt;задача&gt;</code>")
         elif text.startswith("/orchestrate "):
             plan_prompt = text[len("/orchestrate "):].strip()
+            if not await _guard_user_prompt(message, plan_prompt):
+                return
             planner = runtime_container.build_planner(session)
             plan = planner.build_plan(plan_prompt)
             session.last_plan = plan
@@ -840,7 +1324,10 @@ def create_bot_and_setup(
                         prior_subtasks=last_run.subtasks,
                     )
         elif text.startswith("/qwen "):
-            await _enqueue_task(session, "qwen", text[6:].strip(), message, "⏳ <b>Запускаю qwen…</b>")
+            prompt = text[6:].strip()
+            if not await _guard_user_prompt(message, prompt):
+                return
+            await _enqueue_task(session, "qwen", prompt, message, "⏳ <b>Запускаю qwen…</b>")
         elif text == "/qwen":
             session.current_provider = "qwen"
             session_store.save(session)
@@ -849,7 +1336,10 @@ def create_bot_and_setup(
                 reply_markup=_provider_keyboard(session),
             )
         elif text.startswith("/codex "):
-            await _enqueue_task(session, "codex", text[7:].strip(), message, "⏳ <b>Запускаю codex…</b>")
+            prompt = text[7:].strip()
+            if not await _guard_user_prompt(message, prompt):
+                return
+            await _enqueue_task(session, "codex", prompt, message, "⏳ <b>Запускаю codex…</b>")
         elif text == "/codex":
             session.current_provider = "codex"
             session_store.save(session)
@@ -858,7 +1348,10 @@ def create_bot_and_setup(
                 reply_markup=_provider_keyboard(session),
             )
         elif text.startswith("/claude "):
-            await _enqueue_task(session, "claude", text[8:].strip(), message, "⏳ <b>Запускаю Claude…</b>")
+            prompt = text[8:].strip()
+            if not await _guard_user_prompt(message, prompt):
+                return
+            await _enqueue_task(session, "claude", prompt, message, "⏳ <b>Запускаю Claude…</b>")
         elif text == "/claude":
             session.current_provider = "claude"
             session_store.save(session)
@@ -917,10 +1410,12 @@ def create_bot_and_setup(
             if session.task_lock.locked() or not session.task_queue.empty():
                 await message.answer("⏳ В этом чате уже есть активная или ожидающая задача.")
                 return
+            question = text[4:].strip()
+            if not await _guard_user_prompt(message, question):
+                return
             provider_name = session.current_provider
             runtime = _get_runtime(session, provider_name)
             await _ensure_session_started(session, provider_name)
-            question = text[4:].strip()
             status_msg = await message.answer(f"❓ Спрашиваю: <i>{question}</i>")
             try:
                 async with session.task_lock:
@@ -954,6 +1449,8 @@ def create_bot_and_setup(
 
         else:
             provider_name = session.current_provider
+            if not await _guard_user_prompt(message, text):
+                return
             await _enqueue_task(
                 session,
                 provider_name,
@@ -1128,6 +1625,37 @@ def create_bot_and_setup(
                 callback_query.message,
                 session.last_task_result.answer_text,
                 _get_runtime(session, session.last_task_result.provider or session.current_provider).parser._escape_html,
+            )
+        elif data == "plan_run":
+            plan = session.last_plan
+            if plan is None or not plan.prompt.strip():
+                await callback_query.answer("План не найден", show_alert=True)
+                return
+            await callback_query.answer("План добавлен в очередь")
+            await _enqueue_task(
+                session,
+                plan.subtasks[0].suggested_provider if plan.subtasks else session.current_provider,
+                plan.prompt,
+                callback_query.message,
+                "⏳ <b>Запускаю orchestrator…</b>",
+                mode="orchestrated",
+                plan=plan,
+            )
+        elif data == "plan_edit":
+            plan = session.last_plan
+            plan_prompt = escape(plan.prompt) if plan else "новая задача"
+            await callback_query.answer()
+            await callback_query.message.answer(
+                "✏️ Чтобы изменить план, отправьте новую команду вида:\n"
+                f"<code>/plan {plan_prompt}</code>"
+            )
+        elif data == "plan_cancel":
+            await callback_query.answer("План отменён")
+            await _safe_edit_text(
+                callback_query.message,
+                "🛑 <b>Запуск плана отменён.</b>\n\n"
+                "Можно отправить новую команду <code>/plan &lt;задача&gt;</code> или "
+                "<code>/orchestrate &lt;задача&gt;</code>.",
             )
         else:
             await callback_query.answer()

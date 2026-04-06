@@ -321,32 +321,33 @@ class CliUi:
         remote_part = f" {remote_icon}" if remote_icon else ""
         return f"{accent}◆{reset} {bold}{provider_lower}{reset}{dim}{remote_part}{queue}{reset} {dim}›{reset} "
 
-    def print_shell_help(self):
+    def print_shell_help(self, help_lines: list[str] | None = None):
+        body = "\n".join(help_lines) if help_lines else "\n".join(
+            [
+                "/help",
+                "/home",
+                "/new",
+                "/status",
+                "/limits",
+                "/providers",
+                "/provider <qwen|codex|claude>",
+                "/plan <task>",
+                "/orchestrate <task>",
+                "/runs",
+                "/show <index>",
+                "/artifacts",
+                "/remote-control",
+                "/remote-control status",
+                "/remote-control stop",
+                "/remote-control logs",
+                "/quit",
+                "",
+                "Any text without a slash runs a single-agent task through the current provider.",
+            ]
+        )
         self.print_block(
             "Shell Commands",
-            "\n".join(
-                [
-                    "/help",
-                    "/home",
-                    "/new",
-                    "/status",
-                    "/limits",
-                    "/providers",
-                    "/provider <qwen|codex|claude>",
-                    "/plan <task>",
-                    "/orchestrate <task>",
-                    "/runs",
-                    "/show <index>",
-                    "/artifacts",
-                    "/remote-control",
-                    "/remote-control status",
-                    "/remote-control stop",
-                    "/remote-control logs",
-                    "/quit",
-                    "",
-                    "Any text without a slash runs a single-agent task through the current provider.",
-                ]
-            ),
+            body,
             border_style="yellow",
         )
 
@@ -369,6 +370,7 @@ class CliUi:
     def print_session_status(self, session, remote_status):
         lines = [
             f"provider: {session.current_provider}",
+            f"model: {session.provider_models.get(session.current_provider, '') or 'default'}",
             f"active_provider: {session.active_provider or '-'}",
             f"working_dir: {session.file_mgr.get_working_dir()}",
             f"queued_tasks: {len(session.pending_tasks)}",

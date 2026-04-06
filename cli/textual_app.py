@@ -431,7 +431,18 @@ def _file_diff_text(file_path: str, is_new: bool, max_lines: int = 35, add_color
     return lines
 
 
-def run_textual_shell(container, chat_id: int = 0):
+def create_textual_app(container, chat_id: int = 0):
+    from cli.command_catalog import grouped_help_lines, quick_reference_commands, textual_command_map
+    from cli.session_actions import (
+        build_commit_message,
+        clear_session_state,
+        compact_session,
+        render_todos_lines,
+        render_usage_lines,
+        run_git_commit,
+        run_review_pass,
+    )
+
     try:
         from textual.app import App, ComposeResult
         from textual.containers import Container, Horizontal, VerticalScroll
@@ -444,45 +455,7 @@ def run_textual_shell(container, chat_id: int = 0):
             "Textual mode requires the 'textual' package. Install it with './venv/bin/pip install textual'."
         ) from exc
 
-    COMMANDS: dict[str, tuple[str, str]] = {
-        # Shell
-        "/help":           ("Shell",         "Show available commands"),
-        "/home":           ("Shell",         "Return to the start page"),
-        "/new":            ("Shell",         "Reset the shell workspace"),
-        "/clear":          ("Shell",         "Clear the stream output"),
-        "/save":           ("Shell",         "Save last answer to file (/save [filename])"),
-        "/export":         ("Shell",         "Export stream to file (/export [md|txt])"),
-        "/retry":          ("Shell",         "Re-run the last prompt"),
-        "/expand":         ("Shell",         "Show full last answer without truncation"),
-        "/copy":           ("Shell",         "Copy last answer to clipboard"),
-        "/paste":          ("Shell",         "Show clipboard content in stream"),
-        "/history":        ("Shell",         "Show recent input history (/history [n])"),
-        "/quit":           ("Shell",         "Exit the textual shell"),
-        "/exit":           ("Shell",         "Exit the textual shell"),
-        # Workspace
-        "/cd":             ("Workspace",     "Change working directory (/cd <path>)"),
-        "/cwd":            ("Workspace",     "Print current working directory"),
-        "/diff":           ("Workspace",     "Show git diff for recent changes"),
-        # Status / Providers
-        "/stats":          ("Status",        "Show per-provider performance stats"),
-        "/status":         ("Status",        "Show current shell/session status"),
-        "/limits":         ("Status",        "Show provider health and rate limits"),
-        "/model":          ("Models",         "Show/set model  (/model [provider] [model|default])"),
-        "/provider":       ("Providers",     "Switch the default provider  (@provider: prefix also works)"),
-        "/providers":      ("Providers",     "List available providers and their paths"),
-        # History
-        "/runs":           ("History",       "List recent runs"),
-        "/show":           ("History",       "Show details for a run by index (/show <n>)"),
-        "/artifacts":      ("History",       "List latest artifact files"),
-        # Orchestration
-        "/plan":           ("Orchestration", "Preview an AI orchestration plan"),
-        "/run-plan":       ("Orchestration", "Execute the last previewed plan"),
-        "/orchestrate":    ("Orchestration", "Run a multi-agent orchestration"),
-        "/replan":         ("Orchestration", "Replan and retry the last partial/failed orchestration"),
-        "/recover":        ("Orchestration", "Resume orchestration from a crash checkpoint"),
-        # Remote
-        "/remote-control": ("Remote",        "Start or manage Telegram remote access"),
-    }
+    COMMANDS: dict[str, tuple[str, str]] = textual_command_map()
 
     class SlashCommandSuggester(Suggester):
         def __init__(self):
@@ -749,7 +722,7 @@ def run_textual_shell(container, chat_id: int = 0):
             # Streaming text render state
             self._text_buffer: str = ""       # incomplete current line accumulator
             self._text_in_code: bool = False  # inside a ``` code fence?
-            self._text_rendered_count: int = 0  # fully-rendered lines added since _streamed_text_start
+            self._text_has_partial: bool = False  # is the last _stream_lines entry an unfinished partial?
 
         def _provider_color(self) -> str:
             mapping = {
@@ -967,18 +940,7 @@ def run_textual_shell(container, chat_id: int = 0):
                 recent_lines = ["  [dim]No runs yet — send a prompt to get started.[/dim]"]
 
             # ── Quick command reference ───────────────────────────────────────
-            cmd_cols = [
-                ("/help", "this screen"),
-                ("/provider", "switch provider"),
-                ("/new", "reset workspace"),
-                ("/cd", "change directory"),
-                ("/runs", "run history"),
-                ("/plan", "orchestration plan"),
-                ("/orchestrate", "multi-agent run"),
-                ("/stats", "performance stats"),
-                ("/remote-control", "Telegram access"),
-                ("/diff", "git diff"),
-            ]
+            cmd_cols = quick_reference_commands()
             cmd_lines = []
             for i in range(0, len(cmd_cols), 2):
                 left = cmd_cols[i]
@@ -1299,12 +1261,12 @@ def run_textual_shell(container, chat_id: int = 0):
             """Format and append a stream event line to the stream widget."""
             color = self._provider_color()
             if line.startswith("💬 "):
-                # Any text chunk resets the op group
+                # Any text chunk resets the op group (but does NOT remove the op indicator line)
                 self._op_type = ""
                 self._op_files = []
                 self._op_line_idx = -1
 
-                chunk = line[2:]  # strip "💬 " prefix (2 chars: emoji + space)
+                chunk = line[2:]  # strip "💬 " prefix (emoji + space = 2 chars)
 
                 if self._streamed_text_start is None:
                     self._streamed_text_start = len(self._stream_lines)
@@ -1314,24 +1276,28 @@ def run_textual_shell(container, chat_id: int = 0):
                 parts = self._text_buffer.split("\n")
                 complete_lines, self._text_buffer = parts[:-1], parts[-1]
 
-                # Render each complete line immediately
+                # Replace the existing partial preview with the first complete line
+                if self._text_has_partial and complete_lines and self._stream_lines:
+                    first_rendered, self._text_in_code = _render_stream_line(complete_lines[0], self._text_in_code)
+                    self._stream_lines[-1] = first_rendered
+                    complete_lines = complete_lines[1:]
+                    self._text_has_partial = False
+
+                # Append remaining complete lines
                 for raw_line in complete_lines:
                     rendered, self._text_in_code = _render_stream_line(raw_line, self._text_in_code)
                     self._stream_lines.append(rendered)
-                    self._text_rendered_count += 1
 
-                # Show the incomplete buffer as a live preview (updates in-place)
-                preview_idx = self._streamed_text_start + self._text_rendered_count
+                # Show/update partial buffer as a live preview at the very end
                 if self._text_buffer:
                     partial, _ = _render_stream_line(self._text_buffer, self._text_in_code)
-                    if preview_idx < len(self._stream_lines):
-                        self._stream_lines[preview_idx] = partial
+                    if self._text_has_partial and self._stream_lines:
+                        self._stream_lines[-1] = partial  # update existing partial in-place
                     else:
                         self._stream_lines.append(partial)
+                        self._text_has_partial = True
                 else:
-                    # No partial content — remove stale preview line if present
-                    if preview_idx < len(self._stream_lines):
-                        self._stream_lines = self._stream_lines[:preview_idx]
+                    self._text_has_partial = False
 
                 self._last_stream_was_text = False
                 self._stream_lines = self._stream_lines[-5000:]
@@ -1768,9 +1734,21 @@ def run_textual_shell(container, chat_id: int = 0):
                 self._push_output(self._welcome_text())
                 self._refresh_all()
                 return
-            if command == "/clear":
+            if command == "/cls":
                 self._set_stream("")
                 self._add_timeline("Stream cleared.")
+                return
+            if command == "/clear":
+                msg = clear_session_state(session, container)
+                self._set_stream("")
+                self._set_orchestration_steps([])
+                self._add_timeline(msg)
+                self._push_output(self._welcome_text())
+                self._append_stream(f"  [green]✓[/green] {msg}")
+                self._refresh_all()
+                return
+            if command == "/commands":
+                self._push_output("\n".join(grouped_help_lines()))
                 return
             if command == "/save":
                 last = session.last_task_result
@@ -1821,6 +1799,15 @@ def run_textual_shell(container, chat_id: int = 0):
                         f"retries={s.retry_count}  avg={avg_s}  success={rate}"
                     )
                 self._push_output("\n".join(lines))
+                return
+            if command == "/compact":
+                if arg.isdigit():
+                    message = compact_session(session, keep=int(arg))
+                else:
+                    message = compact_session(session, needle=arg)
+                container.save_session(session)
+                self._add_timeline(message)
+                self._push_output(f"[green]{message}[/green]")
                 return
             if command == "/replan":
                 last_run = session.last_task_run
@@ -1990,6 +1977,12 @@ def run_textual_shell(container, chat_id: int = 0):
                 except Exception as exc:
                     self._push_output(f"[red]git diff failed: {exc}[/red]")
                 return
+            if command == "/commit":
+                message = build_commit_message(session, arg)
+                ok, output = run_git_commit(cwd=str(session.file_mgr.get_working_dir()), message=message)
+                self._add_timeline(f"Commit: {output[:72]}")
+                self._push_output(f"[{'green' if ok else 'yellow'}]{output}[/{'green' if ok else 'yellow'}]")
+                return
             if command == "/model":
                 # Known model catalogs per provider
                 _MODEL_CATALOG: dict[str, list[tuple[str, str]]] = {
@@ -2107,64 +2100,19 @@ def run_textual_shell(container, chat_id: int = 0):
                 return
             if command == "/help":
                 self._add_timeline("Opened help.")
-                self._push_output(
-                    "\n".join(
-                        [
-                            "[bold]Shell[/bold]",
-                            "  /help · /home · /new · /clear · /quit",
-                            "  /retry · /expand · /copy · /paste",
-                            "  /save [filename]    save last answer to file",
-                            "  /export [md|txt]    export stream content",
-                            "  /history [n]        show recent input history",
-                            "",
-                            "[bold]Workspace[/bold]",
-                            "  /cd <path>          change working directory",
-                            "  /cwd                print current directory",
-                            "  /diff               git diff --stat HEAD",
-                            "",
-                            "[bold]Status / Providers[/bold]",
-                            "  /status                    current session info",
-                            "  /model                     show all provider models + catalog",
-                            "  /model <provider>          list models for a provider",
-                            "  /model <provider> <model>  switch model (e.g. /model qwen qwen-coder-plus)",
-                            "  /model <provider> default  reset to provider default",
-                            "  /limits                    provider health and rate limits",
-                            "  /stats                     per-provider performance stats",
-                            "  /provider <name>           switch default provider",
-                            "  /providers                 list all providers",
-                            "",
-                            "[bold]History[/bold]",
-                            "  /runs · /show <n> · /artifacts",
-                            "",
-                            "[bold]Orchestration[/bold]",
-                            "  /plan <task>        AI plan preview (shows ETA, caches result)",
-                            "  /run-plan           execute the last previewed plan",
-                            "  /orchestrate <task> run multi-agent orchestration",
-                            "  /replan             retry last partial/failed orchestration",
-                            "  /recover            resume from a crash checkpoint",
-                            "  /recover confirm    execute the recovery",
-                            "  /recover discard    clear the checkpoint",
-                            "",
-                            "[bold]Remote[/bold]",
-                            "  /remote-control [status|stop|logs]",
-                            "",
-                            "[bold]Keys[/bold]",
-                            "  /          open command dropdown (↑↓ navigate, Tab/Enter complete)",
-                            "  Ctrl+F     search stream (Esc to close)",
-                            "  Ctrl+R     reverse history search",
-                            "  Ctrl+Y     copy last answer to clipboard",
-                            "  Ctrl+V     paste from clipboard",
-                            "  Shift+Enter  start multi-line input",
-                            "  ↑ / ↓      input history navigation",
-                            "  A          toggle autoscroll (when input not focused)",
-                            "  Ctrl+C     cancel active task",
-                            "",
-                            "[bold]Input shortcuts[/bold]",
-                            "  @provider:prompt   run with specific provider  e.g. @claude:explain this",
-                            "  @file.py           inline file content in prompt",
-                        ]
-                    )
-                )
+                self._push_output("\n".join(grouped_help_lines() + [
+                    "",
+                    "[bold]Keys[/bold]",
+                    "  /          open command dropdown (↑↓ navigate, Tab/Enter complete)",
+                    "  Ctrl+F     search stream (Esc to close)",
+                    "  Ctrl+R     reverse history search",
+                    "  Ctrl+Y     copy last answer to clipboard",
+                    "  Ctrl+V     paste from clipboard",
+                    "  Shift+Enter  start multi-line input",
+                    "  ↑ / ↓      input history navigation",
+                    "  A          toggle autoscroll (when input not focused)",
+                    "  Ctrl+C     cancel active task",
+                ]))
                 return
             if command == "/provider":
                 if not arg:
@@ -2223,6 +2171,15 @@ def run_textual_shell(container, chat_id: int = 0):
                     provider_lines.append(line)
                 self._push_output("\n".join(provider_lines))
                 return
+            if command == "/usage":
+                self._push_output("\n".join(render_usage_lines(session, container.provider_paths)))
+                return
+            if command == "/metrics":
+                self._push_output(container.metrics.render_prometheus().replace("[", "\\["))
+                return
+            if command == "/todos":
+                self._push_output("\n".join(render_todos_lines(session)))
+                return
             if command == "/runs":
                 self._add_timeline("Viewed runs.")
                 runs = container.recent_runs(session, limit=10)
@@ -2276,6 +2233,17 @@ def run_textual_shell(container, chat_id: int = 0):
                     self._push_output("No artifacts found.")
                     return
                 self._push_output("\n".join(str(item) for item in artifacts))
+                return
+            if command == "/review":
+                ok, provider_or_message, output = await run_review_pass(container, session, arg)
+                if ok:
+                    self._add_timeline(f"Reviewed via {provider_or_message}.")
+                    self._push_output(
+                        f"[bold]Review · {provider_or_message}[/bold]\n\n"
+                        + _md_to_rich((output or "Empty review.").strip()[:6000])
+                    )
+                else:
+                    self._push_output(f"[red]{(output or provider_or_message)}[/red]")
                 return
             if command == "/plan":
                 if not arg:
@@ -2434,7 +2402,7 @@ def run_textual_shell(container, chat_id: int = 0):
             self._op_line_idx = -1
             self._text_buffer = ""
             self._text_in_code = False
-            self._text_rendered_count = 0
+            self._text_has_partial = False
             self._show_status_line(provider_name)
 
             def stream_event_callback(line: str):
@@ -2666,4 +2634,8 @@ def run_textual_shell(container, chat_id: int = 0):
                 except Exception:
                     pass
 
-    BridgeTextualApp().run()
+    return BridgeTextualApp()
+
+
+def run_textual_shell(container, chat_id: int = 0):
+    create_textual_app(container, chat_id=chat_id).run()

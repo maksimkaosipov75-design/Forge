@@ -1,13 +1,66 @@
 from __future__ import annotations
 
 import asyncio
+import base64 as _base64
 import json as _json
+import os as _os
 import re as _re
 import subprocess as _subprocess
 import time as _time
 from pathlib import Path
 
 _HTML_TAG = _re.compile(r"<[^>]+>")
+
+# ---------------------------------------------------------------------------
+# Clipboard helpers (copy / paste without external mandatory dependencies)
+# ---------------------------------------------------------------------------
+
+def _clipboard_copy(text: str) -> str:
+    """Copy text to clipboard. Returns a status message."""
+    # 1. Try native clipboard tools
+    for cmd in (
+        ["wl-copy"],
+        ["xclip", "-selection", "clipboard"],
+        ["xsel", "--clipboard", "--input"],
+        ["pbcopy"],
+    ):
+        try:
+            _subprocess.run(cmd, input=text, text=True, capture_output=True, timeout=3, check=True)
+            return f"Copied ({cmd[0]})."
+        except Exception:
+            pass
+    # 2. OSC 52 terminal escape sequence (kitty, alacritty, wezterm, foot, …)
+    try:
+        b64 = _base64.b64encode(text.encode("utf-8")).decode()
+        _os.write(1, f"\x1b]52;c;{b64}\x07".encode())
+        return "Copied via OSC 52 (terminal clipboard)."
+    except Exception:
+        pass
+    # 3. Temp file fallback
+    try:
+        tmp = Path("/tmp/bridge-clipboard.txt")
+        tmp.write_text(text, encoding="utf-8")
+        return f"No clipboard tool — saved to {tmp}  (install wl-clipboard for native copy)"
+    except Exception:
+        pass
+    return "Copy failed. Install wl-clipboard: sudo pacman -S wl-clipboard"
+
+
+def _clipboard_paste() -> str:
+    """Read text from clipboard. Returns empty string on failure."""
+    for cmd in (
+        ["wl-paste", "--no-newline"],
+        ["xclip", "-selection", "clipboard", "-o"],
+        ["xsel", "--clipboard", "--output"],
+        ["pbpaste"],
+    ):
+        try:
+            result = _subprocess.run(cmd, capture_output=True, text=True, timeout=3)
+            if result.returncode == 0 and result.stdout:
+                return result.stdout
+        except Exception:
+            pass
+    return ""
 
 _LANG_MAP = {
     "py": "python", "js": "javascript", "ts": "typescript",
@@ -779,6 +832,38 @@ def run_textual_shell(container, chat_id: int = 0):
         def action_show_help(self) -> None:
             asyncio.create_task(self._handle_command("/help"))
 
+        def _paste_into_input(self, text: str):
+            """Insert text at cursor in the Input widget."""
+            if not text:
+                return
+            try:
+                inp = self.query_one("#input", Input)
+                inp.focus()
+                lines = text.splitlines()
+                if len(lines) > 1:
+                    # First line into input, remaining into multiline buffer
+                    pos = inp.cursor_position
+                    val = inp.value
+                    inp.value = val[:pos] + lines[0] + val[pos:]
+                    inp.cursor_position = pos + len(lines[0])
+                    non_empty = [l for l in lines[1:] if l.strip()]
+                    if non_empty:
+                        self._multiline_buffer.extend(non_empty)
+                        self._update_multiline_preview()
+                else:
+                    pos = inp.cursor_position
+                    val = inp.value
+                    inp.value = val[:pos] + text + val[pos:]
+                    inp.cursor_position = pos + len(text)
+            except Exception:
+                pass
+
+        def on_paste(self, event) -> None:
+            """Handle terminal bracketed-paste and drag-and-drop file paths."""
+            text = getattr(event, "text", "")
+            if text:
+                self._paste_into_input(text)
+
         def _update_multiline_preview(self):
             preview = self.query_one("#multiline-preview", MultilinePreview)
             if self._multiline_buffer:
@@ -800,6 +885,27 @@ def run_textual_shell(container, chat_id: int = 0):
                     self._update_multiline_preview()
                     event.prevent_default()
                     return
+            if event.key == "ctrl+v":
+                # Explicit clipboard paste fallback (for terminals without bracketed paste)
+                text = _clipboard_paste()
+                if text:
+                    self._paste_into_input(text)
+                event.prevent_default()
+                return
+            if event.key == "ctrl+y":
+                # Copy last answer to clipboard
+                session = container.get_session(chat_id)
+                answer = ""
+                if session.last_task_result:
+                    answer = session.last_task_result.answer_text.strip()
+                if answer:
+                    msg = _clipboard_copy(answer)
+                    self._add_timeline(msg[:80])
+                    self._append_stream(f"  [dim]{msg}[/dim]")
+                else:
+                    self._add_timeline("Nothing to copy yet.")
+                event.prevent_default()
+                return
             if event.key == "shift+enter":
                 input_widget = self.query_one("#input", Input)
                 val = input_widget.value
@@ -913,14 +1019,23 @@ def run_textual_shell(container, chat_id: int = 0):
                     "\n".join(
                         [
                             "/help",
-                            "/home · /new",
-                            "/clear",
+                            "/home · /new · /clear",
                             "/provider <qwen|codex|claude>",
                             "/status · /limits",
                             "/runs · /show <n>",
                             "/remote-control [status|stop|logs]",
                             "/plan <task>",
                             "/orchestrate <task>",
+                            "",
+                            "Keys:",
+                            "  Ctrl+Y      copy last answer to clipboard",
+                            "  Ctrl+V      paste from clipboard",
+                            "  Shift+Enter start multi-line input",
+                            "  Esc         cancel multi-line buffer",
+                            "  ↑ / ↓       input history",
+                            "  Ctrl+C      cancel active task",
+                            "",
+                            "Drag a file into the terminal to @mention it.",
                         ]
                     )
                 )

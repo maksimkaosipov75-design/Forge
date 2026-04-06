@@ -974,14 +974,7 @@ def create_textual_app(container, chat_id: int = 0):
             color = self._provider_color()
             git = _git_status_short(cwd)
 
-            SEP = "  [dim]" + "─  " * 34 + "[/dim]"
-
-            specialties = {
-                "qwen":   "python · data · scripting",
-                "codex":  "systems · backend · refactor",
-                "claude": "ui · ux · writing",
-            }
-            spec = specialties.get(prov, "general purpose")
+            SEP = "  [dim]" + "─  " * 28 + "[/dim]"
 
             import pathlib
             p = pathlib.Path(cwd)
@@ -989,16 +982,16 @@ def create_textual_app(container, chat_id: int = 0):
                 short_cwd = "…/" + "/".join(p.parts[-2:])
             except Exception:
                 short_cwd = cwd
+            git_part = f"  [dim]{git}[/dim]" if git else ""
 
             # ── Header ────────────────────────────────────────────────────────
             header_lines = [
                 "",
-                SEP,
             ]
 
             # ── Providers ─────────────────────────────────────────────────────
             prov_colors = {"qwen": "#b07cff", "codex": "#6aa7ff", "claude": "#ff9e57"}
-            prov_lines = [""]
+            prov_lines = [SEP, ""]
             for pname, pcli in container.provider_paths.items():
                 label, col = self._probe_provider_status(pname, pcli)
                 pcol = prov_colors.get(pname, color)
@@ -1015,12 +1008,14 @@ def create_textual_app(container, chat_id: int = 0):
                 recent_lines = []
                 for run in recent:
                     pcol = prov_colors.get(run.provider_summary or "", color)
+                    prompt_hint = f"  [dim]{(run.prompt or '')[:48]}[/dim]" if getattr(run, "prompt", "") else ""
                     recent_lines.append(
                         f"  {run.status_emoji}  [dim]{run.mode:<10}[/dim]"
                         f"  [{pcol}]{run.provider_summary or 'mixed'}[/{pcol}]"
+                        f"{prompt_hint}"
                     )
             else:
-                recent_lines = ["  [dim]No runs yet.[/dim]"]
+                recent_lines = ["  [dim]No runs yet — send a prompt to get started.[/dim]"]
 
             # ── Commands ──────────────────────────────────────────────────────
             cmd_cols = quick_reference_commands()
@@ -1087,16 +1082,18 @@ def create_textual_app(container, chat_id: int = 0):
                 short_cwd = "…/" + "/".join(p.parts[-2:])
             except Exception:
                 short_cwd = cwd
-            parts = [f"◆ Forge  v0.1  ·  {self.current_provider}  ·  {short_cwd}"]
+            color = self._provider_color()
+            suffix_parts = [f"{self.current_provider}  ·  {short_cwd}"]
             if git:
-                parts.append(git)
+                suffix_parts.append(git)
             if ctx_tok >= 1000:
-                parts.append(f"ctx:~{ctx_tok // 1000}k")
+                suffix_parts.append(f"ctx:~{ctx_tok // 1000}k")
             if self.current_mode != "idle":
-                parts.append(self.current_mode)
+                suffix_parts.append(self.current_mode)
             if self.remote_state != "stopped":
-                parts.append(f"remote:{self.remote_state}")
-            return "  " + "  ·  ".join(parts)
+                suffix_parts.append(f"remote:{self.remote_state}")
+            suffix = "  ·  ".join(suffix_parts)
+            return f"  [{color}]◆[/{color}] [bold white]Forge[/bold white]  [dim]v0.1  ·  {suffix}[/dim]"
 
         def _provider_specialties(self) -> str:
             mapping = {
@@ -1307,7 +1304,7 @@ def create_textual_app(container, chat_id: int = 0):
             showing the new result below — matching the terminal-history model
             used by Claude Code and Qwen CLI.
             """
-            sep = "  [dim]" + "─  " * 34 + "[/dim]"
+            sep = "  [dim]" + "─  " * 28 + "[/dim]"
             if self._stream_lines:
                 self._append_stream("", sep, *content.splitlines())
             else:
@@ -1834,6 +1831,9 @@ def create_textual_app(container, chat_id: int = 0):
                 self.query_one("#input", Input).placeholder = "/help · @provider:prompt · @file · Shift+Enter multiline · Ctrl+F search"
                 self._set_orchestration_steps([])
                 self._add_timeline("Workspace reset.")
+                color = self._provider_color()
+                self._append_stream("", f"  [{color}]◆[/{color}] [dim]new session[/dim]")
+                self._dim_stream_history()
                 self._push_output(self._welcome_text())
                 self._refresh_all()
                 return
@@ -2488,7 +2488,7 @@ def create_textual_app(container, chat_id: int = 0):
                 "qwen": "#b07cff", "codex": "#6aa7ff", "claude": "#ff9e57",
             }.get(provider_name, "#6aa7ff")
             override_tag = f"  [dim](via {provider_override})[/dim]" if provider_override else ""
-            sep = "  [dim]" + "─  " * 34 + "[/dim]"
+            sep = "  [dim]" + "─  " * 28 + "[/dim]"
             self._dim_stream_history()
             self._append_stream(
                 "",
@@ -2616,7 +2616,7 @@ def create_textual_app(container, chat_id: int = 0):
             self._dim_stream_history()
             self._append_stream(
                 "",
-                "  [dim]" + "─  " * 34 + "[/dim]",
+                "  [dim]" + "─  " * 28 + "[/dim]",
                 f"  [dim]>[/dim] [white]{prompt[:120]}[/white]{ai_tag}",
                 f"  [dim]orchestrate  ·  {cwd}[/dim]",
                 "",
@@ -2655,7 +2655,7 @@ def create_textual_app(container, chat_id: int = 0):
                     step_color = self._provider_color()
                     self._append_stream(
                         "",
-                        "  [dim]" + "─  " * 19 + "[/dim]",
+                        "  [dim]" + "─  " * 14 + "[/dim]",
                         f"[{step_color}]▶[/] [bold]Step {next_index+1}/{len(plan.subtasks)}[/bold]  {subtask.title}  [dim][{subtask.suggested_provider}][/dim]",
                         f"  [dim]{cwd}[/dim]",
                     )
@@ -2665,14 +2665,14 @@ def create_textual_app(container, chat_id: int = 0):
                     if will_synthesize:
                         self._mark_orchestration_step(synthesis_idx, "running")
                     self._status_state.update({"action": "Synthesizing…", "tokens": 0, "start": _time.monotonic()})
-                    self._append_stream("", "  [dim]" + "─  " * 19 + "[/dim]", f"[{color}]▶[/] [bold]Synthesis[/bold]")
+                    self._append_stream("", "  [dim]" + "─  " * 14 + "[/dim]", f"[{color}]▶[/] [bold]Synthesis[/bold]")
                 elif "выполняет review" in lowered:
                     if will_synthesize:
                         self._mark_orchestration_step(synthesis_idx, "done")
                     if will_review:
                         self._mark_orchestration_step(review_idx, "running")
                     self._status_state.update({"action": "Reviewing…", "tokens": 0, "start": _time.monotonic()})
-                    self._append_stream("", "  [dim]" + "─  " * 19 + "[/dim]", f"[{color}]▶[/] [bold]Review[/bold]")
+                    self._append_stream("", "  [dim]" + "─  " * 14 + "[/dim]", f"[{color}]▶[/] [bold]Review[/bold]")
                 self._add_timeline(clean[:72])
 
             def stream_event_callback(line: str):

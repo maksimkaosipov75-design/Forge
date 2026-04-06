@@ -6,8 +6,8 @@ from pathlib import Path
 OUT = Path(__file__).parent / "images"
 OUT.mkdir(exist_ok=True)
 
-SEP = "  " + "─  " * 34
-SEP_SHORT = "  " + "─  " * 19
+SEP = "  " + "─  " * 28
+SEP_SHORT = "  " + "─  " * 14
 
 
 def make_console(width=102) -> Console:
@@ -19,9 +19,6 @@ def gen_welcome():
     c = make_console()
 
     c.print()
-    c.print("  [bold white]◆ Forge[/bold white]  [dim]v0.1  ·  qwen  ·  …/projects/api  ·  main*[/dim]")
-    c.print("  [dim]python · data · scripting[/dim]")
-    c.print()
     c.print(f"  [dim]{SEP}[/dim]")
     c.print()
     c.print("  [#b07cff]qwen    [/#b07cff]  [green]up[/green]")
@@ -31,9 +28,9 @@ def gen_welcome():
     c.print(f"  [dim]{SEP}[/dim]")
     c.print()
     c.print("  [bold dim]Recent runs[/bold dim]")
-    c.print("  ✅  [dim]single    [/dim]  [#b07cff]qwen[/#b07cff]")
-    c.print("  ✅  [dim]single    [/dim]  [#b07cff]qwen[/#b07cff]")
-    c.print("  ✅  [dim]orchestrat[/dim]  [dim]mixed[/dim]")
+    c.print("  ✅  [dim]single    [/dim]  [#b07cff]qwen[/#b07cff]  [dim]write unit tests for auth module[/dim]")
+    c.print("  ✅  [dim]single    [/dim]  [#b07cff]qwen[/#b07cff]  [dim]refactor session_store to async[/dim]")
+    c.print("  ✅  [dim]orchestrat[/dim]  [dim]mixed[/dim]  [dim]build REST API with JWT and SQLite[/dim]")
     c.print()
     c.print(f"  [dim]{SEP}[/dim]")
     c.print()

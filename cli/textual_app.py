@@ -733,6 +733,18 @@ def create_textual_app(container, chat_id: int = 0):
             }
             return mapping.get(self.current_provider, "#6aa7ff")
 
+        def _dim_stream_history(self):
+            """Dim all existing stream lines when a new session begins."""
+            dimmed = []
+            for line in self._stream_lines:
+                if not line.strip():
+                    dimmed.append(line)
+                elif line.startswith("[dim]") and line.endswith("[/dim]"):
+                    dimmed.append(line)
+                else:
+                    dimmed.append(f"[dim]{line}[/dim]")
+            self._stream_lines = dimmed
+
         @staticmethod
         def _plan_panel_lines(strategy: str, complexity: str, eta: str, rationale: str, width: int = 88) -> list[str]:
             """Render an AI Plan bordered panel as Rich markup lines."""
@@ -964,36 +976,6 @@ def create_textual_app(container, chat_id: int = 0):
 
             SEP = "  [dim]" + "─  " * 34 + "[/dim]"
 
-            # ── Logo ──────────────────────────────────────────────────────────
-            logos = {
-                "qwen": [
-                    "  ██████╗ ██╗    ██╗███████╗███╗   ██╗",
-                    "  ██╔══██╗██║    ██║██╔════╝████╗  ██║",
-                    "  ██║  ██║██║ █╗ ██║█████╗  ██╔██╗ ██║",
-                    "  ██║▄▄██╔╝██║███╗██║██╔══╝  ██║╚██╗██║",
-                    "  ╚██████╔╝╚███╔███╔╝███████╗██║ ╚████║",
-                    "   ╚══▀▀═╝  ╚══╝╚══╝ ╚══════╝╚═╝  ╚═══╝",
-                ],
-                "codex": [
-                    "   ██████╗ ██████╗ ██████╗ ███████╗██╗  ██╗",
-                    "  ██╔════╝██╔═══██╗██╔══██╗██╔════╝╚██╗██╔╝",
-                    "  ██║     ██║   ██║██║  ██║█████╗   ╚███╔╝ ",
-                    "  ██║     ██║   ██║██║  ██║██╔══╝   ██╔██╗ ",
-                    "  ╚██████╗╚██████╔╝██████╔╝███████╗██╔╝ ██╗",
-                    "   ╚═════╝ ╚═════╝ ╚═════╝ ╚══════╝╚═╝  ╚═╝",
-                ],
-                "claude": [
-                    "   ██████╗██╗      █████╗ ██╗   ██╗██████╗ ███████╗",
-                    "  ██╔════╝██║     ██╔══██╗██║   ██║██╔══██╗██╔════╝",
-                    "  ██║     ██║     ███████║██║   ██║██║  ██║█████╗  ",
-                    "  ██║     ██║     ██╔══██║██║   ██║██║  ██║██╔══╝  ",
-                    "  ╚██████╗███████╗██║  ██║╚██████╔╝██████╔╝███████╗",
-                    "   ╚═════╝╚══════╝╚═╝  ╚═╝ ╚═════╝ ╚═════╝ ╚══════╝",
-                ],
-            }
-            logo_lines = [f"[{color}]{l}[/{color}]" for l in logos.get(prov, [f"  {prov.upper()}"])]
-
-            # ── Session info ──────────────────────────────────────────────────
             specialties = {
                 "qwen":   "python · data · scripting",
                 "codex":  "systems · backend · refactor",
@@ -1001,61 +983,71 @@ def create_textual_app(container, chat_id: int = 0):
             }
             spec = specialties.get(prov, "general purpose")
 
-            providers_status = []
+            import pathlib
+            p = pathlib.Path(cwd)
+            try:
+                short_cwd = "…/" + "/".join(p.parts[-2:])
+            except Exception:
+                short_cwd = cwd
+
+            # ── Header ────────────────────────────────────────────────────────
+            git_part = f"  [dim]{git}[/dim]" if git else ""
+            header_lines = [
+                "",
+                f"  [bold white]◆ Forge[/bold white]  [dim]v0.1  ·  {prov}  ·  {short_cwd}{git_part}[/dim]",
+                f"  [dim]{spec}[/dim]",
+                "",
+                SEP,
+            ]
+
+            # ── Providers ─────────────────────────────────────────────────────
+            prov_colors = {"qwen": "#b07cff", "codex": "#6aa7ff", "claude": "#ff9e57"}
+            prov_lines = [""]
             for pname, pcli in container.provider_paths.items():
                 label, col = self._probe_provider_status(pname, pcli)
+                pcol = prov_colors.get(pname, color)
                 model_tag = session.provider_models.get(pname, "")
                 model_str = f"  [dim]{model_tag}[/dim]" if model_tag else ""
-                providers_status.append(f"[{color}]{pname}[/{color}]  [{col}]{label}[/{col}]{model_str}")
-
-            info_lines = [
-                f"  [{color}]>_ {prov.upper()}[/{color}]   {spec}",
-                f"",
-                f"  [dim]dir   [/dim]  {cwd}",
-            ]
-            if git:
-                info_lines.append(f"  [dim]git   [/dim]  [dim]{git}[/dim]")
-            info_lines.append(f"  [dim]remote[/dim]  [dim]{self.remote_state}[/dim]")
-            info_lines.append(f"")
-            info_lines.append(f"  [bold dim]Providers[/bold dim]")
-            for ps in providers_status:
-                info_lines.append(f"    {ps}")
+                prov_lines.append(
+                    f"  [{pcol}]{pname:<8}[/{pcol}]  [{col}]{label}[/{col}]{model_str}"
+                )
+            prov_lines.append("")
 
             # ── Recent runs ───────────────────────────────────────────────────
             recent = container.recent_runs(session, limit=5)
             if recent:
-                recent_lines = [
-                    f"  {run.status_emoji}  [dim]{run.mode:<14}[/dim]  "
-                    f"[{color}]{run.provider_summary or 'mixed'}[/{color}]"
-                    for run in recent
-                ]
+                recent_lines = []
+                for run in recent:
+                    pcol = prov_colors.get(run.provider_summary or "", color)
+                    recent_lines.append(
+                        f"  {run.status_emoji}  [dim]{run.mode:<10}[/dim]"
+                        f"  [{pcol}]{run.provider_summary or 'mixed'}[/{pcol}]"
+                    )
             else:
-                recent_lines = ["  [dim]No runs yet — send a prompt to get started.[/dim]"]
+                recent_lines = ["  [dim]No runs yet.[/dim]"]
 
-            # ── Quick command reference ───────────────────────────────────────
+            # ── Commands ──────────────────────────────────────────────────────
             cmd_cols = quick_reference_commands()
             cmd_lines = []
             for i in range(0, len(cmd_cols), 2):
                 left = cmd_cols[i]
                 right = cmd_cols[i + 1] if i + 1 < len(cmd_cols) else None
-                lstr = f"  [{color}]{left[0]:<20}[/{color}][dim]{left[1]}[/dim]"
-                rstr = f"  [{color}]{right[0]:<20}[/{color}][dim]{right[1]}[/dim]" if right else ""
+                lstr = f"  [{color}]{left[0]:<18}[/{color}][dim]{left[1]}[/dim]"
+                rstr = f"  [{color}]{right[0]:<18}[/{color}][dim]{right[1]}[/dim]" if right else ""
                 cmd_lines.append(lstr + rstr)
 
             # ── Assemble ──────────────────────────────────────────────────────
             parts: list[str] = [
-                "",
-                *logo_lines,
-                "",
+                *header_lines,
+                *prov_lines,
                 SEP,
-                *info_lines,
                 "",
-                SEP,
-                f"  [bold]Recent runs[/bold]",
+                f"  [bold dim]Recent runs[/bold dim]",
                 *recent_lines,
                 "",
                 SEP,
-                f"  [bold]Commands[/bold]  [dim](type / to open dropdown)[/dim]",
+                "",
+                f"  [bold dim]Commands[/bold dim]  [dim](type / to open dropdown)[/dim]",
                 *cmd_lines,
                 "",
                 SEP,
@@ -2501,6 +2493,7 @@ def create_textual_app(container, chat_id: int = 0):
             }.get(provider_name, "#6aa7ff")
             override_tag = f"  [dim](via {provider_override})[/dim]" if provider_override else ""
             sep = "  [dim]" + "─  " * 34 + "[/dim]"
+            self._dim_stream_history()
             self._append_stream(
                 "",
                 sep,
@@ -2624,6 +2617,7 @@ def create_textual_app(container, chat_id: int = 0):
                 step_labels.append("[pending] review")
             self._set_orchestration_steps(step_labels)
 
+            self._dim_stream_history()
             self._append_stream(
                 "",
                 "  [dim]" + "─  " * 34 + "[/dim]",

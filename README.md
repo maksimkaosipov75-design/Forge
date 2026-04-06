@@ -14,6 +14,10 @@ Forge gives you one interface for:
 
 ## Screenshots
 
+### Welcome Screen
+
+![Forge welcome screen](docs/images/forge-welcome.svg)
+
 ### Multi-provider Orchestration
 
 ![Forge orchestration plan](docs/images/forge-orchestration.svg)

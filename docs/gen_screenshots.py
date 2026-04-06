@@ -14,6 +14,56 @@ def make_console(width=102) -> Console:
     return Console(record=True, width=width, force_terminal=True, force_jupyter=False)
 
 
+# ── Screenshot 0: Welcome screen ─────────────────────────────────────────────
+def gen_welcome():
+    c = make_console()
+
+    c.print()
+    c.print("  [bold white]◆ Forge[/bold white]  [dim]v0.1  ·  qwen  ·  …/projects/api  ·  main*[/dim]")
+    c.print("  [dim]python · data · scripting[/dim]")
+    c.print()
+    c.print(f"  [dim]{SEP}[/dim]")
+    c.print()
+    c.print("  [#b07cff]qwen    [/#b07cff]  [green]up[/green]")
+    c.print("  [#6aa7ff]codex   [/#6aa7ff]  [green]up[/green]")
+    c.print("  [#ff9e57]claude  [/#ff9e57]  [green]up[/green]")
+    c.print()
+    c.print(f"  [dim]{SEP}[/dim]")
+    c.print()
+    c.print("  [bold dim]Recent runs[/bold dim]")
+    c.print("  ✅  [dim]single    [/dim]  [#b07cff]qwen[/#b07cff]")
+    c.print("  ✅  [dim]single    [/dim]  [#b07cff]qwen[/#b07cff]")
+    c.print("  ✅  [dim]orchestrat[/dim]  [dim]mixed[/dim]")
+    c.print()
+    c.print(f"  [dim]{SEP}[/dim]")
+    c.print()
+    c.print("  [bold dim]Commands[/bold dim]  [dim](type / to open dropdown)[/dim]")
+    c.print("  [#b07cff]/help              [/#b07cff][dim]help[/dim]"
+            "  [#b07cff]/commands          [/#b07cff][dim]all commands[/dim]")
+    c.print("  [#b07cff]/provider          [/#b07cff][dim]switch provider[/dim]"
+            "  [#b07cff]/model             [/#b07cff][dim]change model[/dim]")
+    c.print("  [#b07cff]/plan              [/#b07cff][dim]preview orchestration[/dim]"
+            "  [#b07cff]/run-plan          [/#b07cff][dim]execute preview[/dim]")
+    c.print("  [#b07cff]/orchestrate       [/#b07cff][dim]multi-agent run[/dim]"
+            "  [#b07cff]/review            [/#b07cff][dim]review last result[/dim]")
+    c.print("  [#b07cff]/runs              [/#b07cff][dim]run history[/dim]"
+            "  [#b07cff]/remote-control    [/#b07cff][dim]Telegram access[/dim]")
+    c.print()
+    c.print(f"  [dim]{SEP}[/dim]")
+    c.print(
+        "  [dim][bold]/[/bold] command menu   "
+        "[bold]Tab[/bold] autocomplete   "
+        "[bold]@file.py[/bold] inline file   "
+        "[bold]@provider:[/bold]prompt   "
+        "[bold]Shift+Enter[/bold] multi-line   "
+        "[bold]Ctrl+F[/bold] search[/dim]"
+    )
+    c.print()
+
+    c.save_svg(str(OUT / "forge-welcome.svg"), title="Forge · Welcome")
+    print("generated forge-welcome.svg")
+
+
 # ── Screenshot 1: /plan with Y/N confirmation ─────────────────────────────────
 def gen_orchestration():
     c = make_console()
@@ -132,7 +182,7 @@ def gen_diff():
     c.print()
 
     c.print(f"  [dim]{SEP}[/dim]")
-    c.print("  [dim]refactor session_store.py to use async SQLite[/dim]")
+    c.print("  [dim]>[/dim] [white]refactor session_store.py to use async SQLite[/white]")
     c.print("  [dim]qwen  ·  ~/projects/api[/dim]")
     c.print()
 
@@ -164,15 +214,13 @@ def gen_diff():
     c.print("  [#b07cff]✓[/#b07cff] Done  [dim]·  qwen  ·  8s[/dim]  [dim]·  1 file changed[/dim]")
     c.print()
 
-    # Scroll hint
-    c.print(f"  [dim]{SEP}[/dim]")
-    c.print("  [dim]scroll ↑↓ to browse history  ·  /diff  /save  /copy  /export[/dim]")
     c.print()
 
     c.save_svg(str(OUT / "forge-diff.svg"), title="Forge · Diff View")
     print("generated forge-diff.svg")
 
 
+gen_welcome()
 gen_orchestration()
 gen_streaming()
 gen_diff()

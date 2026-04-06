@@ -10,8 +10,6 @@ Forge gives you one interface for:
 - retrying failed steps, reviewing results, and recovering interrupted runs
 - using Telegram as remote control when you need to step away from the terminal
 
-`forge` launches the Textual TUI by default.
-
 ## Screenshots
 
 ### Welcome Screen
@@ -30,67 +28,41 @@ Forge gives you one interface for:
 
 ![Forge diff view](docs/images/forge-diff.svg)
 
-## Status
-
-`v0.1` release candidate.
-
-This release focuses on a practical, polished coding workflow:
-
-- TUI-first interface
-- single-agent runs
-- ordered multi-agent orchestration
-- checkpoints and recovery
-- SQLite-backed session persistence
-- metrics and provider health visibility
-
-Forge does **not** yet claim to be a full DAG scheduler or an autonomous agent swarm.
-
-## Features
-
-- TUI-first CLI with command palette style slash workflow
-- Lightweight fallback shell via `forge --shell`
-- Multi-provider execution: `qwen`, `codex`, `claude`
-- Provider and model switching in-session
-- Ordered orchestration with plan preview
-- Retry failed orchestration steps on another provider
-- Synthesis and review passes for multi-step runs
-- Run history, artifacts, diff, export, save, copy, clipboard helpers
-- Checkpoints and crash recovery
-- Telegram remote control
-- Provider health, limits, usage, and internal metrics
-- SQLite-backed session storage
-
 ## Quick Start
 
 ### Requirements
 
 - Python 3.11+
-- Installed and authenticated provider CLIs you want to use:
-  - `qwen`
-  - `codex`
-  - `claude`
+- One or more installed and authenticated provider CLIs:
+  - [`qwen`](https://github.com/QwenLM/qwen-agent)
+  - [`codex`](https://github.com/openai/codex)
+  - [`claude`](https://github.com/anthropics/claude-code)
 
-### Install dependencies
+### Install
 
 ```bash
-python -m pip install -r requirements.txt
+git clone https://github.com/maksimkaosipov75-design/Forge.git
+cd Forge
+python -m pip install -e .
 ```
 
-For development and coverage:
+`pip install -e .` installs all dependencies and registers the `forge` command.
+
+For development and coverage tools:
 
 ```bash
 python -m pip install -r requirements-dev.txt
 ```
 
-### Launch Forge
+### Launch
 
-Textual TUI:
+Textual TUI (default):
 
 ```bash
 forge
 ```
 
-Fallback line shell:
+Lightweight line shell:
 
 ```bash
 forge --shell
@@ -99,59 +71,59 @@ forge --shell
 One-shot non-interactive commands:
 
 ```bash
-python bridge_cli.py run "fix the parser"
-python bridge_cli.py orchestrate "build a small CLI app"
+forge run "fix the parser"
+forge orchestrate "build a small CLI app"
 ```
 
 ## Core Workflow
 
 ### Single-agent run
 
-Open Forge and type a normal prompt:
+Open Forge and type a prompt:
 
-```text
+```
 Refactor the session store and add tests
 ```
 
 ### Switch provider
 
-```text
+```
 /provider codex
 /model codex o3
 ```
 
 ### Preview an orchestration plan
 
-```text
+```
 /plan Build a desktop app with Python parsing, Rust backend, and GTK UI
 ```
 
 ### Run the last previewed plan
 
-```text
+```
 /run-plan
 ```
 
 ### Run orchestration directly
 
-```text
+```
 /orchestrate Build a desktop app with Python parsing, Rust backend, and GTK UI
 ```
 
 ### Review the last result
 
-```text
+```
 /review focus on bugs and missing tests
 ```
 
 ### Recover interrupted orchestration
 
-```text
+```
 /recover
 /recover confirm
 ```
 
-## Important Commands
+## Commands
 
 ### Session
 
@@ -202,35 +174,47 @@ Refactor the session store and add tests
 - `/remote-control stop`
 - `/remote-control logs`
 
+## Configuration
+
+Create a `.env` file in the project root:
+
+```bash
+# Provider CLI paths (if not on $PATH)
+QWEN_CLI_PATH=qwen
+CODEX_CLI_PATH=codex
+CLAUDE_CLI_PATH=claude
+
+# Limits
+RATE_LIMIT_MAX_REQUESTS=20
+RATE_LIMIT_WINDOW_SECONDS=3600
+MAX_PROMPT_LENGTH=12000
+
+# Telegram remote control (optional)
+TELEGRAM_TOKEN=...
+ALLOWED_USER_IDS=12345,67890
+```
+
 ## Telegram Remote Control
 
-Forge can expose the same session remotely through the Telegram bot layer.
+Forge can expose the current session remotely through a Telegram bot.
 
-Useful commands:
-
-```text
+```
 /remote-control
 /remote-control status
 /remote-control logs
 ```
 
+Requires `TELEGRAM_TOKEN` and `ALLOWED_USER_IDS` in `.env`.
+
 ## Storage
 
 Session state is stored in SQLite under `.session_data/session_store.sqlite3`.
 
-Artifacts and exported run markdown files are still written to the filesystem under `.session_data/`.
+Artifacts and exported run files are written under `.session_data/`.
 
 ## Metrics and Health
 
-Forge exposes:
-
-- in-app `/metrics`
-- provider health and limit summaries
-- optional local HTTP endpoints:
-  - `/health`
-  - `/metrics`
-
-Environment variables:
+Optional local HTTP endpoints:
 
 ```bash
 ENABLE_STATUS_HTTP=1
@@ -238,70 +222,48 @@ STATUS_HTTP_HOST=127.0.0.1
 STATUS_HTTP_PORT=8089
 ```
 
-## Configuration
+Endpoints: `/health`, `/metrics`
 
-Common environment variables:
-
-```bash
-QWEN_CLI_PATH=qwen
-CODEX_CLI_PATH=codex
-CLAUDE_CLI_PATH=claude
-
-RATE_LIMIT_MAX_REQUESTS=20
-RATE_LIMIT_WINDOW_SECONDS=3600
-MAX_PROMPT_LENGTH=12000
-```
-
-Telegram-related variables:
-
-```bash
-TELEGRAM_TOKEN=...
-ALLOWED_USER_IDS=12345,67890
-```
+In-session: `/metrics`, `/limits`, `/usage`
 
 ## Testing
 
-Run the full test suite:
-
 ```bash
-python -m unittest discover -s tests -p 'test_*.py' -q
+python -m pip install -r requirements-dev.txt
+python -m coverage run -m unittest discover -s tests -p 'test_*.py' -q
+python -m coverage report
 ```
 
 Syntax check:
 
 ```bash
-python -m py_compile bot.py cli/app.py runtime/orchestrator_service.py
+python -m compileall -q .
 ```
 
-## CI
+## Status
 
-GitHub Actions runs:
+`v0.1` — practical, polished coding workflow:
 
-- unit tests
-- coverage report generation
-- syntax verification
+- TUI-first interface
+- single-agent runs
+- ordered multi-agent orchestration
+- checkpoints and recovery
+- SQLite-backed session persistence
+- provider health and metrics
 
-Workflow file:
+## Limitations
 
-- [`.github/workflows/ci.yml`](/mnt/ae6f86e5-e0fd-4c0b-a314-c1c7c23881ec/projects/qwen-telegram-bridge/.github/workflows/ci.yml)
-
-## Current Limitations
-
-- Orchestration is **ordered-v1**, not a full dependency graph scheduler
-- `depends_on` is validated, but execution is still positioned as ordered orchestration
-- Dynamic replanning exists, but should be treated as a practical fallback, not guaranteed planning intelligence
-- Quality still depends on the installed provider CLIs and their authentication state
+- Orchestration is ordered (not a full DAG scheduler)
+- Dynamic replanning is a practical fallback, not guaranteed planning intelligence
+- Quality depends on the installed provider CLIs and their auth state
 
 ## Roadmap
 
-Post-`v0.1` priorities:
-
-- stronger dependency-aware orchestration
-- better dynamic replanning
-- richer permission UX
+- dependency-aware orchestration
+- dynamic replanning
 - cost tracking
 - benchmark mode
-- improved provider routing heuristics
+- improved provider routing
 
 ## License
 

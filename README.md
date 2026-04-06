@@ -14,17 +14,17 @@ Forge gives you one interface for:
 
 ## Screenshots
 
-### Welcome
+### Multi-provider Orchestration
 
-![Forge welcome screen](docs/images/forge-welcome.svg)
+![Forge orchestration plan](docs/images/forge-orchestration.svg)
 
-### Command Guide
+### Live Streaming with Operation Indicator
 
-![Forge command guide](docs/images/forge-help.svg)
+![Forge live streaming](docs/images/forge-streaming.svg)
 
-### Session Status
+### Diff View with Line Numbers
 
-![Forge session status](docs/images/forge-status.svg)
+![Forge diff view](docs/images/forge-diff.svg)
 
 ## Status
 

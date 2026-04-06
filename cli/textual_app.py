@@ -723,6 +723,7 @@ def create_textual_app(container, chat_id: int = 0):
             self._text_buffer: str = ""       # incomplete current line accumulator
             self._text_in_code: bool = False  # inside a ``` code fence?
             self._text_has_partial: bool = False  # is the last _stream_lines entry an unfinished partial?
+            self._awaiting_plan_confirm: bool = False  # True after /plan — next Enter runs or cancels
 
         def _provider_color(self) -> str:
             mapping = {
@@ -869,7 +870,7 @@ def create_textual_app(container, chat_id: int = 0):
             color = self._provider_color()
             git = _git_status_short(cwd)
 
-            SEP = f"[dim]{'─' * 72}[/dim]"
+            SEP = "  [dim]" + "─  " * 34 + "[/dim]"
 
             # ── Logo ──────────────────────────────────────────────────────────
             logos = {
@@ -999,22 +1000,23 @@ def create_textual_app(container, chat_id: int = 0):
             session = container.get_session(chat_id)
             cwd = str(session.file_mgr.get_working_dir())
             git = _git_status_short(cwd)
-            git_part = f"  {git}" if git else ""
             ctx_tok = self._ctx_input_tokens
-            ctx_part = f"  ctx:~{ctx_tok // 1000}k" if ctx_tok >= 1000 else ""
-            # Shorten cwd to last 2 parts for the titlebar
             import pathlib
             p = pathlib.Path(cwd)
-            short_cwd = "/".join(["…"] + [p.name] if p.parent != p else [str(p)])
             try:
                 short_cwd = "…/" + "/".join(p.parts[-2:])
             except Exception:
                 short_cwd = cwd
-            mode_part = f"  [{self.current_mode}]" if self.current_mode != "idle" else ""
-            return (
-                f" {self.current_provider.upper()}  {short_cwd}{git_part}{ctx_part}{mode_part}"
-                f"  remote:{self.remote_state}"
-            )
+            parts = [f"◆ Forge  v0.1  ·  {self.current_provider}  ·  {short_cwd}"]
+            if git:
+                parts.append(git)
+            if ctx_tok >= 1000:
+                parts.append(f"ctx:~{ctx_tok // 1000}k")
+            if self.current_mode != "idle":
+                parts.append(self.current_mode)
+            if self.remote_state != "stopped":
+                parts.append(f"remote:{self.remote_state}")
+            return "  " + "  ·  ".join(parts)
 
         def _provider_specialties(self) -> str:
             mapping = {
@@ -1225,7 +1227,7 @@ def create_textual_app(container, chat_id: int = 0):
             showing the new result below — matching the terminal-history model
             used by Claude Code and Qwen CLI.
             """
-            sep = f"[dim]{'─' * 72}[/dim]"
+            sep = "  [dim]" + "─  " * 34 + "[/dim]"
             if self._stream_lines:
                 self._append_stream("", sep, *content.splitlines())
             else:
@@ -1680,6 +1682,25 @@ def create_textual_app(container, chat_id: int = 0):
             if value.startswith("/") and " " not in value and suggestion and suggestion != value:
                 value = suggestion
 
+            # Y/N plan confirmation
+            if self._awaiting_plan_confirm:
+                self._awaiting_plan_confirm = False
+                self.query_one("#input", Input).placeholder = "/help · @provider:prompt · @file · Shift+Enter multiline · Ctrl+F search"
+                answer = value.lower().strip()
+                if answer in ("y", "yes", ""):
+                    plan = session.last_plan
+                    if plan is not None:
+                        if self._active_task is not None and not self._active_task.done():
+                            self._append_stream("  [dim]⏳ Task running — press Esc to cancel first[/dim]")
+                            return
+                        self._active_task = asyncio.create_task(
+                            self._run_orchestration(plan.prompt, prebuilt_plan=plan)
+                        )
+                    return
+                else:
+                    self._append_stream("  [dim]Plan cancelled.[/dim]")
+                    return
+
             if value.startswith("/"):
                 await self._handle_command(value)
                 return
@@ -1729,6 +1750,8 @@ def create_textual_app(container, chat_id: int = 0):
                 return
             if command in {"/home", "/new"}:
                 self.current_mode = "idle"
+                self._awaiting_plan_confirm = False
+                self.query_one("#input", Input).placeholder = "/help · @provider:prompt · @file · Shift+Enter multiline · Ctrl+F search"
                 self._set_orchestration_steps([])
                 self._add_timeline("Workspace reset.")
                 self._push_output(self._welcome_text())
@@ -1736,6 +1759,8 @@ def create_textual_app(container, chat_id: int = 0):
                 return
             if command == "/cls":
                 self._set_stream("")
+                self._awaiting_plan_confirm = False
+                self.query_one("#input", Input).placeholder = "/help · @provider:prompt · @file · Shift+Enter multiline · Ctrl+F search"
                 self._add_timeline("Stream cleared.")
                 return
             if command == "/clear":
@@ -2256,26 +2281,31 @@ def create_textual_app(container, chat_id: int = 0):
                 ai_tag = "  [dim](AI plan)[/dim]" if plan.ai_rationale else "  [dim](rule-based)[/dim]"
                 eta = container.orchestrator_service.estimate_plan_eta(plan, session)
                 cached_tag = "  [dim][cached][/dim]" if "[cached]" in plan.ai_rationale else ""
+                subtask_lines = [
+                    (
+                        f"  {index}. [bold]{item.title}[/bold]  [dim][{item.suggested_provider}]"
+                        + (f"  ∥group={item.parallel_group}" if item.parallel_group else "")
+                        + "[/dim]"
+                    )
+                    for index, item in enumerate(plan.subtasks, start=1)
+                ]
+                color = self._provider_color()
                 self._push_output(
                     "\n".join(
                         [
-                            f"[bold]complexity:[/bold] {plan.complexity}{ai_tag}{cached_tag}",
-                            f"[bold]strategy:[/bold] {plan.strategy}",
-                            f"[bold]estimated time:[/bold] {eta}",
-                            *(["", f"[dim]{plan.ai_rationale}[/dim]"] if plan.ai_rationale else []),
+                            f"  [dim]complexity[/dim]  {plan.complexity}{ai_tag}{cached_tag}",
+                            f"  [dim]strategy  [/dim]  {plan.strategy}",
+                            f"  [dim]eta       [/dim]  {eta}",
+                            *(["", f"  [dim]{plan.ai_rationale}[/dim]"] if plan.ai_rationale else []),
                             "",
-                            *[
-                                (
-                                    f"{index}. {item.title} [{item.suggested_provider}]"
-                                    + (f"  ∥group={item.parallel_group}" if item.parallel_group else "")
-                                )
-                                for index, item in enumerate(plan.subtasks, start=1)
-                            ],
+                            *subtask_lines,
                             "",
-                            "[dim]Run with [bold]/run-plan[/bold] to execute this plan.[/dim]",
+                            f"  Run this plan?  [{color}]Y[/{color}][dim]/n[/dim]  ·  or use [bold]/run-plan[/bold]  [dim]/edit-plan[/dim]",
                         ]
                     )
                 )
+                self._awaiting_plan_confirm = True
+                self.query_one("#input", Input).placeholder = "y to run · n to cancel · /edit-plan to adjust"
                 return
             if command == "/run-plan":
                 plan = session.last_plan
@@ -2384,13 +2414,13 @@ def create_textual_app(container, chat_id: int = 0):
             color = {
                 "qwen": "#b07cff", "codex": "#6aa7ff", "claude": "#ff9e57",
             }.get(provider_name, "#6aa7ff")
-            override_tag = f"  [dim](override)[/dim]" if provider_override else ""
-            sep = f"[dim]{'─' * 72}[/dim]"
+            override_tag = f"  [dim](via {provider_override})[/dim]" if provider_override else ""
+            sep = "  [dim]" + "─  " * 34 + "[/dim]"
             self._append_stream(
                 "",
                 sep,
-                f"[{color}]◆[/] [{color}]{provider_name}[/]{override_tag}  [dim]{cwd}[/dim]",
-                f"  [dim]{prompt[:120]}[/dim]",
+                f"  [white]{prompt[:120]}[/white]{override_tag}",
+                f"  [dim]{provider_name}  ·  {cwd}[/dim]",
                 "",
             )
 
@@ -2462,9 +2492,12 @@ def create_textual_app(container, chat_id: int = 0):
                 final_parts += ["", _md_to_rich(answer[:3000])]
             elif result.exit_code != 0 and result.error_text:
                 final_parts += ["", f"[red]{result.error_text[:500]}[/red]"]
+            files_changed = len(result.new_files) + len(result.changed_files)
+            files_part = f"  ·  [dim]{files_changed} file{'s' if files_changed != 1 else ''} changed[/dim]" if files_changed else ""
+            done_label = "Done" if result.exit_code == 0 else "Failed"
             final_parts += [
                 "",
-                f"  {status_icon} [{color}]{provider_name}[/]  [dim]{duration}[/dim]",
+                f"  {status_icon} {done_label}  [dim]·  {provider_name}  ·  {duration}[/dim]{files_part}",
             ]
             self._append_stream(*final_parts)
 
@@ -2508,9 +2541,9 @@ def create_textual_app(container, chat_id: int = 0):
 
             self._append_stream(
                 "",
-                f"[dim]{'─' * 72}[/dim]",
-                f"[{color}]◆[/] orchestrate{ai_tag}  [dim]{cwd}[/dim]",
-                f"  [dim]{prompt[:120]}[/dim]",
+                "  [dim]" + "─  " * 34 + "[/dim]",
+                f"  [white]{prompt[:120]}[/white]{ai_tag}",
+                f"  [dim]orchestrate  ·  {cwd}[/dim]",
                 "",
                 f"  strategy: {plan.strategy}",
                 *(["", f"  [dim]{plan.ai_rationale}[/dim]"] if plan.ai_rationale else []),
@@ -2547,7 +2580,7 @@ def create_textual_app(container, chat_id: int = 0):
                     step_color = self._provider_color()
                     self._append_stream(
                         "",
-                        f"[dim]{'─' * 38}[/dim]",
+                        "  [dim]" + "─  " * 19 + "[/dim]",
                         f"[{step_color}]▶[/] [bold]Step {next_index+1}/{len(plan.subtasks)}[/bold]  {subtask.title}  [dim][{subtask.suggested_provider}][/dim]",
                         f"  [dim]{cwd}[/dim]",
                     )
@@ -2557,14 +2590,14 @@ def create_textual_app(container, chat_id: int = 0):
                     if will_synthesize:
                         self._mark_orchestration_step(synthesis_idx, "running")
                     self._status_state.update({"action": "Synthesizing…", "tokens": 0, "start": _time.monotonic()})
-                    self._append_stream("", f"[dim]{'─' * 38}[/dim]", f"[{color}]▶[/] [bold]Synthesis[/bold]")
+                    self._append_stream("", "  [dim]" + "─  " * 19 + "[/dim]", f"[{color}]▶[/] [bold]Synthesis[/bold]")
                 elif "выполняет review" in lowered:
                     if will_synthesize:
                         self._mark_orchestration_step(synthesis_idx, "done")
                     if will_review:
                         self._mark_orchestration_step(review_idx, "running")
                     self._status_state.update({"action": "Reviewing…", "tokens": 0, "start": _time.monotonic()})
-                    self._append_stream("", f"[dim]{'─' * 38}[/dim]", f"[{color}]▶[/] [bold]Review[/bold]")
+                    self._append_stream("", "  [dim]" + "─  " * 19 + "[/dim]", f"[{color}]▶[/] [bold]Review[/bold]")
                 self._add_timeline(clean[:72])
 
             def stream_event_callback(line: str):

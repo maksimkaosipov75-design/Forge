@@ -87,11 +87,13 @@ def _action_from_event(line: str) -> str | None:
         tool = line.split(": ", 1)[-1].strip() if ": " in line else line[2:].strip()
         return (tool[:38] + "…") if len(tool) > 38 else tool + "…"
     if line.startswith(("✏️ ", "📂 ")):
-        parts = line[2:].strip().split()
-        return f"Writing {Path(parts[-1]).name}…" if parts else "Writing…"
+        raw = line.split(None, 1)[-1].strip() if " " in line else ""
+        fname = Path(raw.split()[-1]).name if raw.split() else ""
+        return f"Writing {fname}…" if fname else "Writing…"
     if line.startswith("👁️ "):
-        parts = line[2:].strip().split()
-        return f"Reading {Path(parts[-1]).name}…" if parts else "Reading…"
+        raw = line.split(None, 1)[-1].strip() if " " in line else ""
+        fname = Path(raw.split()[-1]).name if raw.split() else ""
+        return f"Reading {fname}…" if fname else "Reading…"
     if line.startswith("🐚 "):
         cmd = line[2:].strip()
         for pfx in ("Запускаю: ", "Running: "):
@@ -279,8 +281,15 @@ def _git_diff(path: Path) -> str | None:
     return None
 
 
+def _parse_hunk_header(line: str) -> tuple[int, int] | None:
+    """Parse '@@ -old_start,.. +new_start,.. @@' and return (old_start, new_start)."""
+    import re as _re2
+    m = _re2.match(r"@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@", line)
+    return (int(m.group(1)), int(m.group(2))) if m else None
+
+
 def _file_diff_text(file_path: str, is_new: bool, max_lines: int = 35, add_color: str = "green") -> list[str]:
-    """Return markup lines for a file diff/preview.
+    """Return markup lines for a file diff/preview with line numbers.
 
     add_color controls the color of added lines (+ lines and new-file content).
     Use the provider's accent color so diffs are visually attributed per agent.
@@ -312,31 +321,56 @@ def _file_diff_text(file_path: str, is_new: bool, max_lines: int = 35, add_color
                 ln for ln in diff.splitlines()
                 if not ln.startswith(("diff ", "index ", "--- ", "+++ "))
             ][:max_lines]
+            old_num: int | None = None
+            new_num: int | None = None
             for ln in hunk_lines:
-                if ln.startswith("+"):
-                    lines.append(f"  [{add_color}]{ln}[/{add_color}]")
+                if ln.startswith("@@"):
+                    parsed = _parse_hunk_header(ln)
+                    if parsed:
+                        old_num, new_num = parsed
+                    # Show hunk header compactly (only the @@ part)
+                    hdr = ln.split("@@")[1].strip() if ln.count("@@") >= 2 else ""
+                    hdr_safe = hdr[:60].replace("[", "\\[") if hdr else ""
+                    at_part = f"  [dim]@@  {hdr_safe}[/dim]" if hdr_safe else "  [dim]@@[/dim]"
+                    lines.append(at_part)
+                elif ln.startswith("+"):
+                    num_pfx = f"[dim]{new_num:>4}[/dim] " if new_num is not None else "     "
+                    safe = ln[1:].replace("[", "\\[")
+                    lines.append(f"  {num_pfx}[{add_color}]+[/{add_color}] [{add_color}]{safe}[/{add_color}]")
+                    if new_num is not None:
+                        new_num += 1
                 elif ln.startswith("-"):
-                    lines.append(f"  [red]{ln}[/red]")
-                elif ln.startswith("@@"):
-                    lines.append(f"  [dim]{ln}[/dim]")
+                    num_pfx = f"[dim]{old_num:>4}[/dim] " if old_num is not None else "     "
+                    safe = ln[1:].replace("[", "\\[")
+                    lines.append(f"  {num_pfx}[red]-[/red] [red]{safe}[/red]")
+                    if old_num is not None:
+                        old_num += 1
                 else:
-                    lines.append(f"  [dim]{ln}[/dim]")
+                    # Context line
+                    num_pfx = f"[dim]{new_num:>4}[/dim] " if new_num is not None else "     "
+                    safe = ln.replace("[", "\\[")
+                    lines.append(f"  {num_pfx}[dim]  {safe}[/dim]")
+                    if new_num is not None:
+                        new_num += 1
+                    if old_num is not None:
+                        old_num += 1
             if len(hunk_lines) == max_lines:
-                lines.append(f"  [dim]... (truncated)[/dim]")
+                lines.append("  [dim]… (truncated)[/dim]")
             return lines
         # no git diff — fall through to content
 
     try:
         content = path.read_text(errors="replace").splitlines()
         shown = content[:max_lines]
-        for ln in shown:
+        for line_num, ln in enumerate(shown, start=1):
             safe = ln.replace("[", "\\[")
+            num_pfx = f"[dim]{line_num:>4}[/dim] "
             if is_new:
-                lines.append(f"  [{add_color}]+ {safe}[/{add_color}]")
+                lines.append(f"  {num_pfx}[{add_color}]+ {safe}[/{add_color}]")
             else:
-                lines.append(f"  [dim]{safe}[/dim]")
+                lines.append(f"  {num_pfx}[dim]  {safe}[/dim]")
         if len(content) > max_lines:
-            lines.append(f"  [dim]... ({len(content) - max_lines} more lines)[/dim]")
+            lines.append(f"  [dim]… ({len(content) - max_lines} more lines)[/dim]")
     except Exception:
         pass
     return lines
@@ -356,28 +390,43 @@ def run_textual_shell(container, chat_id: int = 0):
         ) from exc
 
     COMMANDS: dict[str, tuple[str, str]] = {
-        "/help": ("Shell", "Show available commands"),
-        "/home": ("Shell", "Return to the start page"),
-        "/new": ("Shell", "Reset the shell workspace"),
-        "/clear": ("Shell", "Clear the stream output"),
-        "/save": ("Shell", "Save last answer to file (/save [filename])"),
-        "/export": ("Shell", "Export stream to file (/export [md|txt])"),
-        "/stats": ("Status", "Show per-provider performance stats"),
-        "/provider": ("Providers", "Switch the default provider  (@provider: prefix also works)"),
-        "/providers": ("Providers", "List available providers"),
-        "/status": ("Status", "Show current shell/session status"),
-        "/limits": ("Status", "Show provider health and limits"),
-        "/runs": ("History", "List recent runs"),
-        "/show": ("History", "Show details for a run by index"),
-        "/artifacts": ("History", "List latest artifact files"),
-        "/plan": ("Orchestration", "Preview an AI orchestration plan"),
-        "/orchestrate": ("Orchestration", "Run a multi-agent orchestration"),
-        "/replan": ("Orchestration", "Replan and retry the last partial/failed orchestration"),
-        "/retry": ("Shell", "Re-run the last prompt"),
-        "/expand": ("Shell", "Show full last answer without truncation"),
-        "/remote-control": ("Remote", "Start or manage Telegram remote access"),
-        "/quit": ("Shell", "Exit the textual shell"),
-        "/exit": ("Shell", "Exit the textual shell"),
+        # Shell
+        "/help":           ("Shell",         "Show available commands"),
+        "/home":           ("Shell",         "Return to the start page"),
+        "/new":            ("Shell",         "Reset the shell workspace"),
+        "/clear":          ("Shell",         "Clear the stream output"),
+        "/save":           ("Shell",         "Save last answer to file (/save [filename])"),
+        "/export":         ("Shell",         "Export stream to file (/export [md|txt])"),
+        "/retry":          ("Shell",         "Re-run the last prompt"),
+        "/expand":         ("Shell",         "Show full last answer without truncation"),
+        "/copy":           ("Shell",         "Copy last answer to clipboard"),
+        "/paste":          ("Shell",         "Show clipboard content in stream"),
+        "/history":        ("Shell",         "Show recent input history (/history [n])"),
+        "/quit":           ("Shell",         "Exit the textual shell"),
+        "/exit":           ("Shell",         "Exit the textual shell"),
+        # Workspace
+        "/cd":             ("Workspace",     "Change working directory (/cd <path>)"),
+        "/cwd":            ("Workspace",     "Print current working directory"),
+        "/diff":           ("Workspace",     "Show git diff for recent changes"),
+        # Status / Providers
+        "/stats":          ("Status",        "Show per-provider performance stats"),
+        "/status":         ("Status",        "Show current shell/session status"),
+        "/limits":         ("Status",        "Show provider health and rate limits"),
+        "/model":          ("Models",         "Show/set model  (/model [provider] [model|default])"),
+        "/provider":       ("Providers",     "Switch the default provider  (@provider: prefix also works)"),
+        "/providers":      ("Providers",     "List available providers and their paths"),
+        # History
+        "/runs":           ("History",       "List recent runs"),
+        "/show":           ("History",       "Show details for a run by index (/show <n>)"),
+        "/artifacts":      ("History",       "List latest artifact files"),
+        # Orchestration
+        "/plan":           ("Orchestration", "Preview an AI orchestration plan"),
+        "/run-plan":       ("Orchestration", "Execute the last previewed plan"),
+        "/orchestrate":    ("Orchestration", "Run a multi-agent orchestration"),
+        "/replan":         ("Orchestration", "Replan and retry the last partial/failed orchestration"),
+        "/recover":        ("Orchestration", "Resume orchestration from a crash checkpoint"),
+        # Remote
+        "/remote-control": ("Remote",        "Start or manage Telegram remote access"),
     }
 
     class SlashCommandSuggester(Suggester):
@@ -422,6 +471,68 @@ def run_textual_shell(container, chat_id: int = 0):
 
             return None
 
+    class CommandDropdown(Static):
+        """Floating dropdown showing slash command completions."""
+
+        def __init__(self):
+            super().__init__("", id="command-dropdown")
+            self.matches: list[str] = []
+            self.selected: int = 0
+
+        def refresh_matches(self, partial: str) -> int:
+            """Recompute matches for *partial* (starts with /).  Returns count."""
+            low = partial.casefold()
+            self.matches = [k for k in COMMANDS if k.casefold().startswith(low)]
+            self.selected = min(self.selected, max(0, len(self.matches) - 1))
+            self._render_list()
+            return len(self.matches)
+
+        def move(self, delta: int):
+            if not self.matches:
+                return
+            self.selected = (self.selected + delta) % len(self.matches)
+            self._render_list()
+
+        def current(self) -> str | None:
+            if not self.matches:
+                return None
+            return self.matches[self.selected]
+
+        _WINDOW = 7  # items visible at once (leave 1 row for ▲/▼ each)
+
+        def _render_list(self):
+            total = len(self.matches)
+            if not total:
+                self.update("")
+                return
+
+            W = self._WINDOW
+            # Slide the window so selected is always visible
+            half = W // 2
+            start = max(0, min(self.selected - half, total - W))
+            end = min(total, start + W)
+
+            lines = []
+            if start > 0:
+                lines.append(f"  [dim]  ▲  {start} more[/dim]")
+            for i in range(start, end):
+                name = self.matches[i]
+                group, desc = COMMANDS[name]
+                safe_desc = desc.replace("[", "\\[")
+                safe_name = name.replace("[", "\\[")
+                if i == self.selected:
+                    lines.append(
+                        f"  [bold reverse] ▶ {safe_name:<22}[/bold reverse]"
+                        f"  [dim]{group} — {safe_desc}[/dim]"
+                    )
+                else:
+                    lines.append(
+                        f"  [dim]   {safe_name:<22}  {group} — {safe_desc}[/dim]"
+                    )
+            if end < total:
+                lines.append(f"  [dim]  ▼  {total - end} more[/dim]")
+            self.update("\n".join(lines))
+
     class TitleWidget(Static):
         pass
 
@@ -449,32 +560,35 @@ def run_textual_shell(container, chat_id: int = 0):
 
         #titlebar {
             height: 1;
-            padding: 0 1;
+            padding: 0 2;
             background: #1a1d25;
             color: #9aa3b2;
         }
 
         #workspace {
-            margin: 0 1;
+            margin: 0;
             height: 1fr;
         }
 
         #stream-scroll {
-            border: round #6aa7ff;
             height: 1fr;
             width: 1fr;
+            border: none;
+            scrollbar-size-vertical: 0;
+            scrollbar-size-horizontal: 0;
+            scrollbar-background: #111318;
+            scrollbar-color: #111318;
         }
 
         #stream {
-            padding: 0 1;
+            padding: 0 2;
             height: auto;
             width: 100%;
         }
 
         #side {
-            border: round #ff9e57;
-            padding: 0 1;
-            width: 34;
+            display: none;
+            width: 0;
         }
 
         #statusline {
@@ -529,6 +643,23 @@ def run_textual_shell(container, chat_id: int = 0):
         #autoscroll-indicator.active {
             display: block;
         }
+
+        #command-dropdown {
+            dock: bottom;
+            margin: 0 1 0 1;
+            height: auto;
+            max-height: 11;
+            background: #1a1d25;
+            border: round #444455;
+            padding: 0 0;
+            display: none;
+            overflow-y: hidden;
+            overflow-x: hidden;
+        }
+
+        #command-dropdown.active {
+            display: block;
+        }
         """
 
         current_provider = reactive("qwen")
@@ -554,6 +685,12 @@ def run_textual_shell(container, chat_id: int = 0):
             self._search_active: bool = False  # Ctrl+F search mode
             self._search_snapshot: list[str] = []  # stream snapshot before search
             self._task_start_time: float = 0.0  # for notify-send on long tasks
+            self._streamed_text_start: int | None = None  # index of first 💬 line in current run
+            self._active_task: asyncio.Task | None = None  # running prompt / orchestration task
+            # Operation indicator state — groups consecutive read/write events into one line
+            self._op_type: str = ""           # "reading" | "writing" | "running" | ""
+            self._op_files: list[str] = []    # filenames accumulated for current op group
+            self._op_line_idx: int = -1       # index in _stream_lines of the op indicator line
 
         def _provider_color(self) -> str:
             mapping = {
@@ -568,13 +705,13 @@ def run_textual_shell(container, chat_id: int = 0):
             self.current_provider = session.current_provider
             yield TitleWidget(self._titlebar_text(), id="titlebar")
             with Container(id="workspace"):
-                with Horizontal():
-                    with VerticalScroll(id="stream-scroll"):
-                        yield StreamWidget("Ready.", id="stream")
-                    yield SideWidget(self._side_text(), id="side")
+                with VerticalScroll(id="stream-scroll"):
+                    yield StreamWidget("", id="stream")
+                yield SideWidget("", id="side")  # hidden via CSS; kept for compat
             yield StatusLineWidget("", id="statusline")
             yield AutoscrollIndicator("", id="autoscroll-indicator")
             yield MultilinePreview("", id="multiline-preview")
+            yield CommandDropdown()
             yield Input(
                 placeholder="/help · @provider:prompt · @file · Shift+Enter multiline · Ctrl+F search",
                 id="input",
@@ -602,11 +739,228 @@ def run_textual_shell(container, chat_id: int = 0):
             except Exception:
                 pass
 
+        def _probe_provider_status(self, name: str, cli_path: str) -> tuple[str, str]:
+            """Returns (label, hex_color) for a provider.
+            Fast synchronous check — no subprocess, no blocking I/O beyond a small JSON read.
+            Priority: runtime.health (authoritative) → static probe (binary + auth files).
+            """
+            import shutil as _sh, json as _pj, time as _pt, os as _po
+            from pathlib import Path as _PP
+
+            session = container.get_session(chat_id)
+            runtime = session.runtimes.get(name)
+
+            # ── Runtime health (from actual API usage) ────────────────────────
+            if runtime is not None and runtime.health is not None:
+                h = runtime.health
+                if h.is_available_now():
+                    fails = f"  {h.consecutive_failures}✗" if h.consecutive_failures else ""
+                    return f"up{fails}", "#44dd88"
+                reason = h.last_failure.short_label if h.last_failure else "unavailable"
+                ri = h.retry_in_seconds
+                if ri and ri > 0:
+                    m, s = divmod(ri, 60)
+                    timer = f"{m}m" if m else f"{s}s"
+                    return f"{reason}  retry {timer}", "#ff6666"
+                return reason, "#ff6666"
+
+            # ── Static probe (no runtime yet) ─────────────────────────────────
+            home = _PP.home()
+
+            # 1. Binary installed?
+            if not _sh.which(cli_path) and not _PP(cli_path).is_file():
+                return "not installed", "#666666"
+
+            # 2. Auth / credentials check (provider-specific)
+            if name == "qwen":
+                creds_file = home / ".qwen" / "oauth_creds.json"
+                if not creds_file.exists():
+                    return "no auth  (run: qwen login)", "#ffaa44"
+                try:
+                    creds = _pj.loads(creds_file.read_text())
+                    exp_ms = float(creds.get("expiry_date", 0))
+                    if exp_ms:
+                        remaining = exp_ms / 1000 - _pt.time()
+                        if remaining <= 0:
+                            return "token expired", "#ff6666"
+                        h_left = int(remaining / 3600)
+                        m_left = int((remaining % 3600) / 60)
+                        if remaining < 600:          # < 10 min — urgent
+                            return f"token ~{m_left}m left", "#ff9944"
+                        if remaining < 3600:         # < 1h — warn
+                            return f"ready  (~{m_left}m)", "#ffcc44"
+                        return f"ready  (~{h_left}h)", "#44dd88"
+                    return "ready", "#44dd88"
+                except Exception as exc:
+                    return f"auth err: {exc}", "#ffaa44"
+
+            elif name == "codex":
+                # Codex uses ChatGPT OAuth stored in ~/.codex/auth.json
+                auth_file = home / ".codex" / "auth.json"
+                if auth_file.exists():
+                    try:
+                        auth = _pj.loads(auth_file.read_text())
+                        tokens = auth.get("tokens", {})
+                        if tokens.get("access_token") or tokens.get("id_token") or auth.get("OPENAI_API_KEY"):
+                            return "ready", "#44dd88"
+                        return "no token", "#ffaa44"
+                    except Exception:
+                        return "auth err", "#ffaa44"
+                # Fallback: env var
+                if _po.getenv("OPENAI_API_KEY"):
+                    return "ready  (env key)", "#44dd88"
+                return "no auth  (run: codex login)", "#ffaa44"
+
+            elif name == "claude":
+                # Claude Code authenticates via claude.ai OAuth
+                # Active sessions are stored in ~/.claude/sessions/
+                sessions_dir = home / ".claude" / "sessions"
+                if sessions_dir.exists():
+                    session_files = list(sessions_dir.iterdir())
+                    if session_files:
+                        return "ready", "#44dd88"
+                # Check ANTHROPIC_API_KEY as fallback
+                if _po.getenv("ANTHROPIC_API_KEY"):
+                    return "ready  (env key)", "#44dd88"
+                # Settings exist → installed but maybe no active session
+                if (home / ".claude" / "settings.json").exists():
+                    return "no session  (run: claude login)", "#ffaa44"
+                return "no auth", "#ffaa44"
+
+            # Unknown provider — binary is there, assume OK
+            return "ready", "#44dd88"
+
+        def _welcome_text(self) -> str:
+            session = container.get_session(chat_id)
+            cwd = str(session.file_mgr.get_working_dir())
+            prov = self.current_provider
+            color = self._provider_color()
+            git = _git_status_short(cwd)
+
+            SEP = f"[dim]{'─' * 72}[/dim]"
+
+            # ── Logo ──────────────────────────────────────────────────────────
+            logos = {
+                "qwen": [
+                    "  ██████╗ ██╗    ██╗███████╗███╗   ██╗",
+                    "  ██╔══██╗██║    ██║██╔════╝████╗  ██║",
+                    "  ██║  ██║██║ █╗ ██║█████╗  ██╔██╗ ██║",
+                    "  ██║▄▄██╔╝██║███╗██║██╔══╝  ██║╚██╗██║",
+                    "  ╚██████╔╝╚███╔███╔╝███████╗██║ ╚████║",
+                    "   ╚══▀▀═╝  ╚══╝╚══╝ ╚══════╝╚═╝  ╚═══╝",
+                ],
+                "codex": [
+                    "   ██████╗ ██████╗ ██████╗ ███████╗██╗  ██╗",
+                    "  ██╔════╝██╔═══██╗██╔══██╗██╔════╝╚██╗██╔╝",
+                    "  ██║     ██║   ██║██║  ██║█████╗   ╚███╔╝ ",
+                    "  ██║     ██║   ██║██║  ██║██╔══╝   ██╔██╗ ",
+                    "  ╚██████╗╚██████╔╝██████╔╝███████╗██╔╝ ██╗",
+                    "   ╚═════╝ ╚═════╝ ╚═════╝ ╚══════╝╚═╝  ╚═╝",
+                ],
+                "claude": [
+                    "   ██████╗██╗      █████╗ ██╗   ██╗██████╗ ███████╗",
+                    "  ██╔════╝██║     ██╔══██╗██║   ██║██╔══██╗██╔════╝",
+                    "  ██║     ██║     ███████║██║   ██║██║  ██║█████╗  ",
+                    "  ██║     ██║     ██╔══██║██║   ██║██║  ██║██╔══╝  ",
+                    "  ╚██████╗███████╗██║  ██║╚██████╔╝██████╔╝███████╗",
+                    "   ╚═════╝╚══════╝╚═╝  ╚═╝ ╚═════╝ ╚═════╝ ╚══════╝",
+                ],
+            }
+            logo_lines = [f"[{color}]{l}[/{color}]" for l in logos.get(prov, [f"  {prov.upper()}"])]
+
+            # ── Session info ──────────────────────────────────────────────────
+            specialties = {
+                "qwen":   "python · data · scripting",
+                "codex":  "systems · backend · refactor",
+                "claude": "ui · ux · writing",
+            }
+            spec = specialties.get(prov, "general purpose")
+
+            providers_status = []
+            for pname, pcli in container.provider_paths.items():
+                label, col = self._probe_provider_status(pname, pcli)
+                model_tag = session.provider_models.get(pname, "")
+                model_str = f"  [dim]{model_tag}[/dim]" if model_tag else ""
+                providers_status.append(f"[{color}]{pname}[/{color}]  [{col}]{label}[/{col}]{model_str}")
+
+            info_lines = [
+                f"  [{color}]>_ {prov.upper()}[/{color}]   {spec}",
+                f"",
+                f"  [dim]dir   [/dim]  {cwd}",
+            ]
+            if git:
+                info_lines.append(f"  [dim]git   [/dim]  [dim]{git}[/dim]")
+            info_lines.append(f"  [dim]remote[/dim]  [dim]{self.remote_state}[/dim]")
+            info_lines.append(f"")
+            info_lines.append(f"  [bold dim]Providers[/bold dim]")
+            for ps in providers_status:
+                info_lines.append(f"    {ps}")
+
+            # ── Recent runs ───────────────────────────────────────────────────
+            recent = container.recent_runs(session, limit=5)
+            if recent:
+                recent_lines = [
+                    f"  {run.status_emoji}  [dim]{run.mode:<14}[/dim]  "
+                    f"[{color}]{run.provider_summary or 'mixed'}[/{color}]"
+                    for run in recent
+                ]
+            else:
+                recent_lines = ["  [dim]No runs yet — send a prompt to get started.[/dim]"]
+
+            # ── Quick command reference ───────────────────────────────────────
+            cmd_cols = [
+                ("/help", "this screen"),
+                ("/provider", "switch provider"),
+                ("/new", "reset workspace"),
+                ("/cd", "change directory"),
+                ("/runs", "run history"),
+                ("/plan", "orchestration plan"),
+                ("/orchestrate", "multi-agent run"),
+                ("/stats", "performance stats"),
+                ("/remote-control", "Telegram access"),
+                ("/diff", "git diff"),
+            ]
+            cmd_lines = []
+            for i in range(0, len(cmd_cols), 2):
+                left = cmd_cols[i]
+                right = cmd_cols[i + 1] if i + 1 < len(cmd_cols) else None
+                lstr = f"  [{color}]{left[0]:<20}[/{color}][dim]{left[1]}[/dim]"
+                rstr = f"  [{color}]{right[0]:<20}[/{color}][dim]{right[1]}[/dim]" if right else ""
+                cmd_lines.append(lstr + rstr)
+
+            # ── Assemble ──────────────────────────────────────────────────────
+            parts: list[str] = [
+                "",
+                *logo_lines,
+                "",
+                SEP,
+                *info_lines,
+                "",
+                SEP,
+                f"  [bold]Recent runs[/bold]",
+                *recent_lines,
+                "",
+                SEP,
+                f"  [bold]Commands[/bold]  [dim](type / to open dropdown)[/dim]",
+                *cmd_lines,
+                "",
+                SEP,
+                f"  [dim][bold]/[/bold] command menu   "
+                f"[bold]Tab[/bold] autocomplete   "
+                f"[bold]@file.py[/bold] inline file   "
+                f"[bold]@provider:[/bold]prompt   "
+                f"[bold]Shift+Enter[/bold] multi-line   "
+                f"[bold]Ctrl+F[/bold] search[/dim]",
+                "",
+            ]
+            return "\n".join(parts)
+
         def on_mount(self):
             self._load_history()
             self._sync_remote_state()
             self._apply_provider_theme()
             self._refresh_all()
+            self._set_stream(self._welcome_text())
             # Auto-refresh sidebar health every 30s
             self.set_interval(30, self._auto_refresh)
 
@@ -623,16 +977,22 @@ def run_textual_shell(container, chat_id: int = 0):
         def _titlebar_text(self) -> str:
             session = container.get_session(chat_id)
             cwd = str(session.file_mgr.get_working_dir())
-            specialties = {"qwen": "python·data", "codex": "backend·refactor", "claude": "ui·writing"}
-            spec = specialties.get(self.current_provider, "general")
             git = _git_status_short(cwd)
-            git_part = f"  git:{git}" if git else ""
+            git_part = f"  {git}" if git else ""
             ctx_tok = self._ctx_input_tokens
-            ctx_part = f"  ctx:~{ctx_tok // 1000}k" if ctx_tok >= 1000 else (f"  ctx:{ctx_tok}" if ctx_tok else "")
+            ctx_part = f"  ctx:~{ctx_tok // 1000}k" if ctx_tok >= 1000 else ""
+            # Shorten cwd to last 2 parts for the titlebar
+            import pathlib
+            p = pathlib.Path(cwd)
+            short_cwd = "/".join(["…"] + [p.name] if p.parent != p else [str(p)])
+            try:
+                short_cwd = "…/" + "/".join(p.parts[-2:])
+            except Exception:
+                short_cwd = cwd
+            mode_part = f"  [{self.current_mode}]" if self.current_mode != "idle" else ""
             return (
-                f">_ {self.current_provider.upper()} [{spec}]  "
-                f"{cwd}{git_part}{ctx_part}  "
-                f"mode:{self.current_mode}  remote:{self.remote_state}"
+                f" {self.current_provider.upper()}  {short_cwd}{git_part}{ctx_part}{mode_part}"
+                f"  remote:{self.remote_state}"
             )
 
         def _provider_specialties(self) -> str:
@@ -654,18 +1014,9 @@ def run_textual_shell(container, chat_id: int = 0):
                     for index, run in enumerate(recent, start=1)
                 ]
             provider_lines = []
-            for provider_name in container.provider_paths:
-                runtime = session.runtimes.get(provider_name)
-                if runtime is None or runtime.health is None:
-                    provider_lines.append(f"{provider_name}: unknown")
-                    continue
-                health = runtime.health
-                state = "up" if health.available else "limited"
-                if health.last_failure:
-                    state += f" · {health.last_failure.short_label}"
-                    if health.last_failure.retry_at:
-                        state += f" @ {health.last_failure.retry_at}"
-                provider_lines.append(f"{provider_name}: {state}")
+            for provider_name, pcli in container.provider_paths.items():
+                label, _ = self._probe_provider_status(provider_name, pcli)
+                provider_lines.append(f"{provider_name}: {label}")
             command_hint_lines = self._command_hint_lines()
             return "\n".join(
                 [
@@ -727,7 +1078,7 @@ def run_textual_shell(container, chat_id: int = 0):
 
         def _apply_provider_theme(self):
             color = self._provider_color()
-            self.query_one("#stream-scroll", VerticalScroll).styles.border = ("round", color)
+            # Only the input box gets the provider accent border; stream area is borderless
             self.query_one("#input", Input).styles.border = ("round", color)
 
         def _refresh_all(self):
@@ -846,38 +1197,105 @@ def run_textual_shell(container, chat_id: int = 0):
             self.query_one("#stream", StreamWidget).update(content)
             self.call_after_refresh(self._scroll_to_bottom)
 
+        def _push_output(self, content: str):
+            """Append command output below existing stream content with a separator.
+
+            This keeps the welcome screen (or prior output) visible above while
+            showing the new result below — matching the terminal-history model
+            used by Claude Code and Qwen CLI.
+            """
+            sep = f"[dim]{'─' * 72}[/dim]"
+            if self._stream_lines:
+                self._append_stream("", sep, *content.splitlines())
+            else:
+                self._set_stream(content)
+
         def _append_stream(self, *lines: str):
             self._last_stream_was_text = False
             self._stream_lines.extend(line for line in lines if line is not None)
-            self._stream_lines = self._stream_lines[-300:]
+            self._stream_lines = self._stream_lines[-5000:]
             self.query_one("#stream", StreamWidget).update("\n".join(self._stream_lines))
             self.call_after_refresh(self._scroll_to_bottom)
+
+        def _op_indicator_text(self, op_type: str, files: list[str], color: str) -> str:
+            """Render the 'reading N file(s) · name' indicator line."""
+            n = len(files)
+            noun = f"{n} file" if n == 1 else f"{n} files"
+            # Show up to 3 filenames inline
+            names = ", ".join(Path(f).name for f in files[:3])
+            if len(files) > 3:
+                names += f", +{len(files) - 3} more"
+            if op_type == "reading":
+                icon = "[dim]↳[/dim]"
+                action = f"[dim]reading {noun}[/dim]"
+            elif op_type == "writing":
+                icon = f"[{color}]↳[/{color}]"
+                action = f"[{color}]writing {noun}[/{color}]"
+            else:
+                icon = "[dim]↳[/dim]"
+                action = f"[dim]{op_type}[/dim]"
+            return f"  {icon} {action}  [dim]{names}[/dim]"
+
+        def _writing_indicator(self, color: str) -> str:
+            """Single-line 'Writing…' indicator shown during token streaming."""
+            tok = self._status_state.get("output_tokens") or self._status_state.get("tokens", 0)
+            tok_str = f"  [dim]↑ {tok / 1000:.1f}k tokens[/dim]" if tok >= 1000 else (f"  [dim]↑ {tok} tokens[/dim]" if tok else "")
+            return f"  [{color}]◆[/] [dim]Writing…[/dim]{tok_str}"
 
         def _append_stream_event(self, line: str):
             """Format and append a stream event line to the stream widget."""
             color = self._provider_color()
             if line.startswith("💬 "):
-                # Escape [ so Rich doesn't mis-parse raw markdown from the model
-                chunk = line[2:].strip().replace("[", "\\[")
-                if self._last_stream_was_text and self._stream_lines:
-                    # Merge with the previous text line — streaming arrives as small chunks
-                    self._stream_lines[-1] = self._stream_lines[-1] + chunk
+                # Any text chunk resets the op group
+                self._op_type = ""
+                self._op_files = []
+                self._op_line_idx = -1
+                # Instead of showing raw markdown chunks, keep one updating indicator line.
+                # The final formatted answer is injected by _run_prompt_inner when done.
+                if self._streamed_text_start is None:
+                    self._streamed_text_start = len(self._stream_lines)
+                    self._stream_lines.append(self._writing_indicator(color))
                 else:
-                    self._stream_lines.append("  " + chunk)
-                    self._last_stream_was_text = True
-                self._stream_lines = self._stream_lines[-300:]
+                    # Update the indicator in-place with the latest token count
+                    idx = self._streamed_text_start
+                    if 0 <= idx < len(self._stream_lines):
+                        self._stream_lines[idx] = self._writing_indicator(color)
+                self._last_stream_was_text = False
+                self._stream_lines = self._stream_lines[-5000:]
                 self.query_one("#stream", StreamWidget).update("\n".join(self._stream_lines))
                 self.call_after_refresh(self._scroll_to_bottom)
                 return
+
             # Any non-text event ends the current text run
             self._last_stream_was_text = False
+
+            # ---- Read events: group into a single updating indicator line ----
+            if line.startswith("👁️ "):
+                raw = line.split(None, 1)[-1].strip() if " " in line else ""
+                # Extract the last token as filename (events may contain extra words)
+                fname = raw.split()[-1] if raw.split() else raw
+                self._flush_op_if_changed("reading")
+                self._op_files.append(fname)
+                self._upsert_op_line(color)
+                return
+
+            # ---- Write events: same grouping ----
+            if line.startswith(("✏️ ", "📂 ")):
+                raw = line.split(None, 1)[-1].strip() if " " in line else ""
+                fname = raw.split()[-1] if raw.split() else raw
+                self._flush_op_if_changed("writing")
+                self._op_files.append(fname)
+                self._upsert_op_line(color)
+                return
+
+            # Any other event type ends the current read/write group
+            self._op_type = ""
+            self._op_files = []
+            self._op_line_idx = -1
+
             if line.startswith("🔧 Использую: ") or line.startswith("🔧 "):
                 tool = line.split(": ", 1)[-1].strip() if ": " in line else line[2:].strip()
                 formatted = f"  [{color}]✦[/] [dim]{tool.replace('[', chr(92) + '[')}[/dim]"
-            elif line.startswith(("✏️ ", "📂 ")):
-                formatted = f"  [{color}]✦[/] [dim]{line[2:].strip().replace('[', chr(92) + '[')}[/dim]"
-            elif line.startswith("👁️ "):
-                formatted = f"  [dim]{line[2:].strip().replace('[', chr(92) + '[')}[/dim]"
             elif line.startswith("🐚 "):
                 cmd = line[2:].strip()
                 for pfx in ("Запускаю: ", "Running: "):
@@ -894,7 +1312,32 @@ def run_textual_shell(container, chat_id: int = 0):
             else:
                 return
             self._stream_lines.append(formatted)
-            self._stream_lines = self._stream_lines[-300:]
+            self._stream_lines = self._stream_lines[-5000:]
+            self.query_one("#stream", StreamWidget).update("\n".join(self._stream_lines))
+            self.call_after_refresh(self._scroll_to_bottom)
+
+        def _flush_op_if_changed(self, new_op: str):
+            """If the op type changed, finalize the old group and start fresh."""
+            if self._op_type and self._op_type != new_op:
+                self._op_type = ""
+                self._op_files = []
+                self._op_line_idx = -1
+            self._op_type = new_op
+
+        def _upsert_op_line(self, color: str):
+            """Create or update the operation indicator line in-place."""
+            text = self._op_indicator_text(self._op_type, self._op_files, color)
+            if self._op_line_idx >= 0 and self._op_line_idx < len(self._stream_lines):
+                # Update the existing indicator line in-place
+                self._stream_lines[self._op_line_idx] = text
+            else:
+                # Append a new indicator line and record its index
+                self._stream_lines.append(text)
+                self._op_line_idx = len(self._stream_lines) - 1
+            self._stream_lines = self._stream_lines[-5000:]
+            # After truncation the index may have shifted — recalculate
+            if self._op_line_idx >= 0:
+                self._op_line_idx = max(0, self._op_line_idx - max(0, len(self._stream_lines) - 300))
             self.query_one("#stream", StreamWidget).update("\n".join(self._stream_lines))
             self.call_after_refresh(self._scroll_to_bottom)
 
@@ -963,7 +1406,43 @@ def run_textual_shell(container, chat_id: int = 0):
 
         # on_input_changed is merged below into the async handler
 
+        def _dropdown_active(self) -> bool:
+            try:
+                return "active" in self.query_one("#command-dropdown", CommandDropdown).classes
+            except Exception:
+                return False
+
+        def _dropdown_complete(self):
+            """Fill input with currently selected dropdown command."""
+            dd = self.query_one("#command-dropdown", CommandDropdown)
+            chosen = dd.current()
+            if chosen:
+                inp = self.query_one("#input", Input)
+                inp.value = chosen + " "
+                inp.cursor_position = len(inp.value)
+            dd.remove_class("active")
+
         async def on_key(self, event) -> None:
+            # Dropdown navigation — intercept before other handlers
+            if self._dropdown_active():
+                dd = self.query_one("#command-dropdown", CommandDropdown)
+                if event.key in ("tab", "down"):
+                    dd.move(1)
+                    event.prevent_default()
+                    return
+                if event.key == "up":
+                    dd.move(-1)
+                    event.prevent_default()
+                    return
+                if event.key in ("enter", "return"):
+                    self._dropdown_complete()
+                    event.prevent_default()
+                    return
+                if event.key == "escape":
+                    dd.remove_class("active")
+                    event.prevent_default()
+                    return
+
             if event.key == "ctrl+f":
                 if self._search_active:
                     self._close_search()
@@ -989,9 +1468,26 @@ def run_textual_shell(container, chat_id: int = 0):
                     self._close_search()
                     event.prevent_default()
                     return
+                try:
+                    dd = self.query_one("#command-dropdown", CommandDropdown)
+                    if "active" in dd.classes:
+                        dd.remove_class("active")
+                        event.prevent_default()
+                        return
+                except Exception:
+                    pass
                 if self._multiline_buffer:
                     self._multiline_buffer = []
                     self._update_multiline_preview()
+                    event.prevent_default()
+                    return
+                # Cancel active prompt / orchestration task
+                if self._active_task is not None and not self._active_task.done():
+                    self._active_task.cancel()
+                    self._active_task = None
+                    self._append_stream("  [yellow]↩ Cancelled (Esc)[/yellow]")
+                    self._hide_status_line()
+                    self.current_mode = "idle"
                     event.prevent_default()
                     return
             if event.key == "ctrl+v":
@@ -1084,6 +1580,17 @@ def run_textual_shell(container, chat_id: int = 0):
                 event.prevent_default()
                 return
 
+        def _update_dropdown(self, value: str):
+            dd = self.query_one("#command-dropdown", CommandDropdown)
+            if value.startswith("/") and " " not in value.strip():
+                count = dd.refresh_matches(value)
+                if count > 0:
+                    dd.add_class("active")
+                else:
+                    dd.remove_class("active")
+            else:
+                dd.remove_class("active")
+
         async def on_input_changed(self, event: Input.Changed) -> None:
             if self._search_active and event.input.id == "search-bar":
                 self._apply_search(event.value)
@@ -1091,6 +1598,7 @@ def run_textual_shell(container, chat_id: int = 0):
             if event.input.id != "input":
                 return
             self.current_input = event.value
+            self._update_dropdown(event.value)
             self.query_one("#side", SideWidget).update(self._side_text())
 
         async def on_input_submitted(self, event: Input.Submitted):
@@ -1098,6 +1606,11 @@ def run_textual_shell(container, chat_id: int = 0):
             if event.input.id == "search-bar":
                 self._close_search()
                 return
+            # Close dropdown on submit
+            try:
+                self.query_one("#command-dropdown", CommandDropdown).remove_class("active")
+            except Exception:
+                pass
             value = event.value.strip()
             event.input.value = ""
             self.current_input = ""
@@ -1132,6 +1645,13 @@ def run_textual_shell(container, chat_id: int = 0):
                 await self._handle_command(value)
                 return
 
+            # Block new AI prompts while a task is already running
+            if self._active_task is not None and not self._active_task.done():
+                self._append_stream(
+                    "  [dim]⏳ Task running — press [bold]Esc[/bold] to cancel, or wait[/dim]"
+                )
+                return
+
             # @provider: prefix — run with a specific provider without permanently switching
             provider_override: str | None = None
             m_prov = _re.match(r'^@(qwen|codex|claude):\s*', value, _re.IGNORECASE)
@@ -1142,9 +1662,11 @@ def run_textual_shell(container, chat_id: int = 0):
                     provider_override = candidate
                     value = value[m_prov.end():]
 
-            await self._run_prompt(value, provider_override=provider_override)
+            self._active_task = asyncio.create_task(
+                self._run_prompt(value, provider_override=provider_override)
+            )
 
-        async def _build_plan_ai(session, prompt: str):
+        async def _build_plan_ai(self, session, prompt: str):
             """Try AI planner first; fall back to rule-based silently."""
             planner = container.build_ai_planner(session)
             planning_provider = container.pick_planning_provider(session)
@@ -1170,7 +1692,7 @@ def run_textual_shell(container, chat_id: int = 0):
                 self.current_mode = "idle"
                 self._set_orchestration_steps([])
                 self._add_timeline("Workspace reset.")
-                self._set_stream("Ready.")
+                self._push_output(self._welcome_text())
                 self._refresh_all()
                 return
             if command == "/clear":
@@ -1180,7 +1702,7 @@ def run_textual_shell(container, chat_id: int = 0):
             if command == "/save":
                 last = session.last_task_result
                 if not last or not last.answer_text.strip():
-                    self._set_stream("[dim]Nothing to save yet.[/dim]")
+                    self._push_output("[dim]Nothing to save yet.[/dim]")
                     return
                 cwd = str(session.file_mgr.get_working_dir())
                 fname = arg or f"answer_{_time.strftime('%Y%m%d_%H%M%S')}.md"
@@ -1212,7 +1734,7 @@ def run_textual_shell(container, chat_id: int = 0):
             if command == "/stats":
                 stats = session.provider_stats
                 if not stats:
-                    self._set_stream("[dim]No stats yet — run some tasks first.[/dim]")
+                    self._push_output("[dim]No stats yet — run some tasks first.[/dim]")
                     return
                 COLORS = {"qwen": "#b07cff", "codex": "#6aa7ff", "claude": "#ff9e57"}
                 lines = ["[bold]Provider stats[/bold]", ""]
@@ -1225,15 +1747,15 @@ def run_textual_shell(container, chat_id: int = 0):
                         f"ok={s.successful_tasks}  fail={s.failed_tasks}  "
                         f"retries={s.retry_count}  avg={avg_s}  success={rate}"
                     )
-                self._set_stream("\n".join(lines))
+                self._push_output("\n".join(lines))
                 return
             if command == "/replan":
                 last_run = session.last_task_run
                 if last_run is None or last_run.mode != "orchestrated":
-                    self._set_stream("[dim]No orchestrated run to replan.[/dim]")
+                    self._push_output("[dim]No orchestrated run to replan.[/dim]")
                     return
                 if last_run.status == "success":
-                    self._set_stream("[dim]Last orchestration succeeded — nothing to replan.[/dim]")
+                    self._push_output("[dim]Last orchestration succeeded — nothing to replan.[/dim]")
                     return
                 # Find failed subtask index and rerun from there
                 from runtime.orchestrator_service import OrchestratorService
@@ -1242,10 +1764,10 @@ def run_textual_shell(container, chat_id: int = 0):
                     resume_idx = 0
                 plan = session.last_plan
                 if plan is None:
-                    self._set_stream("[dim]No saved plan to replan from.[/dim]")
+                    self._push_output("[dim]No saved plan to replan from.[/dim]")
                     return
                 self._add_timeline(f"Replanning from step {resume_idx + 1}.")
-                self._set_stream(
+                self._push_output(
                     f"[dim]Replanning from step {resume_idx + 1}/{len(plan.subtasks)}…[/dim]"
                 )
                 task_run, aggregate_result = await container.orchestrator_service.run_orchestrated_task(
@@ -1267,71 +1789,319 @@ def run_textual_shell(container, chat_id: int = 0):
                     ),
                 )
                 return
+            if command == "/cd":
+                if not arg:
+                    self._push_output(f"[dim]Usage: /cd <path>[/dim]")
+                    return
+                try:
+                    new_path = session.file_mgr.set_working_dir(arg)
+                    container.save_session(session)
+                    self._add_timeline(f"cd → {new_path}")
+                    self._refresh_all()
+                    self._append_stream(f"  [green]✓[/green] Working dir: [bold]{new_path}[/bold]")
+                except Exception as exc:
+                    self._append_stream(f"  [red]cd failed: {exc}[/red]")
+                return
+            if command == "/recover":
+                if arg == "discard":
+                    container.session_store.clear_checkpoint(session.chat_id)
+                    self._push_output("[dim]Checkpoint cleared.[/dim]")
+                    return
+                checkpoint = container.session_store.load_checkpoint(session)
+                if checkpoint is None:
+                    self._push_output("[dim]No crash checkpoint found.[/dim]")
+                    return
+                completed = [s for s in checkpoint.subtasks if s.status in {"success", "reused"}]
+                failed = [s for s in checkpoint.subtasks if s.status == "failed"]
+                if arg == "confirm":
+                    plan = session.last_plan
+                    if plan is None:
+                        self._push_output("[dim]No saved plan for this checkpoint.[/dim]")
+                        return
+                    if self._active_task is not None and not self._active_task.done():
+                        self._append_stream(
+                            "  [dim]⏳ Task running — press [bold]Esc[/bold] to cancel first[/dim]"
+                        )
+                        return
+                    resume_idx = len(completed)
+                    self._add_timeline(f"Recovering from checkpoint, step {resume_idx + 1}.")
+                    self._push_output(
+                        f"[dim]Resuming from step {resume_idx + 1}/{len(plan.subtasks)}…[/dim]"
+                    )
+                    task_run, aggregate_result = await container.orchestrator_service.run_orchestrated_task(
+                        session=session,
+                        plan=plan,
+                        resume_from=resume_idx,
+                        prior_subtasks=list(checkpoint.subtasks),
+                    )
+                    container.remember_task_result(session, aggregate_result)
+                    self._add_timeline(f"Recovery done status={task_run.status}.")
+                    self._append_stream(
+                        "",
+                        f"  [{'green' if task_run.status == 'success' else 'red'}]"
+                        f"{'✓' if task_run.status == 'success' else '✗'}[/]  "
+                        f"recover {task_run.status}",
+                        *(
+                            [_md_to_rich(aggregate_result.answer_text.strip()[:2000])]
+                            if aggregate_result.answer_text.strip() else []
+                        ),
+                    )
+                    return
+                # No arg — show checkpoint info
+                self._push_output(
+                    "\n".join([
+                        f"[bold]Checkpoint found:[/bold]  {checkpoint.run_id}",
+                        f"  prompt:    {checkpoint.prompt[:100]}",
+                        f"  completed: {len(completed)}/{len(checkpoint.subtasks)} subtasks"
+                        + (f"  ({', '.join(s.title for s in completed[:3])})" if completed else ""),
+                        *(["  [red]failed:[/red]   " + ", ".join(s.title for s in failed)] if failed else []),
+                        "",
+                        "Run [bold]/recover confirm[/bold] to resume,",
+                        "or  [bold]/recover discard[/bold]  to clear.",
+                    ])
+                )
+                return
+            if command == "/cwd":
+                cwd = str(session.file_mgr.get_working_dir())
+                self._push_output(f"[bold]{cwd}[/bold]")
+                return
+            if command == "/copy":
+                answer = ""
+                if session.last_task_result:
+                    answer = session.last_task_result.answer_text.strip()
+                if answer:
+                    msg = _clipboard_copy(answer)
+                    self._add_timeline(msg[:80])
+                    self._append_stream(f"  [dim]{msg}[/dim]")
+                else:
+                    self._append_stream("  [dim]Nothing to copy yet.[/dim]")
+                return
+            if command == "/paste":
+                text = _clipboard_paste()
+                if text:
+                    safe = text[:1000].replace("[", "\\[")
+                    self._push_output(f"[dim]Clipboard content:[/dim]\n{safe}")
+                else:
+                    self._push_output("[dim]Clipboard is empty or unavailable.[/dim]")
+                return
+            if command == "/history":
+                n = 20
+                if arg:
+                    try:
+                        n = int(arg)
+                    except ValueError:
+                        pass
+                hist = self._input_history[-n:]
+                if not hist:
+                    self._push_output("[dim]No history yet.[/dim]")
+                    return
+                self._push_output(
+                    "[bold]Input history[/bold]\n" +
+                    "\n".join(
+                        f"  [dim]{i}.[/dim]  {entry.replace('[', chr(92) + '[')}"
+                        for i, entry in enumerate(reversed(hist), 1)
+                    )
+                )
+                return
+            if command == "/diff":
+                cwd = str(session.file_mgr.get_working_dir())
+                try:
+                    result = _subprocess.run(
+                        ["git", "diff", "--stat", "HEAD"],
+                        capture_output=True, text=True, cwd=cwd, timeout=5,
+                    )
+                    output = result.stdout.strip() or result.stderr.strip()
+                    if not output:
+                        output = "No changes."
+                    self._push_output(output.replace("[", "\\["))
+                except Exception as exc:
+                    self._push_output(f"[red]git diff failed: {exc}[/red]")
+                return
+            if command == "/model":
+                # Known model catalogs per provider
+                _MODEL_CATALOG: dict[str, list[tuple[str, str]]] = {
+                    "qwen": [
+                        ("qwen-coder-plus",              "best quality, slower"),
+                        ("qwen-coder-turbo",             "fast balanced  [default]"),
+                        ("qwen2.5-coder-32b-instruct",   "open-weights 32B"),
+                        ("qwen2.5-coder-7b-instruct",    "open-weights 7B, fastest"),
+                        ("qwen-plus",                    "general purpose"),
+                        ("qwen-max",                     "highest capability"),
+                    ],
+                    "codex": [
+                        ("o4-mini",    "fast reasoning  [default]"),
+                        ("o3",         "full reasoning, slower"),
+                        ("o3-mini",    "lightweight reasoning"),
+                        ("o1",         "original reasoning model"),
+                        ("gpt-4o",     "balanced multimodal"),
+                        ("gpt-4o-mini","cheapest / fastest"),
+                    ],
+                    "claude": [
+                        ("claude-sonnet-4-6",            "best balance  [default]"),
+                        ("claude-opus-4-6",              "highest quality, slow"),
+                        ("claude-haiku-4-5-20251001",    "fastest, cheapest"),
+                        ("claude-sonnet-3-5",            "previous gen sonnet"),
+                        ("sonnet",                       "alias → latest sonnet"),
+                        ("opus",                         "alias → latest opus"),
+                        ("haiku",                        "alias → latest haiku"),
+                    ],
+                }
+                color = self._provider_color()
+
+                # /model — show all providers
+                if not arg:
+                    lines = ["[bold]Active models[/bold]", ""]
+                    for pname in container.provider_paths:
+                        cur = session.provider_models.get(pname, "")
+                        runtime = session.runtimes.get(pname)
+                        actual = runtime.manager.model_name if (runtime and hasattr(runtime, "manager")) else ""
+                        display = cur or actual or "[dim]default[/dim]"
+                        lines.append(f"  [{color}]{pname:<10}[/{color}]  {display}")
+                        catalog = _MODEL_CATALOG.get(pname, [])
+                        for mname, mdesc in catalog:
+                            marker = "▶" if (cur or actual) == mname else " "
+                            lines.append(f"    [dim]{marker} {mname:<36} {mdesc}[/dim]")
+                        lines.append("")
+                    lines.append("[dim]Usage:  /model <provider> <model>    e.g. /model qwen qwen-coder-plus[/dim]")
+                    lines.append("[dim]         /model <provider> default     reset to provider default[/dim]")
+                    self._push_output("\n".join(lines))
+                    return
+
+                # /model <provider>  OR  /model <provider> <model>
+                parts_arg = arg.split(maxsplit=1)
+                target_provider = parts_arg[0].lower()
+                if target_provider not in container.provider_paths:
+                    # Maybe arg is just a model name for current provider?
+                    target_provider = session.current_provider
+                    new_model = arg.strip()
+                else:
+                    new_model = parts_arg[1].strip() if len(parts_arg) > 1 else ""
+
+                if not new_model:
+                    # Show models for that provider
+                    cur = session.provider_models.get(target_provider, "")
+                    lines = [f"[bold]{target_provider} models[/bold]", ""]
+                    for mname, mdesc in _MODEL_CATALOG.get(target_provider, []):
+                        marker = "▶" if cur == mname else " "
+                        style = "bold" if cur == mname else "dim"
+                        lines.append(f"  [{style}]{marker} {mname:<38} {mdesc}[/{style}]")
+                    lines.append("")
+                    lines.append(f"[dim]Current: {cur or 'provider default'}[/dim]")
+                    lines.append(f"[dim]/model {target_provider} <model>   to switch[/dim]")
+                    self._push_output("\n".join(lines))
+                    return
+
+                # Actually set the model
+                if new_model.lower() == "default":
+                    new_model = ""
+
+                session.provider_models[target_provider] = new_model
+                container.save_session(session)
+
+                # Rebuild the runtime for this provider so the next run uses the new model
+                old_runtime = session.runtimes.pop(target_provider, None)
+                if old_runtime and old_runtime.manager.is_running:
+                    import asyncio as _asyncio
+                    _asyncio.create_task(old_runtime.manager.stop())
+
+                label = new_model if new_model else "default"
+                self._add_timeline(f"Model {target_provider} → {label}")
+                self._push_output(
+                    f"[{color}]✓[/{color}]  [{color}]{target_provider}[/{color}] model set to [bold]{label}[/bold]\n"
+                    f"[dim]  The new model will be used on the next prompt.[/dim]"
+                )
+                # Refresh welcome screen so the model shows there too
+                if self.current_mode == "idle":
+                    self._push_output(self._welcome_text())
+                return
             if command == "/retry":
                 last = session.last_task_result
                 if last and last.prompt:
                     await self._run_prompt(last.prompt)
                 else:
-                    self._set_stream("[dim]No previous prompt to retry.[/dim]")
+                    self._push_output("[dim]No previous prompt to retry.[/dim]")
                 return
             if command == "/expand":
                 last = session.last_task_result
                 if last and last.answer_text.strip():
                     color = self._provider_color()
-                    self._set_stream(
+                    self._push_output(
                         f"[{color}]◆ {last.provider}[/]  [dim]full answer[/dim]\n\n"
                         + _md_to_rich(last.answer_text.strip())
                     )
                 else:
-                    self._set_stream("[dim]No answer to expand.[/dim]")
+                    self._push_output("[dim]No answer to expand.[/dim]")
                 return
             if command == "/help":
                 self._add_timeline("Opened help.")
-                self._set_stream(
+                self._push_output(
                     "\n".join(
                         [
-                            "[bold]Commands[/bold]",
-                            "  /help · /home · /new · /clear",
-                            "  /provider <qwen|codex|claude>  · /providers · /status · /limits",
-                            "  /save [filename]               save last answer to file",
-                            "  /export [md|txt]               export stream content",
-                            "  /stats                         per-provider performance stats",
-                            "  /retry · /expand",
+                            "[bold]Shell[/bold]",
+                            "  /help · /home · /new · /clear · /quit",
+                            "  /retry · /expand · /copy · /paste",
+                            "  /save [filename]    save last answer to file",
+                            "  /export [md|txt]    export stream content",
+                            "  /history [n]        show recent input history",
+                            "",
+                            "[bold]Workspace[/bold]",
+                            "  /cd <path>          change working directory",
+                            "  /cwd                print current directory",
+                            "  /diff               git diff --stat HEAD",
+                            "",
+                            "[bold]Status / Providers[/bold]",
+                            "  /status                    current session info",
+                            "  /model                     show all provider models + catalog",
+                            "  /model <provider>          list models for a provider",
+                            "  /model <provider> <model>  switch model (e.g. /model qwen qwen-coder-plus)",
+                            "  /model <provider> default  reset to provider default",
+                            "  /limits                    provider health and rate limits",
+                            "  /stats                     per-provider performance stats",
+                            "  /provider <name>           switch default provider",
+                            "  /providers                 list all providers",
+                            "",
+                            "[bold]History[/bold]",
                             "  /runs · /show <n> · /artifacts",
-                            "  /plan <task>                   AI orchestration plan preview",
-                            "  /orchestrate <task>            run multi-agent orchestration",
-                            "  /replan                        retry last partial/failed orchestration",
+                            "",
+                            "[bold]Orchestration[/bold]",
+                            "  /plan <task>        AI plan preview (shows ETA, caches result)",
+                            "  /run-plan           execute the last previewed plan",
+                            "  /orchestrate <task> run multi-agent orchestration",
+                            "  /replan             retry last partial/failed orchestration",
+                            "  /recover            resume from a crash checkpoint",
+                            "  /recover confirm    execute the recovery",
+                            "  /recover discard    clear the checkpoint",
+                            "",
+                            "[bold]Remote[/bold]",
                             "  /remote-control [status|stop|logs]",
                             "",
                             "[bold]Keys[/bold]",
-                            "  Ctrl+F      search stream (Esc to close)",
-                            "  Ctrl+R      reverse history search",
-                            "  Ctrl+Y      copy last answer to clipboard",
-                            "  Ctrl+V      paste from clipboard",
-                            "  Shift+Enter start multi-line input",
-                            "  Esc         cancel multi-line / close search",
-                            "  ↑ / ↓       input history navigation",
-                            "  A           toggle autoscroll (when input not focused)",
-                            "  Ctrl+C      cancel active task",
+                            "  /          open command dropdown (↑↓ navigate, Tab/Enter complete)",
+                            "  Ctrl+F     search stream (Esc to close)",
+                            "  Ctrl+R     reverse history search",
+                            "  Ctrl+Y     copy last answer to clipboard",
+                            "  Ctrl+V     paste from clipboard",
+                            "  Shift+Enter  start multi-line input",
+                            "  ↑ / ↓      input history navigation",
+                            "  A          toggle autoscroll (when input not focused)",
+                            "  Ctrl+C     cancel active task",
                             "",
                             "[bold]Input shortcuts[/bold]",
                             "  @provider:prompt   run with specific provider  e.g. @claude:explain this",
                             "  @file.py           inline file content in prompt",
-                            "",
-                            "Drag a file into the terminal to @mention it.",
                         ]
                     )
                 )
                 return
             if command == "/provider":
                 if not arg:
-                    self._set_stream(f"provider: {session.current_provider}")
+                    self._push_output(f"provider: {session.current_provider}")
                     return
                 from providers import is_supported_provider, normalize_provider_name
 
                 provider = normalize_provider_name(arg)
                 if not is_supported_provider(provider):
-                    self._set_stream(f"Unsupported provider: {arg}")
+                    self._push_output(f"Unsupported provider: {arg}")
                     return
                 session.current_provider = provider
                 container.save_session(session)
@@ -1339,10 +2109,11 @@ def run_textual_shell(container, chat_id: int = 0):
                 self._apply_provider_theme()
                 self._add_timeline(f"Provider set to {provider}.")
                 self._refresh_all()
-                self._set_stream(f"Default provider set to {provider}.")
+                # Show welcome screen with new provider logo so the brand change is visible
+                self._push_output(self._welcome_text())
                 return
             if command == "/providers":
-                self._set_stream(
+                self._push_output(
                     "\n".join(
                         f"{name} · {path}"
                         for name, path in container.provider_paths.items()
@@ -1351,7 +2122,7 @@ def run_textual_shell(container, chat_id: int = 0):
                 return
             if command == "/status":
                 self._add_timeline("Viewed status.")
-                self._set_stream(
+                self._push_output(
                     "\n".join(
                         [
                             f"provider: {session.current_provider}",
@@ -1364,28 +2135,28 @@ def run_textual_shell(container, chat_id: int = 0):
                 return
             if command == "/limits":
                 self._add_timeline("Viewed limits.")
-                provider_lines: list[str] = []
-                for provider_name in container.provider_paths:
+                provider_lines: list[str] = ["[bold]Provider status[/bold]", ""]
+                for provider_name, cli_path in container.provider_paths.items():
+                    label, col = self._probe_provider_status(provider_name, cli_path)
                     runtime = session.runtimes.get(provider_name)
-                    if runtime is None or runtime.health is None:
-                        provider_lines.append(f"{provider_name}: availability unknown · context unknown")
-                        continue
-                    health = runtime.health
-                    line = f"{provider_name}: {'available' if health.available else 'limited'} · context {health.context_status}"
-                    if health.last_failure:
-                        line += f" · {health.last_failure.short_label}"
-                        if health.last_failure.retry_at:
-                            line += f" · retry {health.last_failure.retry_at}"
+                    line = f"  [{col}]●[/{col}]  [bold]{provider_name}[/bold]  [{col}]{label}[/{col}]"
+                    if runtime and runtime.health:
+                        h = runtime.health
+                        line += f"  [dim]ctx:{h.context_status}[/dim]"
+                        if h.consecutive_failures:
+                            line += f"  [dim]{h.consecutive_failures} consecutive fail(s)[/dim]"
+                        if h.last_failure and h.last_failure.message:
+                            line += f"\n       [dim]{h.last_failure.message[:80]}[/dim]"
                     provider_lines.append(line)
-                self._set_stream("\n".join(provider_lines))
+                self._push_output("\n".join(provider_lines))
                 return
             if command == "/runs":
                 self._add_timeline("Viewed runs.")
                 runs = container.recent_runs(session, limit=10)
                 if not runs:
-                    self._set_stream("No runs yet.")
+                    self._push_output("No runs yet.")
                     return
-                self._set_stream(
+                self._push_output(
                     "\n".join(
                         f"{index}. {run.status_emoji} {run.mode} [{run.provider_summary or 'mixed'}]"
                         for index, run in enumerate(runs, start=1)
@@ -1394,16 +2165,16 @@ def run_textual_shell(container, chat_id: int = 0):
                 return
             if command == "/show":
                 if not arg:
-                    self._set_stream("Usage: /show <index>")
+                    self._push_output("Usage: /show <index>")
                     return
                 try:
                     index = int(arg)
                 except ValueError:
-                    self._set_stream("Run index must be a number.")
+                    self._push_output("Run index must be a number.")
                     return
                 run = container.run_by_index(session, index)
                 if run is None:
-                    self._set_stream(f"Run {index} not found.")
+                    self._push_output(f"Run {index} not found.")
                     return
                 details = [
                     f"run_id: {run.run_id}",
@@ -1424,29 +2195,32 @@ def run_textual_shell(container, chat_id: int = 0):
                         f"- {item.subtask_id}: {item.title} [{item.provider}] ({item.status})"
                         for item in run.subtasks
                     )
-                self._set_stream("\n".join(details))
+                self._push_output("\n".join(details))
                 return
             if command == "/artifacts":
                 artifacts = container.latest_artifact_files(session)
                 if not artifacts:
-                    self._set_stream("No artifacts found.")
+                    self._push_output("No artifacts found.")
                     return
-                self._set_stream("\n".join(str(item) for item in artifacts))
+                self._push_output("\n".join(str(item) for item in artifacts))
                 return
             if command == "/plan":
                 if not arg:
-                    self._set_stream("Usage: /plan <task>")
+                    self._push_output("Usage: /plan <task>")
                     return
-                plan = await _build_plan_ai(session, arg)
+                plan = await self._build_plan_ai(session, arg)
                 session.last_plan = plan
                 container.save_session(session)
                 self._add_timeline(f"Planned: {arg[:48]}")
                 ai_tag = "  [dim](AI plan)[/dim]" if plan.ai_rationale else "  [dim](rule-based)[/dim]"
-                self._set_stream(
+                eta = container.orchestrator_service.estimate_plan_eta(plan, session)
+                cached_tag = "  [dim][cached][/dim]" if "[cached]" in plan.ai_rationale else ""
+                self._push_output(
                     "\n".join(
                         [
-                            f"[bold]complexity:[/bold] {plan.complexity}{ai_tag}",
+                            f"[bold]complexity:[/bold] {plan.complexity}{ai_tag}{cached_tag}",
                             f"[bold]strategy:[/bold] {plan.strategy}",
+                            f"[bold]estimated time:[/bold] {eta}",
                             *(["", f"[dim]{plan.ai_rationale}[/dim]"] if plan.ai_rationale else []),
                             "",
                             *[
@@ -1456,15 +2230,36 @@ def run_textual_shell(container, chat_id: int = 0):
                                 )
                                 for index, item in enumerate(plan.subtasks, start=1)
                             ],
+                            "",
+                            "[dim]Run with [bold]/run-plan[/bold] to execute this plan.[/dim]",
                         ]
                     )
                 )
                 return
+            if command == "/run-plan":
+                plan = session.last_plan
+                if plan is None:
+                    self._push_output("[dim]No saved plan. Use /plan <task> first.[/dim]")
+                    return
+                if self._active_task is not None and not self._active_task.done():
+                    self._append_stream(
+                        "  [dim]⏳ Task running — press [bold]Esc[/bold] to cancel first[/dim]"
+                    )
+                    return
+                self._active_task = asyncio.create_task(
+                    self._run_orchestration(plan.prompt, prebuilt_plan=plan)
+                )
+                return
             if command == "/orchestrate":
                 if not arg:
-                    self._set_stream("Usage: /orchestrate <task>")
+                    self._push_output("Usage: /orchestrate <task>")
                     return
-                await self._run_orchestration(arg)
+                if self._active_task is not None and not self._active_task.done():
+                    self._append_stream(
+                        "  [dim]⏳ Task running — press [bold]Esc[/bold] to cancel first[/dim]"
+                    )
+                    return
+                self._active_task = asyncio.create_task(self._run_orchestration(arg))
                 return
             if command == "/remote-control":
                 from cli.remote_control import RemoteControlManager
@@ -1475,19 +2270,19 @@ def run_textual_shell(container, chat_id: int = 0):
                     try:
                         status = manager.start()
                     except RuntimeError as exc:
-                        self._set_stream(str(exc))
+                        self._push_output(str(exc))
                         return
                     self.remote_state = "running" if status.is_running else "stopped"
                     self._add_timeline("Remote control started.")
                     self._refresh_all()
-                    self._set_stream(f"Remote control started. log: {status.log_path}")
+                    self._push_output(f"Remote control started. log: {status.log_path}")
                     return
                 if action == "status":
                     status = manager.load_status()
                     self.remote_state = "running" if status.is_running else "stopped"
                     self._add_timeline("Checked remote-control status.")
                     self._refresh_all()
-                    self._set_stream(
+                    self._push_output(
                         "\n".join(
                             [
                                 f"running: {'yes' if status.is_running else 'no'}",
@@ -1502,18 +2297,35 @@ def run_textual_shell(container, chat_id: int = 0):
                     self.remote_state = "running" if status.is_running else "stopped"
                     self._add_timeline("Remote control stopped.")
                     self._refresh_all()
-                    self._set_stream("Remote control stopped.")
+                    self._push_output("Remote control stopped.")
                     return
                 if action == "logs":
                     logs = manager.tail_logs()
-                    self._set_stream(logs or "No remote-control logs yet.")
+                    self._push_output(logs or "No remote-control logs yet.")
                     return
-                self._set_stream("Usage: /remote-control [status|stop|logs]")
+                self._push_output("Usage: /remote-control [status|stop|logs]")
                 return
 
-            self._set_stream(f"Unknown command: {raw}")
+            self._push_output(f"Unknown command: {raw}")
 
         async def _run_prompt(self, prompt: str, provider_override: str | None = None):
+            from providers import normalize_provider_name
+            try:
+              await self._run_prompt_inner(prompt, provider_override)
+            except asyncio.CancelledError:
+                if self._active_runtime is not None:
+                    asyncio.create_task(self._active_runtime.manager.stop())
+                    self._active_runtime = None
+                self._hide_status_line()
+                self.current_mode = "idle"
+                self._active_task = None
+            except Exception:
+                self._active_task = None
+                raise
+            else:
+                self._active_task = None
+
+        async def _run_prompt_inner(self, prompt: str, provider_override: str | None = None):
             from providers import normalize_provider_name
 
             session = container.get_session(chat_id)
@@ -1532,13 +2344,21 @@ def run_textual_shell(container, chat_id: int = 0):
                 "qwen": "#b07cff", "codex": "#6aa7ff", "claude": "#ff9e57",
             }.get(provider_name, "#6aa7ff")
             override_tag = f"  [dim](override)[/dim]" if provider_override else ""
-            self._set_stream(
-                f"[{color}]◆[/] [{color}]{provider_name}[/]{override_tag}  [dim]{cwd}[/dim]\n"
-                f"  [dim]{prompt[:120]}[/dim]\n"
+            sep = f"[dim]{'─' * 72}[/dim]"
+            self._append_stream(
+                "",
+                sep,
+                f"[{color}]◆[/] [{color}]{provider_name}[/]{override_tag}  [dim]{cwd}[/dim]",
+                f"  [dim]{prompt[:120]}[/dim]",
+                "",
             )
 
             self._status_state = {"action": "Starting…", "tokens": 0, "start": 0.0, "input_tokens": 0, "output_tokens": 0}
             self._last_stream_was_text = False
+            self._streamed_text_start = None
+            self._op_type = ""
+            self._op_files = []
+            self._op_line_idx = -1
             self._show_status_line(provider_name)
 
             def stream_event_callback(line: str):
@@ -1578,15 +2398,19 @@ def run_textual_shell(container, chat_id: int = 0):
             for f in result.changed_files:
                 diff_lines.extend(_file_diff_text(f, is_new=False, add_color=color))
 
-            # Final result
+            # Final result — if we streamed raw text, replace it with formatted markdown
             status_icon = f"[{color}]✓[/]" if result.exit_code == 0 else "[red]✗[/red]"
             duration = getattr(result, "duration_text", "")
-            final_parts = [
-                "",
-                *diff_lines,
-            ]
-            if result.answer_text.strip():
-                final_parts += ["", _md_to_rich(result.answer_text.strip()[:3000])]
+            answer = result.answer_text.strip()
+
+            if self._streamed_text_start is not None:
+                # Drop the Writing… indicator; formatted answer goes in its place
+                self._stream_lines = self._stream_lines[:self._streamed_text_start]
+                self._last_stream_was_text = False
+
+            final_parts: list[str] = ["", *diff_lines]
+            if answer:
+                final_parts += ["", _md_to_rich(answer[:3000])]
             elif result.exit_code != 0 and result.error_text:
                 final_parts += ["", f"[red]{result.error_text[:500]}[/red]"]
             final_parts += [
@@ -1595,7 +2419,7 @@ def run_textual_shell(container, chat_id: int = 0):
             ]
             self._append_stream(*final_parts)
 
-        async def _run_orchestration(self, prompt: str):
+        async def _run_orchestration(self, prompt: str, prebuilt_plan=None):
             session = container.get_session(chat_id)
             self.current_mode = "orchestrated"
             self._add_timeline("Started orchestration.")
@@ -1604,10 +2428,13 @@ def run_textual_shell(container, chat_id: int = 0):
             cwd_for_expand = str(session.file_mgr.get_working_dir())
             expanded_prompt = _expand_file_mentions(prompt, cwd_for_expand)
 
-            # Show planning indicator, then build plan (AI or rule-based)
+            # Use prebuilt plan (from /run-plan) or build one fresh
             self._status_state = {"action": "Planning…", "tokens": 0, "start": 0.0, "input_tokens": 0, "output_tokens": 0}
             self._show_status_line()
-            plan = await _build_plan_ai(session, expanded_prompt)
+            if prebuilt_plan is not None:
+                plan = prebuilt_plan
+            else:
+                plan = await self._build_plan_ai(session, expanded_prompt)
             session.last_plan = plan
             container.save_session(session)
 
@@ -1630,21 +2457,21 @@ def run_textual_shell(container, chat_id: int = 0):
                 step_labels.append("[pending] review")
             self._set_orchestration_steps(step_labels)
 
-            self._set_stream(
-                "\n".join([
-                    f"[{color}]◆[/] orchestrate{ai_tag}  [dim]{cwd}[/dim]",
-                    f"  [dim]{prompt[:120]}[/dim]",
-                    "",
-                    f"  strategy: {plan.strategy}",
-                    *(["", f"  [dim]{plan.ai_rationale}[/dim]"] if plan.ai_rationale else []),
-                    *[
-                        "  [dim]{i}. {t} [{p}]{pg}[/dim]".format(
-                            i=i, t=item.title, p=item.suggested_provider,
-                            pg=f" ∥group={item.parallel_group}" if has_parallel else "",
-                        )
-                        for i, item in enumerate(plan.subtasks, start=1)
-                    ],
-                ])
+            self._append_stream(
+                "",
+                f"[dim]{'─' * 72}[/dim]",
+                f"[{color}]◆[/] orchestrate{ai_tag}  [dim]{cwd}[/dim]",
+                f"  [dim]{prompt[:120]}[/dim]",
+                "",
+                f"  strategy: {plan.strategy}",
+                *(["", f"  [dim]{plan.ai_rationale}[/dim]"] if plan.ai_rationale else []),
+                *[
+                    "  [dim]{i}. {t} [{p}]{pg}[/dim]".format(
+                        i=i, t=item.title, p=item.suggested_provider,
+                        pg=f" ∥group={item.parallel_group}" if has_parallel else "",
+                    )
+                    for i, item in enumerate(plan.subtasks, start=1)
+                ],
             )
             current_step = {"index": -1}
             step_start = [_time.monotonic()]

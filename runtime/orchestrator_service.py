@@ -14,6 +14,12 @@ log = logging.getLogger(__name__)
 
 StatusCallback = Callable[[str], Awaitable[None]]
 
+# Keywords that imply a subtask should produce files
+_FILE_CREATION_KEYWORDS = frozenset({
+    "create", "write", "generate", "implement", "build", "produce",
+    "output", "save", "make", "scaffold", "emit",
+})
+
 
 _PROJECT_CONTEXT_FILES = (
     "README.md", "README.rst", "README.txt",
@@ -87,6 +93,72 @@ class OrchestratorService:
     def __init__(self, container, execution_service):
         self.container = container
         self.execution_service = execution_service
+
+    # ------------------------------------------------------------------ #
+    # ETA estimation                                                        #
+    # ------------------------------------------------------------------ #
+
+    def estimate_plan_eta(self, plan: "OrchestrationPlan", session) -> str:
+        """Estimate total execution time using per-provider historical stats."""
+        _DEFAULT_MS = 45_000  # 45 s fallback when no history is available
+
+        # Group subtasks by parallel_group; groups run sequentially, tasks within a group run in parallel
+        groups: dict[int, list] = {}
+        for subtask in plan.subtasks:
+            groups.setdefault(subtask.parallel_group, []).append(subtask)
+
+        total_ms = 0
+        for group_subtasks in groups.values():
+            # For a parallel group the wall-clock time is the max of its members
+            group_max = 0
+            for subtask in group_subtasks:
+                stats = session.provider_stats.get(subtask.suggested_provider)
+                avg = stats.avg_ms if (stats and stats.avg_ms > 0) else _DEFAULT_MS
+                group_max = max(group_max, avg)
+            total_ms += group_max
+
+        # Synthesis step (runs when ≥2 subtasks)
+        if len(plan.subtasks) >= 2:
+            synth_prov = next(
+                (p for p in ("claude", "qwen", "codex") if p in self.container.provider_paths),
+                None,
+            )
+            stats = session.provider_stats.get(synth_prov) if synth_prov else None
+            total_ms += stats.avg_ms if (stats and stats.avg_ms > 0) else _DEFAULT_MS
+
+        # Review step (only for complex plans)
+        if plan.complexity == "complex":
+            total_ms += _DEFAULT_MS // 2
+
+        seconds = total_ms / 1000
+        if seconds < 60:
+            return f"~{int(seconds)}s"
+        return f"~{seconds / 60:.1f}m"
+
+    # ------------------------------------------------------------------ #
+    # Subtask result validation                                             #
+    # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def _validate_subtask_result(subtask, task_result: "TaskResult") -> str | None:
+        """Return an error string if the result looks invalid, None if OK.
+
+        Only validates when the subtask description implies file creation/generation.
+        """
+        if task_result.exit_code != 0:
+            return None  # already failed — no additional validation needed
+
+        description_lower = subtask.description.lower()
+        expects_files = any(kw in description_lower for kw in _FILE_CREATION_KEYWORDS)
+
+        if expects_files and not task_result.new_files and not task_result.changed_files:
+            return (
+                "Subtask completed successfully but no files were created or modified. "
+                "Please create the required files as described."
+            )
+        if not task_result.answer_text.strip() and not task_result.new_files:
+            return "Subtask produced no output and no files — nothing to hand off."
+        return None
 
     # ------------------------------------------------------------------ #
     # Prompt builders                                                       #
@@ -216,21 +288,80 @@ class OrchestratorService:
         return None
 
     # ------------------------------------------------------------------ #
+    # Dynamic replanning                                                    #
+    # ------------------------------------------------------------------ #
+
+    async def _dynamic_replan(
+        self,
+        session,
+        original_plan: "OrchestrationPlan",
+        task_run: "TaskRun",
+        status_callback: "StatusCallback | None",
+        stream_event_callback,
+    ) -> list | None:
+        """Attempt AI-driven replanning after a partial failure.
+
+        Returns a list of new PlannedSubtask objects, or None if replanning fails.
+        """
+        from orchestrator import AIOrchestrator, RuleBasedOrchestrator
+
+        completed = [s for s in task_run.subtasks if s.status in {"success", "reused"}]
+        failed = [s for s in task_run.subtasks if s.status == "failed"]
+        if not failed or not completed:
+            return None  # nothing to replan or nothing succeeded to build on
+
+        if status_callback:
+            await status_callback(
+                "⏳ <b>Оркестратор: динамическое перепланирование…</b>"
+            )
+        log.info("Attempting dynamic replan after %d completed, %d failed", len(completed), len(failed))
+
+        ai_planner = self.container.build_ai_planner(session)
+        planning_provider = self.container.pick_planning_provider(session)
+        try:
+            await self.container.ensure_runtime_started(session, planning_provider)
+            planning_runtime = self.container.get_runtime(session, planning_provider)
+            new_plan = await ai_planner.replan_remaining(
+                original_plan.prompt,
+                completed,
+                failed[-1],
+                self.execution_service,
+                session,
+                planning_runtime,
+            )
+            if new_plan is not None and new_plan.subtasks:
+                log.info("Dynamic replan produced %d new subtasks", len(new_plan.subtasks))
+                return new_plan.subtasks
+        except Exception as exc:
+            log.warning("Dynamic replan failed: %s", exc)
+        return None
+
+    # ------------------------------------------------------------------ #
     # Health-aware provider routing                                         #
     # ------------------------------------------------------------------ #
 
+    def _is_provider_available(self, session, name: str) -> bool:
+        """Check if a provider is currently available (respects retry_after_ts)."""
+        runtime = session.runtimes.get(name)
+        if runtime is None or runtime.health is None:
+            return True  # no health info → assume available
+        return runtime.health.is_available_now()
+
     def _pick_healthy_provider(self, session, preferred: str) -> str:
-        """Return preferred provider if healthy, else first healthy alternative."""
-        runtime = session.runtimes.get(preferred)
-        if runtime is None or runtime.health is None or runtime.health.available:
+        """Return preferred provider if healthy, else first available alternative."""
+        if self._is_provider_available(session, preferred):
             return preferred
-        # Preferred is unhealthy — find an alternative
+        # Preferred is blocked — find an alternative
         for name in self.container.provider_paths:
             if name == preferred:
                 continue
-            alt = session.runtimes.get(name)
-            if alt is None or alt.health is None or alt.health.available:
-                log.info("Provider %s unhealthy, routing to %s", preferred, name)
+            if self._is_provider_available(session, name):
+                runtime = session.runtimes.get(preferred)
+                eta = runtime.health.retry_in_seconds if (runtime and runtime.health) else None
+                log.info(
+                    "Provider %s unavailable (retry in %ss), routing to %s",
+                    preferred, eta, name,
+                )
                 return name
         return preferred  # no healthy alternative found, use preferred anyway
 
@@ -239,8 +370,7 @@ class OrchestratorService:
         for name in self.container.provider_paths:
             if name == used:
                 continue
-            alt = session.runtimes.get(name)
-            if alt is None or alt.health is None or alt.health.available:
+            if self._is_provider_available(session, name):
                 return name
         return None
 
@@ -365,6 +495,7 @@ class OrchestratorService:
         for _pg, grp in groupby(pending, key=lambda x: x[1].parallel_group):
             groups.append(list(grp))
 
+        replan_attempted = False
         for group in groups:
             if task_run.status in {"failed"}:
                 break  # hard failure in previous group — stop
@@ -379,8 +510,32 @@ class OrchestratorService:
                     session, plan, task_run, subtask_results,
                     group, cwd, status_callback, stream_event_callback,
                 )
-            if not ok:
-                break  # group had a hard failure
+
+            if not ok and not replan_attempted:
+                replan_attempted = True
+                # Attempt dynamic replanning — only when some subtasks already succeeded
+                new_subtasks = await self._dynamic_replan(
+                    session, plan, task_run, status_callback, stream_event_callback
+                )
+                if new_subtasks:
+                    # Run the new subtasks sequentially
+                    base_index = len(task_run.subtasks) + 1
+                    all_new_ok = True
+                    for offset, new_subtask in enumerate(new_subtasks):
+                        new_ok = await self._run_group_sequential(
+                            session, plan, task_run, subtask_results,
+                            [(base_index + offset, new_subtask)],
+                            cwd, status_callback, stream_event_callback,
+                        )
+                        if not new_ok:
+                            all_new_ok = False
+                            break
+                    if all_new_ok:
+                        task_run.status = "running"
+                        task_run.error_text = ""
+                break  # dynamic replan handles remaining work
+            elif not ok:
+                break  # group had a hard failure and no replan available
 
         session.active_provider = ""
         task_run.duration_ms = int((monotonic() - started_at) * 1000)
@@ -403,6 +558,10 @@ class OrchestratorService:
             await self._run_review(
                 session, plan, task_run, status_callback, stream_event_callback
             )
+
+        # Clear checkpoint on success; keep it on failure for /recover
+        if task_run.status == "success":
+            self.container.session_store.clear_checkpoint(session.chat_id)
 
         # Persist
         session.last_task_run = task_run
@@ -539,6 +698,25 @@ class OrchestratorService:
                 )
                 provider_name = alt
 
+        # Validate the result if it passed — retry once with an augmented prompt if invalid
+        if task_result.exit_code == 0:
+            validation_error = self._validate_subtask_result(subtask, task_result)
+            if validation_error and not task_result.new_files and not task_result.changed_files:
+                log.info(
+                    "Subtask %s validation failed (%s), retrying with augmented prompt",
+                    subtask.subtask_id, validation_error,
+                )
+                augmented = (
+                    prompt
+                    + f"\n\nIMPORTANT: {validation_error}"
+                )
+                retry_result = await self._execute_subtask_timed(
+                    session, plan, subtask, provider_name, augmented,
+                    status_callback, status_prefix, stream_event_callback,
+                )
+                if retry_result.exit_code == 0:
+                    task_result = retry_result
+
         subtask_results.append(task_result)
         handoff_summary = self.build_handoff_summary(task_result, subtask.title)
         task_run.handoff_artifacts.append(handoff_summary)
@@ -563,6 +741,9 @@ class OrchestratorService:
             retry_count=retry_count,
             original_provider=original_provider,
         ))
+
+        # Persist checkpoint after every subtask so crashes can be recovered
+        self.container.session_store.write_checkpoint(session, task_run)
 
         if task_result.exit_code != 0:
             if index == 1 and len(plan.subtasks) == 1:

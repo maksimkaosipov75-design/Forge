@@ -247,6 +247,11 @@ class ChatSession:
     run_history: list[TaskRun] = field(default_factory=list)
     last_plan: Any = None
     provider_stats: dict[str, "ProviderStats"] = field(default_factory=dict)
+    # User-selected model per provider (e.g. {"qwen": "qwen-coder-plus", "codex": "o3-mini"})
+    # Empty string means "use the provider's default model"
+    provider_models: dict[str, str] = field(default_factory=dict)
+    # Persisted health snapshots for providers not yet instantiated as runtimes
+    provider_health_cache: dict[str, Any] = field(default_factory=dict)
     task_queue: asyncio.Queue = field(default_factory=asyncio.Queue)
     pending_tasks: dict[int, QueuedTask] = field(default_factory=dict)
     worker_task: asyncio.Task | None = None

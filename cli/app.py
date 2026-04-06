@@ -51,3 +51,15 @@ def main():
         return
 
     asyncio.run(async_main(args))
+
+
+def textual_main():
+    """Entry point for the `forge` / single-word launcher — opens Textual UI directly."""
+    import sys
+    parser = build_parser()
+    # Inject --textual if no subcommand given so bare `forge` opens the TUI
+    if len(sys.argv) == 1 or (len(sys.argv) > 1 and sys.argv[1].startswith("--chat-id")):
+        sys.argv.insert(1, "--textual")
+    args = parser.parse_args()
+    container = RuntimeContainer()
+    run_textual_shell(container, chat_id=args.chat_id)

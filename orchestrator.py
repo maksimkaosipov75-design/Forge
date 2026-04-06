@@ -1,8 +1,57 @@
+import copy
+import hashlib
 import json as _json
 import re as _re
+import time
 from dataclasses import dataclass, field
 
 from providers import normalize_provider_name
+
+
+@dataclass
+class _PlanCacheEntry:
+    plan: "OrchestrationPlan"
+    created_at: float
+    hit_count: int = 0
+
+
+class PlanCache:
+    """In-memory LRU+TTL cache for AI-generated orchestration plans."""
+    TTL = 3600.0   # 1 hour
+    MAX_SIZE = 20
+
+    def __init__(self):
+        self._store: dict[str, _PlanCacheEntry] = {}
+
+    def _key(self, prompt: str, providers: list[str]) -> str:
+        normalized = " ".join(prompt.lower().split())
+        provider_str = ",".join(sorted(providers))
+        return hashlib.sha256(f"{normalized}|{provider_str}".encode()).hexdigest()[:16]
+
+    def get(self, prompt: str, providers: list[str]) -> "OrchestrationPlan | None":
+        key = self._key(prompt, providers)
+        entry = self._store.get(key)
+        if entry is None:
+            return None
+        if time.monotonic() - entry.created_at > self.TTL:
+            del self._store[key]
+            return None
+        entry.hit_count += 1
+        return entry.plan
+
+    def put(self, prompt: str, providers: list[str], plan: "OrchestrationPlan"):
+        if len(self._store) >= self.MAX_SIZE:
+            oldest = min(self._store, key=lambda k: self._store[k].created_at)
+            del self._store[oldest]
+        key = self._key(prompt, providers)
+        self._store[key] = _PlanCacheEntry(plan=plan, created_at=time.monotonic())
+
+    def clear(self):
+        self._store.clear()
+
+    @property
+    def size(self) -> int:
+        return len(self._store)
 
 
 @dataclass
@@ -135,6 +184,8 @@ class AIOrchestrator:
         "codex": "Rust, backend, systems programming, API design, refactoring",
         "claude": "UI, GTK, CSS, writing, code review, documentation",
     }
+    # Shared plan cache across all instances (per-process lifetime)
+    _cache: PlanCache = PlanCache()
 
     def __init__(self, available_providers: list[str], fallback: RuleBasedOrchestrator):
         self.available_providers = [normalize_provider_name(p) for p in available_providers]
@@ -148,6 +199,13 @@ class AIOrchestrator:
         runtime,
     ) -> OrchestrationPlan:
         """Build an AI-driven plan. Falls back to rule-based on any failure."""
+        # Check cache before calling AI
+        cached = self._cache.get(prompt, self.available_providers)
+        if cached is not None:
+            plan = copy.deepcopy(cached)
+            plan.ai_rationale = (plan.ai_rationale.removesuffix(" [cached]") + " [cached]").strip()
+            return plan
+
         planning_prompt = self._build_planning_prompt(prompt)
         # Save/restore last_task_result so planning doesn't pollute session history
         prev_result = session.last_task_result
@@ -161,12 +219,85 @@ class AIOrchestrator:
             if result.exit_code == 0 and result.answer_text.strip():
                 plan = self._parse_response(prompt, result.answer_text)
                 if plan is not None:
+                    self._cache.put(prompt, self.available_providers, plan)
                     return plan
         except Exception:
             pass
         finally:
             session.last_task_result = prev_result
         return self.fallback.build_plan(prompt)
+
+    async def replan_remaining(
+        self,
+        original_prompt: str,
+        completed_subtasks: list,
+        failed_subtask,
+        execution_service,
+        session,
+        runtime,
+    ) -> "OrchestrationPlan | None":
+        """Replan remaining work after a partial failure. Returns None if replanning fails."""
+        error = getattr(failed_subtask, "error_text", "") or "unknown error"
+        replan_prompt = self._build_replan_prompt(
+            original_prompt, completed_subtasks, failed_subtask, error
+        )
+        prev_result = session.last_task_result
+        try:
+            result = await execution_service.execute_provider_task(
+                session=session,
+                runtime=runtime,
+                provider_name=runtime.provider,
+                prompt=replan_prompt,
+            )
+            if result.exit_code == 0 and result.answer_text.strip():
+                return self._parse_response(original_prompt, result.answer_text)
+        except Exception:
+            pass
+        finally:
+            session.last_task_result = prev_result
+        return None
+
+    def _build_replan_prompt(
+        self,
+        original_prompt: str,
+        completed_subtasks: list,
+        failed_subtask,
+        error: str,
+    ) -> str:
+        available_str = ", ".join(self.available_providers)
+        provider_lines = "\n".join(
+            f"- {p}: {self._SPECIALTIES.get(p, 'general coding')}"
+            for p in self.available_providers
+        )
+        completed_str = "\n".join(
+            f"- [{getattr(s, 'status', '?')}] {getattr(s, 'title', s)} (by {getattr(s, 'provider', '?')})"
+            for s in completed_subtasks
+        ) or "none"
+        failed_title = getattr(failed_subtask, "title", "unknown")
+        schema = (
+            '{"complexity":"simple|medium|complex","strategy":"one-sentence approach",'
+            '"rationale":"why this replanning",'
+            '"subtasks":[{"id":"r1","title":"Short action title",'
+            '"description":"Specific, actionable instructions",'
+            f'"provider":"{self.available_providers[0] if self.available_providers else "qwen"}",'
+            '"reason":"why this provider","depends_on":[],"parallel_group":0}]}'
+        )
+        return (
+            "You are a task orchestrator performing DYNAMIC REPLANNING after a failure.\n\n"
+            f"Original task:\n{original_prompt}\n\n"
+            f"Available providers:\n{provider_lines}\n\n"
+            f"Already completed:\n{completed_str}\n\n"
+            f"Failed step: {failed_title}\n"
+            f"Error: {error[:400]}\n\n"
+            "Replan ONLY the REMAINING work to complete the original task.\n"
+            "Do NOT repeat steps that already succeeded.\n"
+            f"Output exactly this JSON structure:\n{schema}\n\n"
+            "Rules:\n"
+            "- 1 to 3 subtasks maximum\n"
+            "- parallel_group: same integer = run concurrently\n"
+            f"- only use these providers: {available_str}\n"
+            "- OUTPUT JSON ONLY — no other text, no code fences"
+        )
 
     def _build_planning_prompt(self, prompt: str) -> str:
         available_str = ", ".join(self.available_providers)

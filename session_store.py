@@ -5,10 +5,14 @@ from pathlib import Path
 from typing import Any
 
 from orchestrator import OrchestrationPlan, PlannedSubtask
-from task_models import ChatSession, SubtaskRun, TaskResult, TaskRun
+from provider_status import ProviderHealth
+from task_models import ChatSession, ProviderStats, SubtaskRun, TaskResult, TaskRun
 
 
 log = logging.getLogger(__name__)
+
+MAX_ARTIFACTS = 50      # per-session artifact file limit
+MAX_HISTORY = 10        # task result / run history entries kept
 
 
 class SessionStore:
@@ -35,9 +39,7 @@ class SessionStore:
             return
 
         try:
-            working_dir = payload.get("working_dir")
-            if working_dir:
-                session.file_mgr.working_dir = Path(working_dir)
+            # working_dir is intentionally NOT restored — always starts at Path.home()
 
             current_provider = payload.get("current_provider")
             if isinstance(current_provider, str) and current_provider.strip():
@@ -66,19 +68,71 @@ class SessionStore:
             last_plan = payload.get("last_plan")
             if isinstance(last_plan, dict):
                 session.last_plan = self._plan_from_dict(last_plan)
+
+            # Provider stats
+            for name, sdata in payload.get("provider_stats", {}).items():
+                if isinstance(sdata, dict):
+                    s = ProviderStats()
+                    s.total_tasks = int(sdata.get("total_tasks", 0))
+                    s.successful_tasks = int(sdata.get("successful_tasks", 0))
+                    s.failed_tasks = int(sdata.get("failed_tasks", 0))
+                    s.retry_count = int(sdata.get("retry_count", 0))
+                    s.total_ms = int(sdata.get("total_ms", 0))
+                    session.provider_stats[name] = s
+
+            # Provider health
+            for name, hdata in payload.get("provider_health", {}).items():
+                if isinstance(hdata, dict):
+                    h = ProviderHealth.from_dict(hdata)
+                    # Apply health to existing runtime if present
+                    runtime = session.runtimes.get(name)
+                    if runtime is not None:
+                        runtime.health = h
+                    # Store as standalone reference for later use
+                    session.provider_health_cache[name] = h
+
+            # Provider model selections
+            pm = payload.get("provider_models")
+            if isinstance(pm, dict):
+                session.provider_models = {k: v for k, v in pm.items() if isinstance(v, str)}
+
         except Exception as exc:
             log.warning("Failed to hydrate session state for chat %s: %s", session.chat_id, exc)
 
     def save(self, session: ChatSession):
         target = self.session_file(session.chat_id)
+
+        # Collect current health from runtimes
+        health_data: dict[str, dict] = {}
+        for name, runtime in session.runtimes.items():
+            if runtime.health is not None:
+                health_data[name] = runtime.health.to_dict()
+        # Also include cached health for providers that don't have a runtime yet
+        for name, h in getattr(session, "provider_health_cache", {}).items():
+            if name not in health_data:
+                health_data[name] = h.to_dict()
+
+        stats_data = {
+            name: {
+                "total_tasks": s.total_tasks,
+                "successful_tasks": s.successful_tasks,
+                "failed_tasks": s.failed_tasks,
+                "retry_count": s.retry_count,
+                "total_ms": s.total_ms,
+            }
+            for name, s in session.provider_stats.items()
+        }
+
         payload = {
-            "working_dir": str(session.file_mgr.get_working_dir()),
             "current_provider": session.current_provider,
+            "provider_models": dict(session.provider_models),
             "last_task_result": asdict(session.last_task_result),
-            "history": [asdict(item) for item in session.history[-10:]],
+            "history": [asdict(item) for item in session.history[-MAX_HISTORY:]],
             "last_task_run": asdict(session.last_task_run) if session.last_task_run else None,
-            "run_history": [asdict(item) for item in session.run_history[-10:]],
+            "run_history": [asdict(item) for item in session.run_history[-MAX_HISTORY:]],
             "last_plan": self._plan_to_dict(session.last_plan) if session.last_plan else None,
+            "provider_stats": stats_data,
+            "provider_health": health_data,
         }
         target.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
 
@@ -92,7 +146,51 @@ class SessionStore:
         safe_run_id = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in task_run.run_id)
         target = self.artifacts_dir(session.chat_id) / f"{safe_run_id}.md"
         target.write_text(self._render_run_markdown(session, task_run), encoding="utf-8")
+        self._prune_artifacts(session.chat_id)
         return str(target)
+
+    def checkpoint_file(self, chat_id: int) -> Path:
+        return self.sessions_root / f"chat_{chat_id}_checkpoint.json"
+
+    def write_checkpoint(self, session: "ChatSession", task_run: "TaskRun"):
+        """Save in-progress TaskRun state after each subtask for crash recovery."""
+        target = self.checkpoint_file(session.chat_id)
+        try:
+            target.write_text(
+                json.dumps(asdict(task_run), indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
+        except Exception as exc:
+            log.warning("Failed to write checkpoint for chat %s: %s", session.chat_id, exc)
+
+    def load_checkpoint(self, session: "ChatSession") -> "TaskRun | None":
+        """Load the checkpoint for crash recovery. Returns None if not found."""
+        target = self.checkpoint_file(session.chat_id)
+        if not target.exists():
+            return None
+        try:
+            data = json.loads(target.read_text(encoding="utf-8"))
+            return self._task_run_from_dict(data)
+        except Exception as exc:
+            log.warning("Failed to load checkpoint for chat %s: %s", session.chat_id, exc)
+            return None
+
+    def clear_checkpoint(self, chat_id: int):
+        """Remove the checkpoint file after successful completion or manual discard."""
+        self.checkpoint_file(chat_id).unlink(missing_ok=True)
+
+    def _prune_artifacts(self, chat_id: int):
+        """Delete oldest artifacts beyond MAX_ARTIFACTS."""
+        all_artifacts = sorted(
+            self.artifacts_dir(chat_id).glob("*.md"),
+            key=lambda p: p.stat().st_mtime,
+        )
+        excess = len(all_artifacts) - MAX_ARTIFACTS
+        for old in all_artifacts[:excess]:
+            try:
+                old.unlink()
+            except OSError:
+                pass
 
     def latest_artifact_files(self, chat_id: int, limit: int = 10) -> list[Path]:
         return sorted(
@@ -101,12 +199,17 @@ class SessionStore:
             reverse=True,
         )[:limit]
 
+    # ------------------------------------------------------------------ #
+    # Serialisation helpers                                                 #
+    # ------------------------------------------------------------------ #
+
     @staticmethod
     def _plan_to_dict(plan: OrchestrationPlan) -> dict[str, Any]:
         return {
             "prompt": plan.prompt,
             "complexity": plan.complexity,
             "strategy": plan.strategy,
+            "ai_rationale": plan.ai_rationale,
             "subtasks": [
                 {
                     "subtask_id": item.subtask_id,
@@ -116,6 +219,7 @@ class SessionStore:
                     "suggested_provider": item.suggested_provider,
                     "reason": item.reason,
                     "depends_on": list(item.depends_on),
+                    "parallel_group": item.parallel_group,
                 }
                 for item in plan.subtasks
             ],
@@ -127,6 +231,7 @@ class SessionStore:
             prompt=payload.get("prompt", ""),
             complexity=payload.get("complexity", "simple"),
             strategy=payload.get("strategy", ""),
+            ai_rationale=payload.get("ai_rationale", ""),
             subtasks=[
                 PlannedSubtask(
                     subtask_id=item.get("subtask_id", ""),
@@ -136,6 +241,7 @@ class SessionStore:
                     suggested_provider=item.get("suggested_provider", "qwen"),
                     reason=item.get("reason", ""),
                     depends_on=list(item.get("depends_on", [])),
+                    parallel_group=int(item.get("parallel_group", 0)),
                 )
                 for item in payload.get("subtasks", [])
                 if isinstance(item, dict)
@@ -144,12 +250,17 @@ class SessionStore:
 
     @staticmethod
     def _task_run_from_dict(payload: dict[str, Any]) -> TaskRun:
-        subtasks = [
-            SubtaskRun(**item)
-            for item in payload.get("subtasks", [])
-            if isinstance(item, dict)
-        ]
-        clone = dict(payload)
+        subtasks = []
+        for item in payload.get("subtasks", []):
+            if not isinstance(item, dict):
+                continue
+            # Guard unknown fields introduced in newer versions
+            known = {f.name for f in SubtaskRun.__dataclass_fields__.values()}
+            filtered = {k: v for k, v in item.items() if k in known}
+            subtasks.append(SubtaskRun(**filtered))
+        clone = {k: v for k, v in payload.items() if k != "subtasks"}
+        known_run = {f.name for f in TaskRun.__dataclass_fields__.values()}
+        clone = {k: v for k, v in clone.items() if k in known_run}
         clone["subtasks"] = subtasks
         return TaskRun(**clone)
 
@@ -164,23 +275,20 @@ class SessionStore:
             f"- Complexity: {task_run.complexity}",
             f"- Duration: {task_run.duration_text}",
             f"- Working dir: {session.file_mgr.get_working_dir()}",
-            "",
-            "## Prompt",
-            "",
-            "```text",
-            task_run.prompt,
-            "```",
-            "",
         ]
+        if task_run.ai_plan_rationale:
+            lines += [f"- AI rationale: {task_run.ai_plan_rationale}"]
+        lines += ["", "## Prompt", "", "```text", task_run.prompt, "```", ""]
         if task_run.strategy:
             lines.extend(["## Strategy", "", task_run.strategy, ""])
         if task_run.subtasks:
             lines.extend(["## Subtasks", ""])
             for item in task_run.subtasks:
+                retry_note = f"  (retry #{item.retry_count} from {item.original_provider})" if item.retry_count else ""
                 lines.extend([
                     f"### {item.subtask_id} · {item.title}",
                     "",
-                    f"- Provider: {item.provider}",
+                    f"- Provider: {item.provider}{retry_note}",
                     f"- Status: {item.status}",
                     f"- Kind: {item.task_kind}",
                     f"- Duration: {item.duration_ms}ms",
@@ -197,21 +305,11 @@ class SessionStore:
             for index, artifact in enumerate(task_run.handoff_artifacts, start=1):
                 lines.extend([f"### Artifact {index}", "", "```text", artifact[:6000], "```", ""])
         if task_run.synthesis_provider:
-            lines.extend([
-                "## Synthesis",
-                "",
-                f"- Provider: {task_run.synthesis_provider}",
-                "",
-            ])
+            lines.extend(["## Synthesis", "", f"- Provider: {task_run.synthesis_provider}", ""])
             if task_run.synthesis_answer:
                 lines.extend(["```text", task_run.synthesis_answer[:8000], "```", ""])
         if task_run.review_provider:
-            lines.extend([
-                "## Review",
-                "",
-                f"- Provider: {task_run.review_provider}",
-                "",
-            ])
+            lines.extend(["## Review", "", f"- Provider: {task_run.review_provider}", ""])
             if task_run.review_answer:
                 lines.extend(["```text", task_run.review_answer[:8000], "```", ""])
         if task_run.answer_text:

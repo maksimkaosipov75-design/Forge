@@ -66,12 +66,14 @@ class RuntimeContainer:
         provider_name: str,
         provided_manager=None,
         provided_parser=None,
+        model_name: str = "",
     ) -> ProviderRuntime:
         runtime_parser = provided_parser or LogParser()
         runtime_manager = provided_manager or create_process_manager(
             provider=provider_name,
             cli_path=self.provider_paths[provider_name],
             on_output=lambda line, target_parser=runtime_parser: target_parser.feed(line),
+            model_name=model_name,
         )
         return ProviderRuntime(
             provider=provider_name,
@@ -109,7 +111,8 @@ class RuntimeContainer:
     def get_runtime(self, session: ChatSession, provider_name: str) -> ProviderRuntime:
         runtime = session.runtimes.get(provider_name)
         if runtime is None:
-            runtime = self.build_runtime(provider_name)
+            model = session.provider_models.get(provider_name, "")
+            runtime = self.build_runtime(provider_name, model_name=model)
             session.runtimes[provider_name] = runtime
         return runtime
 

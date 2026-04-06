@@ -39,7 +39,12 @@ class RemoteControlManager:
         self.state_root.mkdir(exist_ok=True)
         self.state_file = self.state_root / "remote_control.json"
         self.log_file = self.state_root / "remote_control.log"
-        self.repo_root = Path(__file__).resolve().parent.parent
+        # When installed as a package (e.g. via `forge` entry-point), __file__
+        # resolves to site-packages, not the project directory.  Prefer CWD if
+        # it contains main.py; otherwise fall back to __file__-relative path.
+        cwd_candidate = Path.cwd()
+        file_candidate = Path(__file__).resolve().parent.parent
+        self.repo_root = cwd_candidate if (cwd_candidate / "main.py").exists() else file_candidate
 
     def load_status(self) -> RemoteControlStatus:
         if not self.state_file.exists():

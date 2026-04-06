@@ -133,6 +133,61 @@ def _expand_file_mentions(prompt: str, cwd: str) -> str:
 _git_status_cache: dict[str, tuple[float, str]] = {}
 
 # ---------------------------------------------------------------------------
+# Streaming line renderer — same logic as _md_to_rich but per-line with state
+# ---------------------------------------------------------------------------
+
+def _render_stream_line(raw_line: str, in_code: bool) -> tuple[str, bool]:
+    """Render one line of markdown text for inline streaming display.
+
+    Returns (rich_markup_string, new_in_code_state).
+    Mirrors _md_to_rich's per-line logic so the live render matches the final render.
+    """
+    stripped_r = raw_line.rstrip()
+    stripped = raw_line.lstrip()
+
+    # Code fence toggle
+    if stripped_r.lstrip().startswith("```"):
+        lang = stripped_r.lstrip()[3:].strip() if not in_code else ""
+        label = f"[dim]{lang}[/dim]" if lang else ""
+        return (f"  [dim]```[/dim]{label}", True) if not in_code else ("  [dim]```[/dim]", False)
+
+    if in_code:
+        safe = raw_line.replace("[", "\\[")
+        return f"  [#888888]{safe}[/#888888]", True
+
+    if not stripped.strip():
+        return "", False
+
+    indent = len(raw_line) - len(stripped)
+    pfx = " " * indent
+
+    # Horizontal rule
+    if _re.fullmatch(r'[-*_]{3,}', stripped.strip()):
+        return "[dim]" + "─" * 42 + "[/dim]", False
+    # Headings
+    if stripped.startswith("#### "):
+        return pfx + "[bold dim]" + _md_inline_to_rich(stripped[5:]) + "[/bold dim]", False
+    if stripped.startswith("### "):
+        return pfx + "[bold]" + _md_inline_to_rich(stripped[4:]) + "[/bold]", False
+    if stripped.startswith("## "):
+        return pfx + "[bold underline]" + _md_inline_to_rich(stripped[3:]) + "[/bold underline]", False
+    if stripped.startswith("# "):
+        return pfx + "[bold underline bright_white]" + _md_inline_to_rich(stripped[2:]) + "[/bold underline bright_white]", False
+    # Blockquote
+    if stripped.startswith("> "):
+        return pfx + "[dim italic]▎ " + _md_inline_to_rich(stripped[2:]) + "[/dim italic]", False
+    # Unordered list
+    if stripped.startswith(("- ", "* ", "+ ")):
+        return pfx + "  • " + _md_inline_to_rich(stripped[2:]), False
+    # Ordered list
+    m = _re.match(r'^(\d+)\.\s+(.*)', stripped)
+    if m:
+        return pfx + f"  {m.group(1)}. " + _md_inline_to_rich(m.group(2)), False
+    # Plain line
+    return _md_inline_to_rich(raw_line), False
+
+
+# ---------------------------------------------------------------------------
 # Markdown → Rich markup converter
 # ---------------------------------------------------------------------------
 
@@ -691,6 +746,10 @@ def run_textual_shell(container, chat_id: int = 0):
             self._op_type: str = ""           # "reading" | "writing" | "running" | ""
             self._op_files: list[str] = []    # filenames accumulated for current op group
             self._op_line_idx: int = -1       # index in _stream_lines of the op indicator line
+            # Streaming text render state
+            self._text_buffer: str = ""       # incomplete current line accumulator
+            self._text_in_code: bool = False  # inside a ``` code fence?
+            self._text_rendered_count: int = 0  # fully-rendered lines added since _streamed_text_start
 
         def _provider_color(self) -> str:
             mapping = {
@@ -1236,12 +1295,6 @@ def run_textual_shell(container, chat_id: int = 0):
                 action = f"[dim]{op_type}[/dim]"
             return f"  {icon} {action}  [dim]{names}[/dim]"
 
-        def _writing_indicator(self, color: str) -> str:
-            """Single-line 'Writing…' indicator shown during token streaming."""
-            tok = self._status_state.get("output_tokens") or self._status_state.get("tokens", 0)
-            tok_str = f"  [dim]↑ {tok / 1000:.1f}k tokens[/dim]" if tok >= 1000 else (f"  [dim]↑ {tok} tokens[/dim]" if tok else "")
-            return f"  [{color}]◆[/] [dim]Writing…[/dim]{tok_str}"
-
         def _append_stream_event(self, line: str):
             """Format and append a stream event line to the stream widget."""
             color = self._provider_color()
@@ -1250,16 +1303,36 @@ def run_textual_shell(container, chat_id: int = 0):
                 self._op_type = ""
                 self._op_files = []
                 self._op_line_idx = -1
-                # Instead of showing raw markdown chunks, keep one updating indicator line.
-                # The final formatted answer is injected by _run_prompt_inner when done.
+
+                chunk = line[2:]  # strip "💬 " prefix (2 chars: emoji + space)
+
                 if self._streamed_text_start is None:
                     self._streamed_text_start = len(self._stream_lines)
-                    self._stream_lines.append(self._writing_indicator(color))
+
+                # Accumulate chunk; split off complete lines
+                self._text_buffer += chunk
+                parts = self._text_buffer.split("\n")
+                complete_lines, self._text_buffer = parts[:-1], parts[-1]
+
+                # Render each complete line immediately
+                for raw_line in complete_lines:
+                    rendered, self._text_in_code = _render_stream_line(raw_line, self._text_in_code)
+                    self._stream_lines.append(rendered)
+                    self._text_rendered_count += 1
+
+                # Show the incomplete buffer as a live preview (updates in-place)
+                preview_idx = self._streamed_text_start + self._text_rendered_count
+                if self._text_buffer:
+                    partial, _ = _render_stream_line(self._text_buffer, self._text_in_code)
+                    if preview_idx < len(self._stream_lines):
+                        self._stream_lines[preview_idx] = partial
+                    else:
+                        self._stream_lines.append(partial)
                 else:
-                    # Update the indicator in-place with the latest token count
-                    idx = self._streamed_text_start
-                    if 0 <= idx < len(self._stream_lines):
-                        self._stream_lines[idx] = self._writing_indicator(color)
+                    # No partial content — remove stale preview line if present
+                    if preview_idx < len(self._stream_lines):
+                        self._stream_lines = self._stream_lines[:preview_idx]
+
                 self._last_stream_was_text = False
                 self._stream_lines = self._stream_lines[-5000:]
                 self.query_one("#stream", StreamWidget).update("\n".join(self._stream_lines))
@@ -2359,6 +2432,9 @@ def run_textual_shell(container, chat_id: int = 0):
             self._op_type = ""
             self._op_files = []
             self._op_line_idx = -1
+            self._text_buffer = ""
+            self._text_in_code = False
+            self._text_rendered_count = 0
             self._show_status_line(provider_name)
 
             def stream_event_callback(line: str):
@@ -2404,9 +2480,14 @@ def run_textual_shell(container, chat_id: int = 0):
             answer = result.answer_text.strip()
 
             if self._streamed_text_start is not None:
-                # Drop the Writing… indicator; formatted answer goes in its place
+                # Drop streamed lines; replace with the final full render.
+                # This corrects any multi-line constructs (tables, code blocks)
+                # that couldn't be resolved during per-chunk streaming.
                 self._stream_lines = self._stream_lines[:self._streamed_text_start]
                 self._last_stream_was_text = False
+                self._text_buffer = ""
+                self._text_in_code = False
+                self._text_rendered_count = 0
 
             final_parts: list[str] = ["", *diff_lines]
             if answer:

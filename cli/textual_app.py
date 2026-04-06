@@ -733,6 +733,98 @@ def create_textual_app(container, chat_id: int = 0):
             }
             return mapping.get(self.current_provider, "#6aa7ff")
 
+        @staticmethod
+        def _plan_panel_lines(strategy: str, complexity: str, eta: str, rationale: str, width: int = 88) -> list[str]:
+            """Render an AI Plan bordered panel as Rich markup lines."""
+            label = " AI Plan "
+            inner = width - 2
+            dash_l = (inner - len(label)) // 2
+            dash_r = inner - len(label) - dash_l
+            top = f"[dim]╭{'─' * dash_l}[/dim][cyan]{label}[/cyan][dim]{'─' * dash_r}╮[/dim]"
+            bot = f"[dim]╰{'─' * inner}╯[/dim]"
+            pad = inner - 2  # usable chars inside "│  … │"
+
+            def row(lbl: str, val: str) -> list[str]:
+                lw = 11
+                prefix = f"  [bold dim]{lbl:<{lw}}[/bold dim] "
+                prefix_plain_len = lw + 3  # "  label  "
+                available = pad - prefix_plain_len
+                # simple wrap at available chars (plain text estimate)
+                import re as _r
+                plain_val = _r.sub(r"\[.*?\]", "", val)
+                if len(plain_val) <= available:
+                    content = f"{prefix}{val}"
+                    right_pad = " " * max(0, pad - prefix_plain_len - len(plain_val))
+                    return [f"[dim]│[/dim]{content}{right_pad}[dim]│[/dim]"]
+                # wrap
+                words = plain_val.split()
+                out_rows = []
+                line_words: list[str] = []
+                for w in words:
+                    if sum(len(x) + 1 for x in line_words) + len(w) > available:
+                        out_rows.append(" ".join(line_words))
+                        line_words = [w]
+                    else:
+                        line_words.append(w)
+                if line_words:
+                    out_rows.append(" ".join(line_words))
+                result = []
+                for idx, r in enumerate(out_rows):
+                    rpad = " " * max(0, pad - prefix_plain_len - len(r))
+                    if idx == 0:
+                        result.append(f"[dim]│[/dim]{prefix}{r}{rpad}[dim]│[/dim]")
+                    else:
+                        cont_prefix = "  " + " " * (lw + 2)
+                        result.append(f"[dim]│[/dim]{cont_prefix}{r}{rpad}[dim]│[/dim]")
+                return result
+
+            lines = ["", top]
+            lines.extend(row("strategy", strategy))
+            comp_val = f"{complexity}  [dim]·[/dim]  ETA {eta}"
+            lines.extend(row("complexity", comp_val))
+            if rationale:
+                lines.append(f"[dim]│[/dim]{'':>{inner}}[dim]│[/dim]".replace(f"{'':>{inner}}", " " * inner))
+                lines.extend(row("rationale", rationale))
+            lines.append(bot)
+            return lines
+
+        @staticmethod
+        def _subtask_table_lines(subtasks: list, prov_colors: dict) -> list[str]:
+            """Render subtask list as an aligned table with colored providers."""
+            COL_ID = 6
+            COL_TITLE = 30
+            COL_PROV = 10
+            COL_DEP = 12
+            header = (
+                f"  [bold dim]{'#':<{COL_ID}}{'subtask':<{COL_TITLE}}"
+                f"{'provider':<{COL_PROV}}{'depends on':<{COL_DEP}}group[/bold dim]"
+            )
+            sep = f"  [dim]{'─' * (COL_ID + COL_TITLE + COL_PROV + COL_DEP + 8)}[/dim]"
+            lines = ["", header, sep]
+            for item in subtasks:
+                color = prov_colors.get(item.suggested_provider, "#ffffff")
+                sid = item.subtask_id[:5]  # keep short for alignment
+                title = item.title
+                dep = ", ".join(item.depends_on) if item.depends_on else "—"
+                group = str(item.parallel_group)
+                # title may wrap
+                if len(title) <= COL_TITLE - 1:
+                    lines.append(
+                        f"  [dim]{sid:<{COL_ID}}[/dim]{title:<{COL_TITLE}}"
+                        f"[{color}]{item.suggested_provider:<{COL_PROV}}[/{color}]"
+                        f"[dim]{dep:<{COL_DEP}}{group}[/dim]"
+                    )
+                else:
+                    first = title[: COL_TITLE - 1]
+                    rest = title[COL_TITLE - 1 :]
+                    lines.append(
+                        f"  [dim]{sid:<{COL_ID}}[/dim]{first:<{COL_TITLE}}"
+                        f"[{color}]{item.suggested_provider:<{COL_PROV}}[/{color}]"
+                        f"[dim]{dep:<{COL_DEP}}{group}[/dim]"
+                    )
+                    lines.append(f"  {' ' * COL_ID}[dim]{rest}[/dim]")
+            return lines
+
         def compose(self) -> ComposeResult:
             session = container.get_session(chat_id)
             self.current_provider = session.current_provider
@@ -2281,29 +2373,22 @@ def create_textual_app(container, chat_id: int = 0):
                 ai_tag = "  [dim](AI plan)[/dim]" if plan.ai_rationale else "  [dim](rule-based)[/dim]"
                 eta = container.orchestrator_service.estimate_plan_eta(plan, session)
                 cached_tag = "  [dim][cached][/dim]" if "[cached]" in plan.ai_rationale else ""
-                subtask_lines = [
-                    (
-                        f"  {index}. [bold]{item.title}[/bold]  [dim][{item.suggested_provider}]"
-                        + (f"  ∥group={item.parallel_group}" if item.parallel_group else "")
-                        + "[/dim]"
-                    )
-                    for index, item in enumerate(plan.subtasks, start=1)
-                ]
                 color = self._provider_color()
-                self._push_output(
-                    "\n".join(
-                        [
-                            f"  [dim]complexity[/dim]  {plan.complexity}{ai_tag}{cached_tag}",
-                            f"  [dim]strategy  [/dim]  {plan.strategy}",
-                            f"  [dim]eta       [/dim]  {eta}",
-                            *(["", f"  [dim]{plan.ai_rationale}[/dim]"] if plan.ai_rationale else []),
-                            "",
-                            *subtask_lines,
-                            "",
-                            f"  Run this plan?  [{color}]Y[/{color}][dim]/n[/dim]  ·  or use [bold]/run-plan[/bold]  [dim]/edit-plan[/dim]",
-                        ]
-                    )
+                prov_colors = {"qwen": "#b07cff", "codex": "#6aa7ff", "claude": "#ff9e57"}
+                panel_lines = self._plan_panel_lines(
+                    strategy=plan.strategy,
+                    complexity=f"{plan.complexity}{ai_tag}{cached_tag}",
+                    eta=eta,
+                    rationale=plan.ai_rationale,
                 )
+                table_lines = self._subtask_table_lines(plan.subtasks, prov_colors)
+                all_lines = [
+                    *panel_lines,
+                    *table_lines,
+                    "",
+                    f"  Run this plan?  [{color}]Y[/{color}][dim]/n[/dim]  ·  or use [bold]/run-plan[/bold]  [dim]/edit-plan[/dim]",
+                ]
+                self._push_output("\n".join(all_lines))
                 self._awaiting_plan_confirm = True
                 self.query_one("#input", Input).placeholder = "y to run · n to cancel · /edit-plan to adjust"
                 return
@@ -2419,7 +2504,7 @@ def create_textual_app(container, chat_id: int = 0):
             self._append_stream(
                 "",
                 sep,
-                f"  [white]{prompt[:120]}[/white]{override_tag}",
+                f"  [dim]>[/dim] [white]{prompt[:120]}[/white]{override_tag}",
                 f"  [dim]{provider_name}  ·  {cwd}[/dim]",
                 "",
             )
@@ -2542,7 +2627,7 @@ def create_textual_app(container, chat_id: int = 0):
             self._append_stream(
                 "",
                 "  [dim]" + "─  " * 34 + "[/dim]",
-                f"  [white]{prompt[:120]}[/white]{ai_tag}",
+                f"  [dim]>[/dim] [white]{prompt[:120]}[/white]{ai_tag}",
                 f"  [dim]orchestrate  ·  {cwd}[/dim]",
                 "",
                 f"  strategy: {plan.strategy}",

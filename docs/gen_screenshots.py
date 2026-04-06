@@ -25,7 +25,7 @@ def gen_orchestration():
 
     # Previous session
     c.print(f"  [dim]{SEP}[/dim]")
-    c.print("  [dim]write unit tests for the auth module[/dim]")
+    c.print("  [dim]>[/dim] [dim]write unit tests for the auth module[/dim]")
     c.print("  [dim]qwen  ·  ~/projects/api[/dim]")
     c.print()
     c.print("  [dim]✓ Done  ·  qwen  ·  12s[/dim]")
@@ -33,21 +33,30 @@ def gen_orchestration():
 
     # New prompt
     c.print(f"  [dim]{SEP}[/dim]")
-    c.print("  [white]build a REST API for user auth with JWT and SQLite[/white]")
+    c.print("  [dim]>[/dim] [white]build a REST API for user auth with JWT and SQLite[/white]")
     c.print("  [dim]qwen  ·  ~/projects/api[/dim]")
     c.print()
 
-    # Plan output (real format from _push_output in /plan handler)
-    c.print("  [dim]complexity[/dim]  medium  [dim](AI plan)[/dim]")
-    c.print("  [dim]strategy  [/dim]  split by layer — DB schema first, then API handlers")
-    c.print("  [dim]eta       [/dim]  ~90s")
+    # AI Plan panel — bordered with box-drawing chars (matches _plan_panel_lines)
+    W = 88
+    label = " AI Plan "
+    dash_l = (W - 2 - len(label)) // 2
+    dash_r = W - 2 - len(label) - dash_l
+    c.print(f"[dim]╭{'─' * dash_l}[/dim][cyan]{label}[/cyan][dim]{'─' * dash_r}╮[/dim]")
+    c.print(f"[dim]│[/dim]  [bold dim]{'strategy':<11}[/bold dim] split by layer — backend core first, then API surface{'':>12}[dim]│[/dim]")
+    c.print(f"[dim]│[/dim]  [bold dim]{'complexity':<11}[/bold dim] medium  [dim]·[/dim]  ETA ≈ 90s{'':>38}[dim]│[/dim]")
+    c.print(f"[dim]│[/dim]{' ' * (W - 2)}[dim]│[/dim]")
+    c.print(f"[dim]│[/dim]  [bold dim]{'rationale':<11}[/bold dim] JWT and SQLite integration is straightforward but benefits{'':>7}[dim]│[/dim]")
+    c.print(f"[dim]│[/dim]  {' ' * 13}from a clean separation: DB schema first, then handler logic.{'':>5}[dim]│[/dim]")
+    c.print(f"[dim]╰{'─' * (W - 2)}╯[/dim]")
     c.print()
-    c.print("  [dim]JWT and SQLite integration benefits from clean separation: schema first,[/dim]")
-    c.print("  [dim]then handler logic with auth middleware in between.[/dim]")
-    c.print()
-    c.print("  1. [bold]Database schema and models[/bold]  [dim][qwen][/dim]")
-    c.print("  2. [bold]JWT auth middleware[/bold]          [dim][codex]  ∥group=1[/dim]")
-    c.print("  3. [bold]REST endpoints and OpenAPI docs[/bold]  [dim][claude]  ∥group=2[/dim]")
+
+    # Subtask table (matches _subtask_table_lines)
+    c.print("  [bold dim]#      subtask                       provider  depends on  group[/bold dim]")
+    c.print("  [dim]─────────────────────────────────────────────────────────────[/dim]")
+    c.print("  [dim]s1    [/dim]Database schema and models     [#b07cff]qwen      [/#b07cff][dim]—           0[/dim]")
+    c.print("  [dim]s2    [/dim]JWT auth middleware             [#6aa7ff]codex     [/#6aa7ff][dim]s1          1[/dim]")
+    c.print("  [dim]s3    [/dim]REST endpoints and OpenAPI docs [#ff9e57]claude    [/#ff9e57][dim]s2          2[/dim]")
     c.print()
     c.print("  Run this plan?  [#b07cff]Y[/#b07cff][dim]/n[/dim]  ·  or use [bold]/run-plan[/bold]  [dim]/edit-plan[/dim]")
     c.print()
@@ -66,7 +75,7 @@ def gen_streaming():
 
     # Previous session (dim)
     c.print(f"  [dim]{SEP}[/dim]")
-    c.print("  [dim]write unit tests for the auth module[/dim]")
+    c.print("  [dim]>[/dim] [dim]write unit tests for the auth module[/dim]")
     c.print("  [dim]qwen  ·  ~/projects/api[/dim]")
     c.print()
     c.print("  [dim]✓ Done  ·  qwen  ·  12s  ·  3 files changed[/dim]")
@@ -74,7 +83,7 @@ def gen_streaming():
 
     # Current session
     c.print(f"  [dim]{SEP}[/dim]")
-    c.print("  [white]refactor session_store.py to use async SQLite[/white]")
+    c.print("  [dim]>[/dim] [white]refactor session_store.py to use async SQLite[/white]")
     c.print("  [dim]qwen  ·  ~/projects/api[/dim]")
     c.print()
 
@@ -116,7 +125,7 @@ def gen_diff():
 
     # Previous sessions (dim)
     c.print(f"  [dim]{SEP}[/dim]")
-    c.print("  [dim]write unit tests for the auth module[/dim]")
+    c.print("  [dim]>[/dim] [dim]write unit tests for the auth module[/dim]")
     c.print("  [dim]qwen  ·  ~/projects/api[/dim]")
     c.print()
     c.print("  [dim]✓ Done  ·  qwen  ·  12s  ·  3 files changed[/dim]")

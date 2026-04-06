@@ -362,6 +362,8 @@ def run_textual_shell(container, chat_id: int = 0):
         "/artifacts": ("History", "List latest artifact files"),
         "/plan": ("Orchestration", "Preview an orchestration plan"),
         "/orchestrate": ("Orchestration", "Run a multi-agent orchestration"),
+        "/retry": ("Shell", "Re-run the last prompt"),
+        "/expand": ("Shell", "Show full last answer without truncation"),
         "/remote-control": ("Remote", "Start or manage Telegram remote access"),
         "/quit": ("Shell", "Exit the textual shell"),
         "/exit": ("Shell", "Exit the textual shell"),
@@ -1013,6 +1015,24 @@ def run_textual_shell(container, chat_id: int = 0):
                 self._set_stream("")
                 self._add_timeline("Stream cleared.")
                 return
+            if command == "/retry":
+                last = session.last_task_result
+                if last and last.prompt:
+                    await self._run_prompt(last.prompt)
+                else:
+                    self._set_stream("[dim]No previous prompt to retry.[/dim]")
+                return
+            if command == "/expand":
+                last = session.last_task_result
+                if last and last.answer_text.strip():
+                    color = self._provider_color()
+                    self._set_stream(
+                        f"[{color}]◆ {last.provider}[/]  [dim]full answer[/dim]\n\n"
+                        + _md_to_rich(last.answer_text.strip())
+                    )
+                else:
+                    self._set_stream("[dim]No answer to expand.[/dim]")
+                return
             if command == "/help":
                 self._add_timeline("Opened help.")
                 self._set_stream(
@@ -1023,6 +1043,8 @@ def run_textual_shell(container, chat_id: int = 0):
                             "/provider <qwen|codex|claude>",
                             "/status · /limits",
                             "/runs · /show <n>",
+                            "/retry",
+                            "/expand",
                             "/remote-control [status|stop|logs]",
                             "/plan <task>",
                             "/orchestrate <task>",
@@ -1284,6 +1306,8 @@ def run_textual_shell(container, chat_id: int = 0):
             ]
             if result.answer_text.strip():
                 final_parts += ["", _md_to_rich(result.answer_text.strip()[:3000])]
+            elif result.exit_code != 0 and result.error_text:
+                final_parts += ["", f"[red]{result.error_text[:500]}[/red]"]
             final_parts += [
                 "",
                 f"  {status_icon} [{color}]{provider_name}[/]  [dim]{duration}[/dim]",

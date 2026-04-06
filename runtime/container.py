@@ -13,7 +13,7 @@ from process_manager import (
 from runtime.executor import ExecutionService
 from runtime.orchestrator_service import OrchestratorService
 from session_store import SessionStore
-from task_models import ChatSession, ProviderRuntime, TaskResult, TaskRun
+from task_models import ChatSession, ProviderRuntime, ProviderStats, TaskResult, TaskRun
 from providers import normalize_provider_name
 
 
@@ -139,11 +139,16 @@ class RuntimeContainer:
                 return preferred
         return session.current_provider
 
-    def remember_task_result(self, session: ChatSession, task_result: TaskResult):
+    def remember_task_result(self, session: ChatSession, task_result: TaskResult, retry_count: int = 0):
         session.last_task_result = task_result
         session.history.append(task_result)
         if len(session.history) > 10:
             session.history = session.history[-10:]
+        # Update per-provider stats
+        provider = task_result.provider
+        if provider not in session.provider_stats:
+            session.provider_stats[provider] = ProviderStats()
+        session.provider_stats[provider].record(task_result, retry_count=retry_count)
         task_run = TaskRun.from_task_result(task_result)
         task_run.artifact_file = self.session_store.write_run_artifact(session, task_run)
         session.last_task_run = task_run

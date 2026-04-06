@@ -198,6 +198,33 @@ class QueuedTask:
 
 
 @dataclass
+class ProviderStats:
+    """Cumulative per-provider performance stats tracked across the session."""
+    total_tasks: int = 0
+    successful_tasks: int = 0
+    failed_tasks: int = 0
+    retry_count: int = 0
+    total_ms: int = 0
+
+    def record(self, result: "TaskResult", retry_count: int = 0):
+        self.total_tasks += 1
+        if result.exit_code == 0:
+            self.successful_tasks += 1
+        else:
+            self.failed_tasks += 1
+        self.retry_count += retry_count
+        self.total_ms += result.duration_ms
+
+    @property
+    def avg_ms(self) -> int:
+        return self.total_ms // self.total_tasks if self.total_tasks else 0
+
+    @property
+    def success_rate(self) -> float:
+        return self.successful_tasks / self.total_tasks if self.total_tasks else 0.0
+
+
+@dataclass
 class ProviderRuntime:
     provider: str
     manager: Any
@@ -219,6 +246,7 @@ class ChatSession:
     last_task_run: TaskRun | None = None
     run_history: list[TaskRun] = field(default_factory=list)
     last_plan: Any = None
+    provider_stats: dict[str, "ProviderStats"] = field(default_factory=dict)
     task_queue: asyncio.Queue = field(default_factory=asyncio.Queue)
     pending_tasks: dict[int, QueuedTask] = field(default_factory=dict)
     worker_task: asyncio.Task | None = None

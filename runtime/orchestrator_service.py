@@ -15,6 +15,14 @@ log = logging.getLogger(__name__)
 StatusCallback = Callable[[str], Awaitable[None]]
 
 
+_PROJECT_CONTEXT_FILES = (
+    "README.md", "README.rst", "README.txt",
+    "pyproject.toml", "setup.py", "Cargo.toml",
+    "package.json", "go.mod", "Makefile", "CMakeLists.txt",
+)
+_SUBTASK_TIMEOUT_SECONDS = 300  # 5 min per subtask
+
+
 def _cwd_listing(cwd: str, max_entries: int = 30) -> str:
     """Return a compact top-level directory listing for context."""
     try:
@@ -30,6 +38,49 @@ def _cwd_listing(cwd: str, max_entries: int = 30) -> str:
         return "\n".join(lines) if lines else ""
     except Exception:
         return ""
+
+
+def _read_project_context(cwd: str, max_bytes: int = 4000) -> str:
+    """Read key project files (README, manifest) for first-subtask context."""
+    p = Path(cwd)
+    parts: list[str] = []
+    budget = max_bytes
+    for name in _PROJECT_CONTEXT_FILES:
+        candidate = p / name
+        if candidate.is_file():
+            try:
+                text = candidate.read_text(errors="replace")[:budget]
+                parts.append(f"--- {name} ---\n{text}")
+                budget -= len(text)
+                if budget <= 0:
+                    break
+            except Exception:
+                pass
+    return "\n\n".join(parts)
+
+
+def _read_file_contents(file_paths: list[str], max_bytes_each: int = 3000, max_files: int = 4) -> list[tuple[str, str]]:
+    """Read contents of key files created by previous subtasks for handoff context."""
+    results: list[tuple[str, str]] = []
+    # Prefer smaller files and code files
+    code_exts = {".py", ".rs", ".ts", ".js", ".go", ".toml", ".json", ".yaml", ".yml", ".md", ".sh"}
+    candidates = sorted(
+        file_paths,
+        key=lambda p: (Path(p).suffix not in code_exts, Path(p).stat().st_size if Path(p).exists() else 0)
+    )
+    for path_str in candidates[:max_files]:
+        p = Path(path_str)
+        if not p.is_file():
+            continue
+        try:
+            size = p.stat().st_size
+            if size > 50_000:
+                continue  # skip very large files
+            content = p.read_text(errors="replace")[:max_bytes_each]
+            results.append((str(p.name), content))
+        except Exception:
+            pass
+    return results
 
 
 class OrchestratorService:
@@ -48,6 +99,7 @@ class OrchestratorService:
         previous_results: list[TaskResult],
         cwd: str | None = None,
         files_touched: list[str] | None = None,
+        is_first: bool = False,
     ) -> str:
         parts = [
             "You are one agent in a multi-agent execution plan.",
@@ -62,17 +114,29 @@ class OrchestratorService:
             listing = _cwd_listing(cwd)
             if listing:
                 parts.append(f"Working directory ({Path(cwd).name}):\n{listing}")
+        # First subtask: include project manifest/README for context
+        if is_first and cwd:
+            ctx = _read_project_context(cwd)
+            if ctx:
+                parts.append(f"Project context:\n{ctx}")
         if files_touched:
             parts.append(
                 "Files already created or changed in this run:\n"
                 + "\n".join(f"  {f}" for f in files_touched[:20])
             )
-        if subtask.depends_on and previous_results:
-            parts.append("Previous subtask outputs (context for your work):")
+            # Include actual file contents for files created by previous subtasks
+            file_contents = _read_file_contents(files_touched)
+            if file_contents:
+                content_parts = ["Key file contents from previous steps:"]
+                for fname, content in file_contents:
+                    content_parts.append(f"=== {fname} ===\n{content}")
+                parts.append("\n\n".join(content_parts))
+        if previous_results:
+            parts.append("Previous subtask outputs:")
             for result in previous_results[-3:]:
                 summary = (
-                    f"[{result.provider}] {result.prompt[:200]}\n"
-                    f"Result: {result.answer_text[:1200]}"
+                    f"[{result.provider}] {result.prompt[:150]}\n"
+                    f"Result: {result.answer_text[:800]}"
                 )
                 parts.append(summary)
         parts.append(
@@ -89,6 +153,12 @@ class OrchestratorService:
             parts.append("Changed: " + ", ".join(Path(p).name for p in task_result.changed_files[:8]))
         if task_result.answer_text.strip():
             parts.append("Result: " + task_result.answer_text[:800])
+        # Include key file contents in handoff so next agent sees actual code
+        all_files = task_result.new_files + task_result.changed_files
+        if all_files:
+            file_contents = _read_file_contents(all_files, max_bytes_each=2000, max_files=3)
+            for fname, content in file_contents:
+                parts.append(f"\n--- {fname} ---\n{content}")
         return "\n".join(parts)
 
     @staticmethod
@@ -201,6 +271,38 @@ class OrchestratorService:
             status_prefix=status_prefix,
             stream_event_callback=stream_event_callback,
         )
+
+    async def _execute_subtask_timed(
+        self,
+        session,
+        plan: OrchestrationPlan,
+        subtask,
+        provider_name: str,
+        prompt: str,
+        status_callback: StatusCallback | None,
+        status_prefix: str,
+        stream_event_callback,
+    ) -> TaskResult:
+        """Like _execute_subtask but enforces _SUBTASK_TIMEOUT_SECONDS."""
+        try:
+            return await asyncio.wait_for(
+                self._execute_subtask(
+                    session, plan, subtask, provider_name, prompt,
+                    status_callback, status_prefix, stream_event_callback,
+                ),
+                timeout=_SUBTASK_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            log.warning("Subtask %s timed out after %ds", subtask.subtask_id, _SUBTASK_TIMEOUT_SECONDS)
+            from task_models import TaskResult, utc_now_iso
+            return TaskResult(
+                provider=provider_name,
+                prompt=prompt,
+                exit_code=-1,
+                error_text=f"Subtask timed out after {_SUBTASK_TIMEOUT_SECONDS}s",
+                started_at=utc_now_iso(),
+                finished_at=utc_now_iso(),
+            )
 
     async def run_orchestrated_task(
         self,
@@ -386,8 +488,9 @@ class OrchestratorService:
         status_callback: StatusCallback | None,
         stream_event_callback,
     ) -> bool:
-        """Execute one subtask with health-aware routing and one retry. Returns True on success."""
+        """Execute one subtask with health-aware routing, per-subtask timeout, and one retry."""
         provider_name = self._pick_healthy_provider(session, subtask.suggested_provider)
+        is_first = index == 1 and not subtask_results
 
         # Collect already-touched files for context
         files_touched = list(dict.fromkeys(
@@ -395,7 +498,8 @@ class OrchestratorService:
         ))
 
         prompt = self.build_subtask_prompt(
-            plan, subtask, subtask_results, cwd=cwd, files_touched=files_touched
+            plan, subtask, subtask_results,
+            cwd=cwd, files_touched=files_touched, is_first=is_first,
         )
 
         status_title = "⏳ <b>Оркестратор выполняет план</b>"
@@ -407,7 +511,7 @@ class OrchestratorService:
         if status_callback:
             await status_callback(status_prefix)
 
-        task_result = await self._execute_subtask(
+        task_result = await self._execute_subtask_timed(
             session, plan, subtask, provider_name, prompt,
             status_callback, status_prefix, stream_event_callback,
         )
@@ -429,7 +533,7 @@ class OrchestratorService:
                 )
                 if status_callback:
                     await status_callback(retry_prefix)
-                task_result = await self._execute_subtask(
+                task_result = await self._execute_subtask_timed(
                     session, plan, subtask, alt, prompt,
                     status_callback, retry_prefix, stream_event_callback,
                 )

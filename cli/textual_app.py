@@ -360,15 +360,19 @@ def run_textual_shell(container, chat_id: int = 0):
         "/home": ("Shell", "Return to the start page"),
         "/new": ("Shell", "Reset the shell workspace"),
         "/clear": ("Shell", "Clear the stream output"),
-        "/provider": ("Providers", "Switch the default provider"),
+        "/save": ("Shell", "Save last answer to file (/save [filename])"),
+        "/export": ("Shell", "Export stream to file (/export [md|txt])"),
+        "/stats": ("Status", "Show per-provider performance stats"),
+        "/provider": ("Providers", "Switch the default provider  (@provider: prefix also works)"),
         "/providers": ("Providers", "List available providers"),
         "/status": ("Status", "Show current shell/session status"),
         "/limits": ("Status", "Show provider health and limits"),
         "/runs": ("History", "List recent runs"),
         "/show": ("History", "Show details for a run by index"),
         "/artifacts": ("History", "List latest artifact files"),
-        "/plan": ("Orchestration", "Preview an orchestration plan"),
+        "/plan": ("Orchestration", "Preview an AI orchestration plan"),
         "/orchestrate": ("Orchestration", "Run a multi-agent orchestration"),
+        "/replan": ("Orchestration", "Replan and retry the last partial/failed orchestration"),
         "/retry": ("Shell", "Re-run the last prompt"),
         "/expand": ("Shell", "Show full last answer without truncation"),
         "/remote-control": ("Remote", "Start or manage Telegram remote access"),
@@ -431,6 +435,9 @@ def run_textual_shell(container, chat_id: int = 0):
         pass
 
     class MultilinePreview(Static):
+        pass
+
+    class AutoscrollIndicator(Static):
         pass
 
     class BridgeTextualApp(App):
@@ -499,6 +506,29 @@ def run_textual_shell(container, chat_id: int = 0):
             dock: bottom;
             margin: 0 1 0 1;
         }
+
+        #search-bar {
+            dock: bottom;
+            margin: 0 1 0 1;
+            border: solid #b07cff;
+            display: none;
+        }
+
+        #search-bar.active {
+            display: block;
+        }
+
+        #autoscroll-indicator {
+            height: 1;
+            padding: 0 2;
+            background: #1a1d25;
+            color: #9aa3b2;
+            display: none;
+        }
+
+        #autoscroll-indicator.active {
+            display: block;
+        }
         """
 
         current_provider = reactive("qwen")
@@ -520,6 +550,10 @@ def run_textual_shell(container, chat_id: int = 0):
             self._history_draft: str = ""  # saves current draft when navigating history
             self._multiline_buffer: list[str] = []  # accumulates lines for multi-line input
             self._ctx_input_tokens: int = 0  # last known context size from API
+            self._autoscroll: bool = True  # auto-scroll to bottom on new content
+            self._search_active: bool = False  # Ctrl+F search mode
+            self._search_snapshot: list[str] = []  # stream snapshot before search
+            self._task_start_time: float = 0.0  # for notify-send on long tasks
 
         def _provider_color(self) -> str:
             mapping = {
@@ -539,12 +573,14 @@ def run_textual_shell(container, chat_id: int = 0):
                         yield StreamWidget("Ready.", id="stream")
                     yield SideWidget(self._side_text(), id="side")
             yield StatusLineWidget("", id="statusline")
+            yield AutoscrollIndicator("", id="autoscroll-indicator")
             yield MultilinePreview("", id="multiline-preview")
             yield Input(
-                placeholder="/help · @file · Shift+Enter for multiline · /orchestrate <task>",
+                placeholder="/help · @provider:prompt · @file · Shift+Enter multiline · Ctrl+F search",
                 id="input",
                 suggester=SlashCommandSuggester(),
             )
+            yield Input(placeholder="Search stream…  Esc to close", id="search-bar")
 
         @property
         def _history_path(self) -> Path:
@@ -759,8 +795,49 @@ def run_textual_shell(container, chat_id: int = 0):
             self.query_one("#statusline", StatusLineWidget).update(self._status_renderable())
 
         def _scroll_to_bottom(self):
+            if not self._autoscroll:
+                return
             scroll = self.query_one("#stream-scroll", VerticalScroll)
             scroll.scroll_end(animate=False)
+
+        def _toggle_autoscroll(self):
+            self._autoscroll = not self._autoscroll
+            ind = self.query_one("#autoscroll-indicator", AutoscrollIndicator)
+            if self._autoscroll:
+                ind.remove_class("active")
+                ind.update("")
+                self._scroll_to_bottom()
+            else:
+                ind.add_class("active")
+                ind.update("  [dim]autoscroll OFF — press [bold]A[/bold] to resume[/dim]")
+
+        def _open_search(self):
+            self._search_active = True
+            self._search_snapshot = list(self._stream_lines)
+            sb = self.query_one("#search-bar", Input)
+            sb.value = ""
+            sb.add_class("active")
+            sb.focus()
+
+        def _close_search(self):
+            self._search_active = False
+            sb = self.query_one("#search-bar", Input)
+            sb.remove_class("active")
+            # Restore full stream
+            self._stream_lines = self._search_snapshot
+            self.query_one("#stream", StreamWidget).update("\n".join(self._stream_lines))
+            self.call_after_refresh(self._scroll_to_bottom)
+            self.query_one("#input", Input).focus()
+
+        def _apply_search(self, term: str):
+            if not term:
+                lines = self._search_snapshot
+            else:
+                t = term.lower()
+                lines = [l for l in self._search_snapshot if t in l.lower()]
+                if not lines:
+                    lines = [f"  [dim]No matches for '{term}'[/dim]"]
+            self.query_one("#stream", StreamWidget).update("\n".join(lines))
 
         def _set_stream(self, content: str):
             """Replace stream content and sync _stream_lines."""
@@ -884,11 +961,34 @@ def run_textual_shell(container, chat_id: int = 0):
                 preview.update("")
                 preview.remove_class("active")
 
+        # on_input_changed is merged below into the async handler
+
         async def on_key(self, event) -> None:
+            if event.key == "ctrl+f":
+                if self._search_active:
+                    self._close_search()
+                else:
+                    self._open_search()
+                event.prevent_default()
+                return
+            if event.key == "a" and not self._search_active:
+                # Only toggle when input widget is NOT focused
+                try:
+                    focused = self.focused
+                    if focused is None or not isinstance(focused, Input):
+                        self._toggle_autoscroll()
+                        event.prevent_default()
+                        return
+                except Exception:
+                    pass
             if event.key == "?":
                 await self._handle_command("/help")
                 return
             if event.key == "escape":
+                if self._search_active:
+                    self._close_search()
+                    event.prevent_default()
+                    return
                 if self._multiline_buffer:
                     self._multiline_buffer = []
                     self._update_multiline_preview()
@@ -919,6 +1019,24 @@ def run_textual_shell(container, chat_id: int = 0):
                     self._append_stream(f"  [dim]{msg}[/dim]")
                 else:
                     self._add_timeline("Nothing to copy yet.")
+                event.prevent_default()
+                return
+            if event.key == "ctrl+r":
+                # Ctrl+R: reverse history search — show matching entries in stream
+                input_widget = self.query_one("#input", Input)
+                term = input_widget.value.strip().lower()
+                matches = [
+                    p for p in reversed(self._input_history)
+                    if not term or term in p.lower()
+                ][:10]
+                if matches:
+                    self._append_stream(
+                        "",
+                        "  [dim]── history search (type to filter, ↑/↓ to select) ──[/dim]",
+                        *[f"  [dim]{i+1}.[/dim] {m.replace('[', '\\[')}" for i, m in enumerate(matches)],
+                    )
+                else:
+                    self._append_stream("  [dim]No history matches.[/dim]")
                 event.prevent_default()
                 return
             if event.key == "shift+enter":
@@ -967,10 +1085,19 @@ def run_textual_shell(container, chat_id: int = 0):
                 return
 
         async def on_input_changed(self, event: Input.Changed) -> None:
+            if self._search_active and event.input.id == "search-bar":
+                self._apply_search(event.value)
+                return
+            if event.input.id != "input":
+                return
             self.current_input = event.value
             self.query_one("#side", SideWidget).update(self._side_text())
 
         async def on_input_submitted(self, event: Input.Submitted):
+            # Search bar Enter closes search
+            if event.input.id == "search-bar":
+                self._close_search()
+                return
             value = event.value.strip()
             event.input.value = ""
             self.current_input = ""
@@ -1005,7 +1132,17 @@ def run_textual_shell(container, chat_id: int = 0):
                 await self._handle_command(value)
                 return
 
-            await self._run_prompt(value)
+            # @provider: prefix — run with a specific provider without permanently switching
+            provider_override: str | None = None
+            m_prov = _re.match(r'^@(qwen|codex|claude):\s*', value, _re.IGNORECASE)
+            if m_prov:
+                from providers import normalize_provider_name, is_supported_provider
+                candidate = normalize_provider_name(m_prov.group(1))
+                if is_supported_provider(candidate):
+                    provider_override = candidate
+                    value = value[m_prov.end():]
+
+            await self._run_prompt(value, provider_override=provider_override)
 
         async def _build_plan_ai(session, prompt: str):
             """Try AI planner first; fall back to rule-based silently."""
@@ -1040,6 +1177,96 @@ def run_textual_shell(container, chat_id: int = 0):
                 self._set_stream("")
                 self._add_timeline("Stream cleared.")
                 return
+            if command == "/save":
+                last = session.last_task_result
+                if not last or not last.answer_text.strip():
+                    self._set_stream("[dim]Nothing to save yet.[/dim]")
+                    return
+                cwd = str(session.file_mgr.get_working_dir())
+                fname = arg or f"answer_{_time.strftime('%Y%m%d_%H%M%S')}.md"
+                save_path = Path(cwd) / fname
+                try:
+                    save_path.write_text(last.answer_text, encoding="utf-8")
+                    self._add_timeline(f"Saved to {fname}")
+                    self._append_stream(f"  [green]✓[/green] Saved to [bold]{save_path}[/bold]")
+                except Exception as exc:
+                    self._append_stream(f"  [red]Save failed: {exc}[/red]")
+                return
+            if command == "/export":
+                fmt = (arg or "md").lower().strip(".")
+                cwd = str(session.file_mgr.get_working_dir())
+                fname = f"stream_{_time.strftime('%Y%m%d_%H%M%S')}.{fmt}"
+                export_path = Path(cwd) / fname
+                try:
+                    # Strip Rich markup for plain text
+                    import re as _re2
+                    raw_content = "\n".join(self._stream_lines)
+                    if fmt == "txt":
+                        raw_content = _re2.sub(r'\[/?[^\]]+\]', '', raw_content)
+                    export_path.write_text(raw_content, encoding="utf-8")
+                    self._add_timeline(f"Exported to {fname}")
+                    self._append_stream(f"  [green]✓[/green] Exported to [bold]{export_path}[/bold]")
+                except Exception as exc:
+                    self._append_stream(f"  [red]Export failed: {exc}[/red]")
+                return
+            if command == "/stats":
+                stats = session.provider_stats
+                if not stats:
+                    self._set_stream("[dim]No stats yet — run some tasks first.[/dim]")
+                    return
+                COLORS = {"qwen": "#b07cff", "codex": "#6aa7ff", "claude": "#ff9e57"}
+                lines = ["[bold]Provider stats[/bold]", ""]
+                for prov, s in sorted(stats.items()):
+                    c = COLORS.get(prov, "#6aa7ff")
+                    avg_s = f"{s.avg_ms / 1000:.1f}s" if s.avg_ms else "?"
+                    rate = f"{s.success_rate * 100:.0f}%"
+                    lines.append(
+                        f"  [{c}]{prov}[/]  tasks={s.total_tasks}  "
+                        f"ok={s.successful_tasks}  fail={s.failed_tasks}  "
+                        f"retries={s.retry_count}  avg={avg_s}  success={rate}"
+                    )
+                self._set_stream("\n".join(lines))
+                return
+            if command == "/replan":
+                last_run = session.last_task_run
+                if last_run is None or last_run.mode != "orchestrated":
+                    self._set_stream("[dim]No orchestrated run to replan.[/dim]")
+                    return
+                if last_run.status == "success":
+                    self._set_stream("[dim]Last orchestration succeeded — nothing to replan.[/dim]")
+                    return
+                # Find failed subtask index and rerun from there
+                from runtime.orchestrator_service import OrchestratorService
+                resume_idx = OrchestratorService.find_retry_start_index(last_run)
+                if resume_idx is None:
+                    resume_idx = 0
+                plan = session.last_plan
+                if plan is None:
+                    self._set_stream("[dim]No saved plan to replan from.[/dim]")
+                    return
+                self._add_timeline(f"Replanning from step {resume_idx + 1}.")
+                self._set_stream(
+                    f"[dim]Replanning from step {resume_idx + 1}/{len(plan.subtasks)}…[/dim]"
+                )
+                task_run, aggregate_result = await container.orchestrator_service.run_orchestrated_task(
+                    session=session,
+                    plan=plan,
+                    resume_from=resume_idx,
+                    prior_subtasks=list(last_run.subtasks),
+                )
+                container.remember_task_result(session, aggregate_result)
+                self._add_timeline(f"Replan done status={task_run.status}.")
+                self._append_stream(
+                    "",
+                    f"  [{'green' if task_run.status == 'success' else 'red'}]"
+                    f"{'✓' if task_run.status == 'success' else '✗'}[/]  "
+                    f"replan {task_run.status}",
+                    *(
+                        [_md_to_rich(aggregate_result.answer_text.strip()[:2000])]
+                        if aggregate_result.answer_text.strip() else []
+                    ),
+                )
+                return
             if command == "/retry":
                 last = session.last_task_result
                 if last and last.prompt:
@@ -1063,24 +1290,33 @@ def run_textual_shell(container, chat_id: int = 0):
                 self._set_stream(
                     "\n".join(
                         [
-                            "/help",
-                            "/home · /new · /clear",
-                            "/provider <qwen|codex|claude>",
-                            "/status · /limits",
-                            "/runs · /show <n>",
-                            "/retry",
-                            "/expand",
-                            "/remote-control [status|stop|logs]",
-                            "/plan <task>",
-                            "/orchestrate <task>",
+                            "[bold]Commands[/bold]",
+                            "  /help · /home · /new · /clear",
+                            "  /provider <qwen|codex|claude>  · /providers · /status · /limits",
+                            "  /save [filename]               save last answer to file",
+                            "  /export [md|txt]               export stream content",
+                            "  /stats                         per-provider performance stats",
+                            "  /retry · /expand",
+                            "  /runs · /show <n> · /artifacts",
+                            "  /plan <task>                   AI orchestration plan preview",
+                            "  /orchestrate <task>            run multi-agent orchestration",
+                            "  /replan                        retry last partial/failed orchestration",
+                            "  /remote-control [status|stop|logs]",
                             "",
-                            "Keys:",
+                            "[bold]Keys[/bold]",
+                            "  Ctrl+F      search stream (Esc to close)",
+                            "  Ctrl+R      reverse history search",
                             "  Ctrl+Y      copy last answer to clipboard",
                             "  Ctrl+V      paste from clipboard",
                             "  Shift+Enter start multi-line input",
-                            "  Esc         cancel multi-line buffer",
-                            "  ↑ / ↓       input history",
+                            "  Esc         cancel multi-line / close search",
+                            "  ↑ / ↓       input history navigation",
+                            "  A           toggle autoscroll (when input not focused)",
                             "  Ctrl+C      cancel active task",
+                            "",
+                            "[bold]Input shortcuts[/bold]",
+                            "  @provider:prompt   run with specific provider  e.g. @claude:explain this",
+                            "  @file.py           inline file content in prompt",
                             "",
                             "Drag a file into the terminal to @mention it.",
                         ]
@@ -1277,24 +1513,27 @@ def run_textual_shell(container, chat_id: int = 0):
 
             self._set_stream(f"Unknown command: {raw}")
 
-        async def _run_prompt(self, prompt: str):
+        async def _run_prompt(self, prompt: str, provider_override: str | None = None):
             from providers import normalize_provider_name
 
             session = container.get_session(chat_id)
-            provider_name = normalize_provider_name(session.current_provider)
+            provider_name = normalize_provider_name(provider_override or session.current_provider)
             runtime = await container.ensure_runtime_started(session, provider_name)
-            stream = self.query_one("#stream", StreamWidget)
             self.current_mode = "single"
             self._active_runtime = runtime
             self._set_orchestration_steps([])
             self._add_timeline(f"Started: {prompt[:48]}")
             self._refresh_all()
+            self._task_start_time = _time.monotonic()
 
             cwd = str(session.file_mgr.get_working_dir())
             expanded_prompt = _expand_file_mentions(prompt, cwd)
-            color = self._provider_color()
+            color = {
+                "qwen": "#b07cff", "codex": "#6aa7ff", "claude": "#ff9e57",
+            }.get(provider_name, "#6aa7ff")
+            override_tag = f"  [dim](override)[/dim]" if provider_override else ""
             self._set_stream(
-                f"[{color}]◆[/] [{color}]{provider_name}[/]  [dim]{cwd}[/dim]\n"
+                f"[{color}]◆[/] [{color}]{provider_name}[/]{override_tag}  [dim]{cwd}[/dim]\n"
                 f"  [dim]{prompt[:120]}[/dim]\n"
             )
 
@@ -1319,6 +1558,18 @@ def run_textual_shell(container, chat_id: int = 0):
             self.current_mode = "idle"
             self._add_timeline(f"Done exit_code={result.exit_code}.")
             self._refresh_all()
+
+            # notify-send for long tasks
+            elapsed = _time.monotonic() - self._task_start_time
+            if elapsed >= 60:
+                try:
+                    _subprocess.run(
+                        ["notify-send", "-t", "5000", "Bridge CLI",
+                         f"{provider_name} finished in {int(elapsed)}s"],
+                        timeout=3, capture_output=True,
+                    )
+                except Exception:
+                    pass
 
             # File diffs — use provider's accent color for added lines
             diff_lines: list[str] = []
@@ -1349,6 +1600,7 @@ def run_textual_shell(container, chat_id: int = 0):
             self.current_mode = "orchestrated"
             self._add_timeline("Started orchestration.")
             self._refresh_all()
+            self._task_start_time = _time.monotonic()
             cwd_for_expand = str(session.file_mgr.get_working_dir())
             expanded_prompt = _expand_file_mentions(prompt, cwd_for_expand)
 
@@ -1493,5 +1745,17 @@ def run_textual_shell(container, chat_id: int = 0):
                 result_lines += ["", _md_to_rich(aggregate_result.answer_text.strip()[:2000])]
 
             self._append_stream(*result_lines)
+
+            # notify-send for long orchestrations
+            elapsed_orch = _time.monotonic() - self._task_start_time
+            if elapsed_orch >= 60:
+                try:
+                    _subprocess.run(
+                        ["notify-send", "-t", "5000", "Bridge CLI",
+                         f"Orchestration {task_run.status} in {int(elapsed_orch)}s"],
+                        timeout=3, capture_output=True,
+                    )
+                except Exception:
+                    pass
 
     BridgeTextualApp().run()

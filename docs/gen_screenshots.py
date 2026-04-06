@@ -65,12 +65,8 @@ def gen_welcome():
 def gen_orchestration():
     c = make_console()
 
-    # Titlebar (dim, single line)
-    c.print()
-    c.print("  [dim]◆ Forge  v0.1  ·  qwen  ·  …/projects/api[/dim]")
-    c.print()
-
     # Previous session
+    c.print()
     c.print(f"  [dim]{SEP}[/dim]")
     c.print("  [dim]>[/dim] [dim]write unit tests for the auth module[/dim]")
     c.print("  [dim]qwen  ·  ~/projects/api[/dim]")
@@ -116,11 +112,8 @@ def gen_orchestration():
 def gen_streaming():
     c = make_console()
 
-    c.print()
-    c.print("  [dim]◆ Forge  v0.1  ·  qwen  ·  …/projects/api[/dim]")
-    c.print()
-
     # Previous session (dim)
+    c.print()
     c.print(f"  [dim]{SEP}[/dim]")
     c.print("  [dim]>[/dim] [dim]write unit tests for the auth module[/dim]")
     c.print("  [dim]qwen  ·  ~/projects/api[/dim]")
@@ -153,8 +146,8 @@ def gen_streaming():
     c.print("  [dim]Starting with the connection helper…[/dim]")
     c.print()
 
-    # Op indicator — writing (green)
-    c.print("  [green]↳ writing 1 file  session_store.py[/green]")
+    # Op indicator — writing (provider accent color, filename dim — matches _op_indicator_text)
+    c.print("  [#b07cff]↳[/#b07cff] [#b07cff]writing 1 file[/#b07cff]  [dim]session_store.py[/dim]")
     c.print()
     c.print("  [bold cyan]▌[/bold cyan]")
 
@@ -166,11 +159,8 @@ def gen_streaming():
 def gen_diff():
     c = make_console()
 
-    c.print()
-    c.print("  [dim]◆ Forge  v0.1  ·  qwen  ·  …/projects/api[/dim]")
-    c.print()
-
     # Previous sessions (dim)
+    c.print()
     c.print(f"  [dim]{SEP}[/dim]")
     c.print("  [dim]>[/dim] [dim]write unit tests for the auth module[/dim]")
     c.print("  [dim]qwen  ·  ~/projects/api[/dim]")

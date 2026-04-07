@@ -82,7 +82,7 @@ def _strip_html(text: str) -> str:
 
 
 _SPIN_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
-_DOT_FRAMES = ("·", "··", "···", "··")
+_DOT_FRAMES = ("·  ", "·· ", "···", "·· ")
 
 
 def _action_from_event(line: str) -> str | None:

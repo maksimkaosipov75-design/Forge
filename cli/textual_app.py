@@ -82,6 +82,10 @@ def _strip_html(text: str) -> str:
 
 
 _SPIN_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
+_PASSWORD_RE = _re.compile(
+    r'\[sudo\]|password\s*(?:for\s+\w+\s*)?:|passphrase\s*:|enter\s+password|authentication\s+required',
+    _re.IGNORECASE,
+)
 _DOT_FRAMES = ("·  ", "·· ", "···", "·· ")
 
 
@@ -451,9 +455,10 @@ def create_textual_app(container, chat_id: int = 0):
         from textual.app import App, ComposeResult
         from textual.containers import Container, Horizontal, VerticalScroll
         from textual.reactive import reactive
+        from textual.screen import ModalScreen
         from textual.suggester import Suggester
         from textual.widget import Widget
-        from textual.widgets import Input, Static
+        from textual.widgets import Input, Label, Static
     except ImportError as exc:  # pragma: no cover - depends on optional package
         raise RuntimeError(
             "Textual mode requires the 'textual' package. Install it with './venv/bin/pip install textual'."
@@ -582,6 +587,57 @@ def create_textual_app(container, chat_id: int = 0):
 
     class AutoscrollIndicator(Static):
         pass
+
+    class PasswordModal(ModalScreen):
+        """Overlay dialog for entering a password that the running agent needs."""
+
+        CSS = """
+        PasswordModal {
+            align: center middle;
+        }
+        #pw-dialog {
+            width: 52;
+            height: auto;
+            border: round #555;
+            background: #1e1e1e;
+            padding: 1 2;
+        }
+        #pw-title {
+            text-align: center;
+            color: #d4d4d4;
+            margin-bottom: 1;
+        }
+        #pw-hint {
+            text-align: center;
+            color: #666;
+            margin-top: 1;
+        }
+        #pw-input {
+            border: round #555;
+            background: #2d2d2d;
+            color: #d4d4d4;
+            width: 100%;
+        }
+        #pw-input:focus {
+            border: round #b07cff;
+        }
+        """
+
+        def compose(self) -> ComposeResult:
+            with Container(id="pw-dialog"):
+                yield Label("🔑  Password required", id="pw-title")
+                yield Input(password=True, placeholder="enter password…", id="pw-input")
+                yield Label("Enter  to send  ·  Esc  to dismiss", id="pw-hint")
+
+        def on_mount(self) -> None:
+            self.query_one("#pw-input", Input).focus()
+
+        def on_input_submitted(self, event: Input.Submitted) -> None:
+            self.dismiss(event.value)
+
+        def on_key(self, event) -> None:
+            if event.key == "escape":
+                self.dismiss(None)
 
     class BridgeTextualApp(App):
         CSS = """
@@ -728,6 +784,7 @@ def create_textual_app(container, chat_id: int = 0):
             self._text_in_code: bool = False  # inside a ``` code fence?
             self._text_has_partial: bool = False  # is the last _stream_lines entry an unfinished partial?
             self._awaiting_plan_confirm: bool = False  # True after /plan — next Enter runs or cancels
+            self._password_modal_open: bool = False  # True while PasswordModal is on screen
 
         def _provider_color(self) -> str:
             mapping = {
@@ -1231,6 +1288,32 @@ def create_textual_app(container, chat_id: int = 0):
             sl.remove_class("active")
             sl.update("")
 
+        def _open_password_dialog(self) -> None:
+            """Open the password modal if an agent is running and the modal isn't already shown."""
+            if self._password_modal_open:
+                return
+            runtime = self._active_runtime
+            if runtime is None:
+                self._append_stream("  [dim]No active agent to send password to.[/dim]")
+                return
+
+            self._password_modal_open = True
+
+            def _on_dismiss(password: str | None) -> None:
+                self._password_modal_open = False
+                if password is None:
+                    self._append_stream("  [dim]Password dismissed.[/dim]")
+                    return
+                async def _send():
+                    ok = await runtime.manager.write_stdin(password)
+                    if ok:
+                        self._append_stream("  [dim]🔑 Password sent.[/dim]")
+                    else:
+                        self._append_stream("  [red]Failed to send password — agent stdin not available.[/red]")
+                asyncio.create_task(_send())
+
+            self.push_screen(PasswordModal(), _on_dismiss)
+
         def _update_status_event(self, line: str):
             action = _action_from_event(line)
             if action:
@@ -1351,6 +1434,9 @@ def create_textual_app(container, chat_id: int = 0):
             """Format and append a stream event line to the stream widget."""
             color = self._provider_color()
             if line.startswith("💬 "):
+                # Auto-open password dialog if the agent is asking for a password
+                if _PASSWORD_RE.search(line[2:]) and not self._password_modal_open:
+                    self.call_after_refresh(self._open_password_dialog)
                 # Any text chunk resets the op group (but does NOT remove the op indicator line)
                 self._op_type = ""
                 self._op_files = []
@@ -1672,6 +1758,10 @@ def create_textual_app(container, chat_id: int = 0):
                     input_widget.value = ""
                     self.current_input = ""
                     self._update_multiline_preview()
+                event.prevent_default()
+                return
+            if event.key == "ctrl+p":
+                self._open_password_dialog()
                 event.prevent_default()
                 return
             if event.key == "ctrl+c":

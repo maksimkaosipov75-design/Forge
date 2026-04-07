@@ -40,6 +40,18 @@ class BaseProcessManager:
     def set_final_result_callback(self, callback: Optional[Callable[[str], None]]):
         self._final_result_callback = callback
 
+    async def write_stdin(self, text: str) -> bool:
+        """Write a line to the running process stdin. Returns True on success."""
+        if self._proc and self._proc.stdin and self._proc.returncode is None:
+            try:
+                self._proc.stdin.write((text + "\n").encode())
+                await self._proc.stdin.drain()
+                log.info("write_stdin: sent %d bytes to PID=%s", len(text) + 1, self._proc.pid)
+                return True
+            except Exception as exc:
+                log.warning("write_stdin failed: %s", exc)
+        return False
+
     def _notify(self, event: str, raw_json: str):
         log.info(f"Stream: {event[:100]}")
         failure = classify_failure_text(event)
@@ -186,7 +198,7 @@ class QwenProcessManager(BaseProcessManager):
 
         proc = await asyncio.create_subprocess_exec(
             *args,
-            stdin=asyncio.subprocess.DEVNULL,
+            stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=str(work_dir),
@@ -351,7 +363,7 @@ class CodexProcessManager(BaseProcessManager):
 
         proc = await asyncio.create_subprocess_exec(
             *args,
-            stdin=asyncio.subprocess.DEVNULL,
+            stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=str(work_dir),
@@ -540,7 +552,7 @@ class ClaudeProcessManager(BaseProcessManager):
 
         proc = await asyncio.create_subprocess_exec(
             *args,
-            stdin=asyncio.subprocess.DEVNULL,
+            stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=str(work_dir),

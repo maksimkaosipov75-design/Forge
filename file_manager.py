@@ -28,7 +28,7 @@ class FileManager:
         self.projects_file = projects_file
         self.projects: dict[str, Project] = {}
         self.current_project: Optional[Project] = None
-        self.working_dir = Path.home()
+        self.working_dir = Path(os.getcwd()).resolve()
         self._load_projects()
 
     def _load_projects(self):

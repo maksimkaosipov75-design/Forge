@@ -1276,7 +1276,8 @@ def create_textual_app(container, chat_id: int = 0):
             session = container.get_session(chat_id)
             cwd = str(session.file_mgr.get_working_dir())
             from pathlib import Path as _PL
-            basename = _PL(cwd).name or cwd
+            home = str(_PL.home())
+            basename = cwd.replace(home, "~", 1) if cwd.startswith(home) else cwd
             git = _git_status_short(cwd)
             git_part = f"  [{git}]" if git else ""
             provider = self.current_provider

@@ -81,6 +81,10 @@ def _strip_html(text: str) -> str:
     return _HTML_TAG.sub("", text)
 
 
+_SPIN_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
+_DOT_FRAMES = ("·", "··", "···", "··")
+
+
 def _action_from_event(line: str) -> str | None:
     """Map a stream event to a short action label for the status line."""
     if line.startswith("🔧 Использую: ") or line.startswith("🔧 "):
@@ -1196,8 +1200,13 @@ def create_textual_app(container, chat_id: int = 0):
             tokens = out_tok if out_tok else est_tok
             tok_str = f"↑ {tokens / 1000:.1f}k" if tokens >= 1000 else f"↑ {tokens}"
             color = self._provider_color()
-            action = self._status_state["action"]
-            return f"[{color}]◆[/] {action}  [dim]({time_str} · {tok_str} tokens)[/dim]"
+            frame = self._status_state.get("frame", 0)
+            spinner = _SPIN_FRAMES[frame % len(_SPIN_FRAMES)]
+            dot = _DOT_FRAMES[frame % len(_DOT_FRAMES)]
+            # Strip any static trailing ellipsis/dots from the action label —
+            # the animated dot suffix takes over.
+            action = self._status_state["action"].rstrip("…·. ")
+            return f"[{color}]{spinner}[/] {action}[dim]{dot}[/dim]  [dim]({time_str} · {tok_str} tokens)[/dim]"
 
         def _show_status_line(self, provider: str | None = None):
             self._status_state["start"] = _time.monotonic()
@@ -1206,9 +1215,11 @@ def create_textual_app(container, chat_id: int = 0):
             sl.update(self._status_renderable())
             if self._status_timer is not None:
                 self._status_timer.stop()
-            self._status_timer = self.set_interval(0.5, self._tick_status)
+            self._status_state["frame"] = 0
+            self._status_timer = self.set_interval(0.12, self._tick_status)
 
         def _tick_status(self):
+            self._status_state["frame"] = self._status_state.get("frame", 0) + 1
             sl = self.query_one("#statusline", StatusLineWidget)
             sl.update(self._status_renderable())
 

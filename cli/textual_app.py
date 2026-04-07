@@ -1267,16 +1267,24 @@ def create_textual_app(container, chat_id: int = 0):
             # the animated dot suffix takes over.
             action = self._status_state["action"].rstrip("…·. ")
             # Show model name next to provider when available
+            _DEFAULT_MODELS = {"qwen": "qwen3-coder-plus", "codex": "gpt-5.3-codex", "claude": "claude-sonnet-4-6"}
             session = container.get_session(chat_id)
             provider = self.current_provider
             model_str = session.provider_models.get(provider, "")
             if not model_str:
                 runtime = session.runtimes.get(provider)
                 model_str = (runtime.manager.model_name if runtime and hasattr(runtime, "manager") else "") or ""
+            if not model_str:
+                model_str = _DEFAULT_MODELS.get(provider, "")
             model_part = f"  [dim]{model_str}[/dim]" if model_str else ""
             return f"[{color}]{spinner}[/] {action}[dim]{dot}[/dim]{model_part}  [dim]({time_str} · {tok_str} tokens)[/dim]"
 
         def _idle_status_renderable(self) -> str:
+            _DEFAULT_MODELS = {
+                "qwen":   "qwen3-coder-plus",
+                "codex":  "gpt-5.3-codex",
+                "claude": "claude-sonnet-4-6",
+            }
             session = container.get_session(chat_id)
             cwd = str(session.file_mgr.get_working_dir())
             from pathlib import Path as _PL
@@ -1286,11 +1294,13 @@ def create_textual_app(container, chat_id: int = 0):
             git_part = f"  [{git}]" if git else ""
             provider = self.current_provider
             color = self._provider_color()
-            # Model name: prefer explicit override, then runtime's actual model
+            # Model name: explicit override → runtime actual → provider default
             model_str = session.provider_models.get(provider, "")
             if not model_str:
                 runtime = session.runtimes.get(provider)
                 model_str = (runtime.manager.model_name if runtime and hasattr(runtime, "manager") else "") or ""
+            if not model_str:
+                model_str = _DEFAULT_MODELS.get(provider, "")
             model_part = f"  [dim]·[/dim]  {model_str}" if model_str else ""
             ctx = self._ctx_input_tokens
             ctx_part = f"  [dim]·[/dim]  ctx {ctx // 1000}k" if ctx >= 1000 else (f"  [dim]·[/dim]  ctx {ctx}" if ctx else "")

@@ -1765,6 +1765,7 @@ def create_textual_app(container, chat_id: int = 0):
                 self.query_one("#input", Input).placeholder = "/help · @provider:prompt · @file · Shift+Enter multiline · Ctrl+F search"
                 answer = value.lower().strip()
                 if answer in ("y", "yes", ""):
+                    session = container.get_session(chat_id)
                     plan = session.last_plan
                     if plan is not None:
                         if self._active_task is not None and not self._active_task.done():
@@ -2638,41 +2639,62 @@ def create_textual_app(container, chat_id: int = 0):
             self._status_state.update({"action": "Executing…", "tokens": 0})
             self._last_stream_was_text = False
 
+            _prov_colors = {"qwen": "#b07cff", "codex": "#6aa7ff", "claude": "#ff9e57"}
+
             async def status_callback(text: str):
                 if not text:
                     return
                 clean = _strip_html(text).strip()
                 lowered = clean.lower()
                 if "шаг " in lowered and "агент:" in lowered:
-                    next_index = min(current_step["index"] + 1, max(0, len(plan.subtasks) - 1))
-                    if current_step["index"] >= 0:
-                        self._mark_orchestration_step(current_step["index"], "done")
-                    current_step["index"] = next_index
-                    self._mark_orchestration_step(next_index, "running")
-                    subtask = plan.subtasks[next_index]
-                    step_start[0] = _time.monotonic()
-                    self._status_state.update({"action": f"Step {next_index+1}/{len(plan.subtasks)}…", "tokens": 0, "start": step_start[0]})
-                    step_color = self._provider_color()
-                    self._append_stream(
-                        "",
-                        "  [dim]" + "─  " * 14 + "[/dim]",
-                        f"[{step_color}]▶[/] [bold]Step {next_index+1}/{len(plan.subtasks)}[/bold]  {subtask.title}  [dim][{subtask.suggested_provider}][/dim]",
-                        f"  [dim]{cwd}[/dim]",
-                    )
+                    # Parse 1-based step number directly from message to avoid
+                    # incrementing on every periodic update_status_loop tick
+                    m_step = _re.search(r'шаг (\d+)/', lowered)
+                    if m_step:
+                        next_index = min(int(m_step.group(1)) - 1, len(plan.subtasks) - 1)
+                    else:
+                        next_index = min(current_step["index"] + 1, max(0, len(plan.subtasks) - 1))
+                    # Parse actual provider name from message for per-agent colour
+                    m_prov = _re.search(r'агент:\s*(\w+)', lowered)
+                    prov_name = m_prov.group(1) if m_prov else ""
+                    step_color = _prov_colors.get(prov_name, self._provider_color())
+                    if next_index != current_step["index"]:
+                        # Genuinely new step — emit header once and reset timer
+                        if current_step["index"] >= 0:
+                            self._mark_orchestration_step(current_step["index"], "done")
+                        current_step["index"] = next_index
+                        self._mark_orchestration_step(next_index, "running")
+                        subtask = plan.subtasks[next_index]
+                        step_start[0] = _time.monotonic()
+                        step_cwd = str(session.file_mgr.get_working_dir())
+                        self._status_state.update({"action": f"Step {next_index+1}/{len(plan.subtasks)}…", "tokens": 0, "start": step_start[0]})
+                        self._append_stream(
+                            "",
+                            "  [dim]" + "─  " * 14 + "[/dim]",
+                            f"[{step_color}]▶[/] [bold]Step {next_index+1}/{len(plan.subtasks)}[/bold]  {subtask.title}  [dim][{prov_name or subtask.suggested_provider}][/dim]",
+                            f"  [dim]{step_cwd}[/dim]",
+                        )
+                    # Periodic updates for the same step: just refresh status label
+                    else:
+                        self._status_state.update({"action": f"Step {next_index+1}/{len(plan.subtasks)}…"})
                 elif "собирает итог" in lowered:
-                    if 0 <= current_step["index"] < len(plan.subtasks):
-                        self._mark_orchestration_step(current_step["index"], "done")
-                    if will_synthesize:
-                        self._mark_orchestration_step(synthesis_idx, "running")
-                    self._status_state.update({"action": "Synthesizing…", "tokens": 0, "start": _time.monotonic()})
-                    self._append_stream("", "  [dim]" + "─  " * 14 + "[/dim]", f"[{color}]▶[/] [bold]Synthesis[/bold]")
+                    if not current_step.get("synthesis_shown"):
+                        current_step["synthesis_shown"] = True
+                        if 0 <= current_step["index"] < len(plan.subtasks):
+                            self._mark_orchestration_step(current_step["index"], "done")
+                        if will_synthesize:
+                            self._mark_orchestration_step(synthesis_idx, "running")
+                        self._status_state.update({"action": "Synthesizing…", "tokens": 0, "start": _time.monotonic()})
+                        self._append_stream("", "  [dim]" + "─  " * 14 + "[/dim]", f"[{color}]▶[/] [bold]Synthesis[/bold]")
                 elif "выполняет review" in lowered:
-                    if will_synthesize:
-                        self._mark_orchestration_step(synthesis_idx, "done")
-                    if will_review:
-                        self._mark_orchestration_step(review_idx, "running")
-                    self._status_state.update({"action": "Reviewing…", "tokens": 0, "start": _time.monotonic()})
-                    self._append_stream("", "  [dim]" + "─  " * 14 + "[/dim]", f"[{color}]▶[/] [bold]Review[/bold]")
+                    if not current_step.get("review_shown"):
+                        current_step["review_shown"] = True
+                        if will_synthesize:
+                            self._mark_orchestration_step(synthesis_idx, "done")
+                        if will_review:
+                            self._mark_orchestration_step(review_idx, "running")
+                        self._status_state.update({"action": "Reviewing…", "tokens": 0, "start": _time.monotonic()})
+                        self._append_stream("", "  [dim]" + "─  " * 14 + "[/dim]", f"[{color}]▶[/] [bold]Review[/bold]")
                 self._add_timeline(clean[:72])
 
             def stream_event_callback(line: str):

@@ -1,214 +1,204 @@
-"""Generate SVG screenshots for Forge README — matches real CLI output format."""
-from rich.console import Console
-from rich.text import Text
+"""Generate SVG screenshots for README using Rich console."""
 from pathlib import Path
+from rich.console import Console
 
 OUT = Path(__file__).parent / "images"
 OUT.mkdir(exist_ok=True)
 
-SEP = "  " + "─  " * 28
-SEP_SHORT = "  " + "─  " * 14
+W = 110  # terminal columns
 
 
-def make_console(width=102) -> Console:
-    return Console(record=True, width=width, force_terminal=True, force_jupyter=False)
+def make_console() -> Console:
+    return Console(
+        record=True,
+        width=W,
+        force_terminal=True,
+        force_jupyter=False,
+        highlight=False,
+        markup=True,
+    )
 
 
-# ── Screenshot 0: Welcome screen ─────────────────────────────────────────────
+def p(c: Console, markup: str = ""):
+    c.print(markup)
+
+
+SEP  = "[dim]" + "─  " * 22 + "[/dim]"
+SEP2 = "[dim]" + "─  " * 14 + "[/dim]"
+
+
+# ─────────────────────────────────────────────────────────────────
+# 1. Welcome screen
+# ─────────────────────────────────────────────────────────────────
 def gen_welcome():
     c = make_console()
 
-    c.print()
-    c.print(f"  [dim]{SEP}[/dim]")
-    c.print()
-    c.print("  [#b07cff]qwen    [/#b07cff]  [green]up[/green]")
-    c.print("  [#6aa7ff]codex   [/#6aa7ff]  [green]up[/green]")
-    c.print("  [#ff9e57]claude  [/#ff9e57]  [green]up[/green]")
-    c.print()
-    c.print(f"  [dim]{SEP}[/dim]")
-    c.print()
-    c.print("  [bold dim]Recent runs[/bold dim]")
-    c.print("  ✅  [dim]single    [/dim]  [#b07cff]qwen[/#b07cff]  [dim]write unit tests for auth module[/dim]")
-    c.print("  ✅  [dim]single    [/dim]  [#b07cff]qwen[/#b07cff]  [dim]refactor session_store to async[/dim]")
-    c.print("  ✅  [dim]orchestrat[/dim]  [dim]mixed[/dim]  [dim]build REST API with JWT and SQLite[/dim]")
-    c.print()
-    c.print(f"  [dim]{SEP}[/dim]")
-    c.print()
-    c.print("  [bold dim]Commands[/bold dim]  [dim](type / to open dropdown)[/dim]")
-    c.print("  [#b07cff]/help              [/#b07cff][dim]help[/dim]"
-            "  [#b07cff]/commands          [/#b07cff][dim]all commands[/dim]")
-    c.print("  [#b07cff]/provider          [/#b07cff][dim]switch provider[/dim]"
-            "  [#b07cff]/model             [/#b07cff][dim]change model[/dim]")
-    c.print("  [#b07cff]/plan              [/#b07cff][dim]preview orchestration[/dim]"
-            "  [#b07cff]/run-plan          [/#b07cff][dim]execute preview[/dim]")
-    c.print("  [#b07cff]/orchestrate       [/#b07cff][dim]multi-agent run[/dim]"
-            "  [#b07cff]/review            [/#b07cff][dim]review last result[/dim]")
-    c.print("  [#b07cff]/runs              [/#b07cff][dim]run history[/dim]"
-            "  [#b07cff]/remote-control    [/#b07cff][dim]Telegram access[/dim]")
-    c.print()
-    c.print(f"  [dim]{SEP}[/dim]")
-    c.print(
-        "  [dim][bold]/[/bold] command menu   "
-        "[bold]Tab[/bold] autocomplete   "
-        "[bold]@file.py[/bold] inline file   "
-        "[bold]@provider:[/bold]prompt   "
-        "[bold]Shift+Enter[/bold] multi-line   "
-        "[bold]Ctrl+F[/bold] search[/dim]"
-    )
-    c.print()
+    p(c, "  [bold #b07cff]◆[/bold #b07cff] [bold white]Forge[/bold white]  [dim]v0.1  ·  qwen[/dim]")
+    p(c)
+    p(c, SEP)
+    p(c)
+    p(c, "  [bold #b07cff]qwen[/bold #b07cff]       [green]up[/green]")
+    p(c, "  [bold #6aa7ff]codex[/bold #6aa7ff]      [dim]ready[/dim]")
+    p(c, "  [bold #ff9e57]claude[/bold #ff9e57]     [dim]ready[/dim]")
+    p(c)
+    p(c, SEP)
+    p(c)
+    p(c, "  [bold dim]Recent runs[/bold dim]")
+    p(c, "  [green]✔[/green]  single     [bold #b07cff]qwen[/bold #b07cff]    refactor auth middleware")
+    p(c, "  [green]✔[/green]  single     [bold #b07cff]qwen[/bold #b07cff]    add unit tests for parser")
+    p(c, "  [green]✔[/green]  orchestr   [bold #ff9e57]mixed[/bold #ff9e57]   build REST API with tests")
+    p(c, "  [yellow]⚠[/yellow]  single     [bold #6aa7ff]codex[/bold #6aa7ff]   cd '/projects/myapp'")
+    p(c)
+    p(c, SEP)
+    p(c)
+    p(c, "  [bold dim]Commands[/bold dim]  [dim](type / to open dropdown)[/dim]")
+    p(c, "  [bold #b07cff]/help            [/bold #b07cff][dim]help                [/dim]  [bold #b07cff]/commands        [/bold #b07cff][dim]all commands[/dim]")
+    p(c, "  [bold #b07cff]/provider        [/bold #b07cff][dim]switch provider     [/dim]  [bold #b07cff]/model           [/bold #b07cff][dim]change model[/dim]")
+    p(c, "  [bold #b07cff]/plan            [/bold #b07cff][dim]preview orchestr    [/dim]  [bold #b07cff]/run-plan        [/bold #b07cff][dim]execute preview[/dim]")
+    p(c, "  [bold #b07cff]/orchestrate     [/bold #b07cff][dim]multi-agent run     [/dim]  [bold #b07cff]/review          [/bold #b07cff][dim]review last result[/dim]")
+    p(c, "  [bold #b07cff]/runs            [/bold #b07cff][dim]run history         [/dim]  [bold #b07cff]/remote-control  [/bold #b07cff][dim]Telegram access[/dim]")
+    p(c)
+    p(c, SEP)
+    p(c, "  [dim][bold]/[/bold] command menu   [bold]Tab[/bold] autocomplete   "
+        "[bold]@file.py[/bold] inline file   [bold]@provider:[/bold]prompt   "
+        "[bold]Shift+Enter[/bold] multi-line   [bold]Ctrl+F[/bold] search[/dim]")
+    p(c)
+    p(c, "  [bold #b07cff]◆[/bold #b07cff]  [dim]qwen  ·  qwen3-coder-plus  ·  ~/projects/myapp [main]  ·  ctx 0[/dim]")
 
-    c.save_svg(str(OUT / "forge-welcome.svg"), title="Forge · Welcome")
-    print("generated forge-welcome.svg")
+    (OUT / "forge-welcome.svg").write_text(c.export_svg(title="forge"))
+    print("✔ forge-welcome.svg")
 
 
-# ── Screenshot 1: /plan with Y/N confirmation ─────────────────────────────────
+# ─────────────────────────────────────────────────────────────────
+# 2. Orchestration
+# ─────────────────────────────────────────────────────────────────
 def gen_orchestration():
     c = make_console()
 
-    # Previous session
-    c.print()
-    c.print(f"  [dim]{SEP}[/dim]")
-    c.print("  [dim]>[/dim] [dim]write unit tests for the auth module[/dim]")
-    c.print("  [dim]qwen  ·  ~/projects/api[/dim]")
-    c.print()
-    c.print("  [dim]✓ Done  ·  qwen  ·  12s[/dim]")
-    c.print()
+    p(c, "  [bold #b07cff]◆[/bold #b07cff] [bold white]Forge[/bold white]  [dim]v0.1  ·  qwen  ·  orchestrated[/dim]")
+    p(c)
+    p(c, SEP)
+    p(c, "  [dim]>[/dim] [white]build a REST API with auth, tests, and OpenAPI docs[/white]  [dim](AI)[/dim]")
+    p(c, "  [dim]orchestrate  ·  ~/projects/myapp[/dim]")
+    p(c)
+    p(c, "  strategy: parallel")
+    p(c, "  [dim]Split into independent layers — auth, routes, tests — then synthesize.[/dim]")
+    p(c, "  [dim]1. Implement JWT auth middleware [qwen][/dim]")
+    p(c, "  [dim]2. Build route handlers with validation [codex][/dim]")
+    p(c, "  [dim]3. Write integration tests [codex][/dim]")
+    p(c, "  [dim]4. Generate OpenAPI docs [claude][/dim]")
+    p(c)
+    p(c, SEP2)
+    p(c, "[bold #b07cff]▶[/bold #b07cff] [bold]Step 1/4[/bold]  Implement JWT auth middleware  [dim][qwen][/dim]")
+    p(c, "  [dim]~/projects/myapp[/dim]")
+    p(c, "  [dim]✏️  auth/middleware.py  auth/tokens.py  auth/__init__.py[/dim]")
+    p(c)
+    p(c, SEP2)
+    p(c, "[bold #6aa7ff]▶[/bold #6aa7ff] [bold]Step 2/4[/bold]  Build route handlers with validation  [dim][codex][/dim]")
+    p(c, "  [dim]~/projects/myapp[/dim]")
+    p(c, "  [dim]👁️  reading  auth/middleware.py[/dim]")
+    p(c, "  [dim]✏️  writing  api/routes.py  api/schemas.py[/dim]")
+    p(c)
+    p(c, SEP2)
+    p(c, "[bold #6aa7ff]▶[/bold #6aa7ff] [bold]Step 3/4[/bold]  Write integration tests  [dim][codex][/dim]")
+    p(c, "  [dim]~/projects/myapp[/dim]")
+    p(c, "  [dim]🐚  $ pytest tests/ -q --tb=short[/dim]")
+    p(c, "  [dim]✏️  tests/test_auth.py  tests/test_routes.py[/dim]")
+    p(c)
+    p(c, SEP2)
+    p(c, "[bold #ff9e57]▶[/bold #ff9e57] [bold]Synthesis[/bold]")
+    p(c)
+    p(c, "  ✅ Done  [dim]·  mixed  ·  1m 48s  ·  7 files changed[/dim]")
+    p(c)
+    p(c, "  [bold #b07cff]⠸[/bold #b07cff] Step 3/4··  [dim]qwen3-coder-plus[/dim]  [dim](52s · ↑ 1.4k tokens)[/dim]")
 
-    # New prompt
-    c.print(f"  [dim]{SEP}[/dim]")
-    c.print("  [dim]>[/dim] [white]build a REST API for user auth with JWT and SQLite[/white]")
-    c.print("  [dim]qwen  ·  ~/projects/api[/dim]")
-    c.print()
-
-    # AI Plan panel — bordered with box-drawing chars (matches _plan_panel_lines)
-    W = 88
-    label = " AI Plan "
-    dash_l = (W - 2 - len(label)) // 2
-    dash_r = W - 2 - len(label) - dash_l
-    c.print(f"[dim]╭{'─' * dash_l}[/dim][cyan]{label}[/cyan][dim]{'─' * dash_r}╮[/dim]")
-    c.print(f"[dim]│[/dim]  [bold dim]{'strategy':<11}[/bold dim] split by layer — backend core first, then API surface{'':>12}[dim]│[/dim]")
-    c.print(f"[dim]│[/dim]  [bold dim]{'complexity':<11}[/bold dim] medium  [dim]·[/dim]  ETA ≈ 90s{'':>38}[dim]│[/dim]")
-    c.print(f"[dim]│[/dim]{' ' * (W - 2)}[dim]│[/dim]")
-    c.print(f"[dim]│[/dim]  [bold dim]{'rationale':<11}[/bold dim] JWT and SQLite integration is straightforward but benefits{'':>7}[dim]│[/dim]")
-    c.print(f"[dim]│[/dim]  {' ' * 13}from a clean separation: DB schema first, then handler logic.{'':>5}[dim]│[/dim]")
-    c.print(f"[dim]╰{'─' * (W - 2)}╯[/dim]")
-    c.print()
-
-    # Subtask table (matches _subtask_table_lines)
-    c.print("  [bold dim]#      subtask                       provider  depends on  group[/bold dim]")
-    c.print("  [dim]─────────────────────────────────────────────────────────────[/dim]")
-    c.print("  [dim]s1    [/dim]Database schema and models     [#b07cff]qwen      [/#b07cff][dim]—           0[/dim]")
-    c.print("  [dim]s2    [/dim]JWT auth middleware             [#6aa7ff]codex     [/#6aa7ff][dim]s1          1[/dim]")
-    c.print("  [dim]s3    [/dim]REST endpoints and OpenAPI docs [#ff9e57]claude    [/#ff9e57][dim]s2          2[/dim]")
-    c.print()
-    c.print("  Run this plan?  [#b07cff]Y[/#b07cff][dim]/n[/dim]  ·  or use [bold]/run-plan[/bold]  [dim]/edit-plan[/dim]")
-    c.print()
-
-    c.save_svg(str(OUT / "forge-orchestration.svg"), title="Forge · Plan & Confirmation")
-    print("generated forge-orchestration.svg")
+    (OUT / "forge-orchestration.svg").write_text(c.export_svg(title="forge — orchestration"))
+    print("✔ forge-orchestration.svg")
 
 
-# ── Screenshot 2: Live streaming with op indicator ────────────────────────────
+# ─────────────────────────────────────────────────────────────────
+# 3. Live streaming
+# ─────────────────────────────────────────────────────────────────
 def gen_streaming():
     c = make_console()
 
-    # Previous session (dim)
-    c.print()
-    c.print(f"  [dim]{SEP}[/dim]")
-    c.print("  [dim]>[/dim] [dim]write unit tests for the auth module[/dim]")
-    c.print("  [dim]qwen  ·  ~/projects/api[/dim]")
-    c.print()
-    c.print("  [dim]✓ Done  ·  qwen  ·  12s  ·  3 files changed[/dim]")
-    c.print()
+    p(c, "  [bold #ff9e57]◆[/bold #ff9e57] [bold white]Forge[/bold white]  [dim]v0.1  ·  claude[/dim]")
+    p(c)
+    p(c, SEP)
+    p(c, "  [dim]>[/dim] [white]refactor the auth module to use bcrypt and add rate limiting[/white]")
+    p(c)
+    p(c, "  I'll refactor the auth module to use bcrypt for password hashing")
+    p(c, "  and add rate limiting to prevent brute-force attacks.")
+    p(c)
+    p(c, "  Let me start by reading the current implementation:")
+    p(c)
+    p(c, "  [dim]👁️  reading  auth/middleware.py  auth/tokens.py[/dim]")
+    p(c)
+    p(c, "  The current implementation uses MD5 — I'll replace it with bcrypt")
+    p(c, "  and add a sliding-window rate limiter per IP.")
+    p(c)
+    p(c, "  [dim]✏️  writing  auth/middleware.py[/dim]")
+    p(c)
+    p(c, "[dim]  import bcrypt[/dim]")
+    p(c, "[dim]  from collections import defaultdict[/dim]")
+    p(c, "[dim]  import time[/dim]")
+    p(c)
+    p(c, "[dim]  RATE_LIMIT = 5    # attempts[/dim]")
+    p(c, "[dim]  WINDOW     = 60   # seconds[/dim]")
+    p(c, "[dim]  _attempts: dict[str, list[float]] = defaultdict(list)[/dim]")
+    p(c)
+    p(c, "  [dim]✏️  writing  auth/tokens.py[/dim]")
+    p(c, "  [dim]🐚  $ pytest tests/auth/ -q[/dim]")
+    p(c)
+    p(c, "  All 12 tests pass.")
+    p(c)
+    p(c, "  ✅ Done  [dim]·  claude  ·  38s  ·  2 files changed[/dim]")
+    p(c)
+    p(c, "  [bold #ff9e57]⠋[/bold #ff9e57] Writing···  [dim]claude-sonnet-4-6[/dim]  [dim](38s · ↑ 847 tokens)[/dim]")
 
-    # Current session
-    c.print(f"  [dim]{SEP}[/dim]")
-    c.print("  [dim]>[/dim] [white]refactor session_store.py to use async SQLite[/white]")
-    c.print("  [dim]qwen  ·  ~/projects/api[/dim]")
-    c.print()
-
-    # Op indicator — reading (dim, matches _op_indicator_text)
-    c.print("  [dim]↳ reading 2 files  session_store.py, config.py[/dim]")
-    c.print()
-
-    # Streamed response lines
-    c.print("  I'll refactor `session_store.py` to use `aiosqlite` for non-blocking I/O.")
-    c.print()
-    c.print("  Here's the plan:")
-    c.print()
-    c.print("  1. Replace `sqlite3.connect` with `aiosqlite.connect` context manager")
-    c.print("  2. Convert `_init_db`, `_load_session_payload`, `_save_session_payload`")
-    c.print("     and all checkpoint methods to `async def`")
-    c.print("  3. Update `SessionStore.__init__` to schedule async init via")
-    c.print("     `asyncio.get_event_loop().run_until_complete()`")
-    c.print("  4. Keep the public API compatible — callers already `await` these methods")
-    c.print()
-    c.print("  [dim]Starting with the connection helper…[/dim]")
-    c.print()
-
-    # Op indicator — writing (provider accent color, filename dim — matches _op_indicator_text)
-    c.print("  [#b07cff]↳[/#b07cff] [#b07cff]writing 1 file[/#b07cff]  [dim]session_store.py[/dim]")
-    c.print()
-    c.print("  [bold cyan]▌[/bold cyan]")
-
-    c.save_svg(str(OUT / "forge-streaming.svg"), title="Forge · Live Streaming")
-    print("generated forge-streaming.svg")
+    (OUT / "forge-streaming.svg").write_text(c.export_svg(title="forge — live streaming"))
+    print("✔ forge-streaming.svg")
 
 
-# ── Screenshot 3: Diff with line numbers ──────────────────────────────────────
-def gen_diff():
+# ─────────────────────────────────────────────────────────────────
+# 4. /plan preview
+# ─────────────────────────────────────────────────────────────────
+def gen_plan():
     c = make_console()
 
-    # Previous sessions (dim)
-    c.print()
-    c.print(f"  [dim]{SEP}[/dim]")
-    c.print("  [dim]>[/dim] [dim]write unit tests for the auth module[/dim]")
-    c.print("  [dim]qwen  ·  ~/projects/api[/dim]")
-    c.print()
-    c.print("  [dim]✓ Done  ·  qwen  ·  12s  ·  3 files changed[/dim]")
-    c.print()
+    p(c, "  [bold #b07cff]◆[/bold #b07cff] [bold white]Forge[/bold white]  [dim]v0.1  ·  qwen[/dim]")
+    p(c)
+    p(c, SEP)
+    p(c, "  [dim]>[/dim] [white]/plan add a GraphQL API layer on top of the existing REST endpoints[/white]")
+    p(c)
+    p(c, "  [bold #b07cff]◆[/bold #b07cff] [bold]Planning[dim]···[/dim][/bold]  [dim][qwen3-coder-plus][/dim]")
+    p(c)
+    p(c, "  ╭─ Plan ──────────────────────────────────────────────────────────╮")
+    p(c, "  │  strategy    parallel                                           │")
+    p(c, "  │  complexity  moderate  [dim](AI plan)[/dim]                              │")
+    p(c, "  │  eta         ~2 min                                             │")
+    p(c, "  │                                                                 │")
+    p(c, "  │  [dim]Schema-first: define types → resolvers → wire into FastAPI.[/dim]   │")
+    p(c, "  ╰─────────────────────────────────────────────────────────────────╯")
+    p(c)
+    p(c, "  [dim]  #   Task                                  Agent    Group[/dim]")
+    p(c, "  [dim]  ─   ────────────────────────────────────  ───────  ─────[/dim]")
+    p(c, "  [dim]  1   Define GraphQL schema types           claude[/dim]")
+    p(c, "  [dim]  2   Implement query resolvers             qwen     ∥ A[/dim]")
+    p(c, "  [dim]  3   Implement mutation resolvers          qwen     ∥ A[/dim]")
+    p(c, "  [dim]  4   Wire Strawberry into FastAPI          codex[/dim]")
+    p(c)
+    p(c, "  Run this plan?  [bold #b07cff]Y[/bold #b07cff][dim]/n[/dim]  ·  or use [bold]/run-plan[/bold]  [dim]/edit-plan[/dim]")
+    p(c)
+    p(c, "  [bold #b07cff]◆[/bold #b07cff]  [dim]qwen  ·  qwen3-coder-plus  ·  ~/projects/myapp [main]  ·  ctx 4k[/dim]")
 
-    c.print(f"  [dim]{SEP}[/dim]")
-    c.print("  [dim]>[/dim] [white]refactor session_store.py to use async SQLite[/white]")
-    c.print("  [dim]qwen  ·  ~/projects/api[/dim]")
-    c.print()
-
-    # Diff output — real _file_diff_text format: single num column + +/- marker
-    c.print()
-    c.print("  [yellow]~[/yellow] [bold]session_store.py[/bold]  [dim](89 lines)[/dim]")
-    c.print()
-    c.print("  [dim]@@  _connect[/dim]")
-    c.print("  [dim]  24   [/dim][dim]    def __init__(self, sessions_root: Path):[/dim]")
-    c.print("  [dim]  25   [/dim][dim]        self.sessions_root = sessions_root[/dim]")
-    c.print("  [dim]  26   [/dim][dim]        self.sessions_root.mkdir(exist_ok=True)[/dim]")
-    c.print("  [dim]  28   [/dim][dim]        self._init_db()[/dim]")
-    c.print()
-    c.print("  [dim]  29 [/dim][red]- def _connect(self) -> sqlite3.Connection:[/red]")
-    c.print("  [dim]  30 [/dim][red]-     conn = sqlite3.connect(self.db_path)[/red]")
-    c.print("  [dim]  31 [/dim][red]-     conn.row_factory = sqlite3.Row[/red]")
-    c.print("  [dim]  32 [/dim][red]-     return conn[/red]")
-    c.print()
-    c.print("  [dim]  29 [/dim][#b07cff]+[/#b07cff] [#b07cff]async def _connect(self):[/#b07cff]")
-    c.print("  [dim]  30 [/dim][#b07cff]+[/#b07cff] [#b07cff]    async with aiosqlite.connect(self.db_path) as conn:[/#b07cff]")
-    c.print("  [dim]  31 [/dim][#b07cff]+[/#b07cff] [#b07cff]        conn.row_factory = aiosqlite.Row[/#b07cff]")
-    c.print("  [dim]  32 [/dim][#b07cff]+[/#b07cff] [#b07cff]        yield conn[/#b07cff]")
-    c.print()
-    c.print("  [dim]  33   [/dim][dim]    def _init_db(self):[/dim]")
-    c.print("  [dim]  34   [/dim][dim]        with self._connect() as conn:[/dim]")
-    c.print()
-
-    # Completion line
-    c.print("  [#b07cff]✓[/#b07cff] Done  [dim]·  qwen  ·  8s[/dim]  [dim]·  1 file changed[/dim]")
-    c.print()
-
-    c.print()
-
-    c.save_svg(str(OUT / "forge-diff.svg"), title="Forge · Diff View")
-    print("generated forge-diff.svg")
+    (OUT / "forge-diff.svg").write_text(c.export_svg(title="forge — plan preview"))
+    print("✔ forge-diff.svg  (plan preview)")
 
 
-gen_welcome()
-gen_orchestration()
-gen_streaming()
-gen_diff()
-print("done.")
+if __name__ == "__main__":
+    gen_welcome()
+    gen_orchestration()
+    gen_streaming()
+    gen_plan()
+    print("\nAll screenshots written to", OUT)

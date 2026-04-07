@@ -12,21 +12,21 @@ Forge gives you one interface for:
 
 ## Screenshots
 
-### Welcome Screen
+### Welcome Screen — providers, recent runs, aligned command grid, always-visible info bar
 
 ![Forge welcome screen](docs/images/forge-welcome.svg)
 
-### Multi-provider Orchestration
+### Multi-agent Orchestration — per-agent colours, step headers, animated status bar
 
-![Forge orchestration plan](docs/images/forge-orchestration.svg)
+![Forge orchestration](docs/images/forge-orchestration.svg)
 
-### Live Streaming with Operation Indicator
+### Live Streaming — real-time output, operation indicators, spinner with model name
 
 ![Forge live streaming](docs/images/forge-streaming.svg)
 
-### Diff View with Line Numbers
+### Plan Preview — AI-built plan with parallel groups, Y/n confirmation
 
-![Forge diff view](docs/images/forge-diff.svg)
+![Forge plan preview](docs/images/forge-diff.svg)
 
 ## Quick Start
 

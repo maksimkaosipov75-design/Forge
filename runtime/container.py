@@ -1,3 +1,4 @@
+import os as _os
 from pathlib import Path
 
 from config import Settings, settings as default_settings
@@ -49,7 +50,7 @@ class RuntimeContainer:
             self.provider_paths[self.default_provider] = manager.cli_path
 
         self.base_projects_file = Path(file_mgr.projects_file if file_mgr else "projects.json")
-        self.base_working_dir = file_mgr.get_working_dir() if file_mgr else Path.home()
+        self.base_working_dir = file_mgr.get_working_dir() if file_mgr else Path(_os.getcwd()).resolve()
         self.sessions_root = sessions_root or Path(".session_data")
         self.sessions_root.mkdir(exist_ok=True)
         self.session_store = SessionStore(self.sessions_root)

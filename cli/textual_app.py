@@ -1099,9 +1099,19 @@ def create_textual_app(container, chat_id: int = 0):
                 rstr = f"  [{color}]{right[0]:<{cmd_w}}[/{color}][dim]{right[1]}[/dim]" if right else ""
                 cmd_lines.append(lstr + rstr)
 
+            # ── Home-dir warning ─────────────────────────────────────────────
+            home_warning: list[str] = []
+            if getattr(container, "launch_dir_is_home", False):
+                home_warning = [
+                    "",
+                    f"  [bold yellow]⚠  Working in home directory (~)[/bold yellow]"
+                    f"  [dim]cd into a project first, or use /cd[/dim]",
+                ]
+
             # ── Assemble ──────────────────────────────────────────────────────
             parts: list[str] = [
                 *header_lines,
+                *home_warning,
                 *prov_lines,
                 SEP,
                 "",

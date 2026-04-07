@@ -50,7 +50,12 @@ class RuntimeContainer:
             self.provider_paths[self.default_provider] = manager.cli_path
 
         self.base_projects_file = Path(file_mgr.projects_file if file_mgr else "projects.json")
-        self.base_working_dir = file_mgr.get_working_dir() if file_mgr else Path(_os.getcwd()).resolve()
+        if file_mgr:
+            self.base_working_dir = file_mgr.get_working_dir()
+        else:
+            launch_dir = _os.environ.get("FORGE_LAUNCH_DIR", "")
+            self.base_working_dir = Path(launch_dir).resolve() if launch_dir else Path(_os.getcwd()).resolve()
+        self.launch_dir_is_home = self.base_working_dir == Path(_os.path.expanduser("~")).resolve()
         self.sessions_root = sessions_root or Path(".session_data")
         self.sessions_root.mkdir(exist_ok=True)
         self.session_store = SessionStore(self.sessions_root)

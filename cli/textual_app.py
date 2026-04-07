@@ -682,13 +682,12 @@ def create_textual_app(container, chat_id: int = 0):
         #statusline {
             height: 1;
             padding: 0 2;
-            background: #1e1e1e;
+            background: #252526;
             color: #5a5a5a;
-            display: none;
         }
 
         #statusline.active {
-            display: block;
+            color: #d4d4d4;
         }
 
         #multiline-preview {
@@ -1119,6 +1118,8 @@ def create_textual_app(container, chat_id: int = 0):
             self._apply_provider_theme()
             self._refresh_all()
             self._set_stream(self._welcome_text())
+            # Populate the always-visible bottom info bar
+            self.query_one("#statusline", StatusLineWidget).update(self._idle_status_renderable())
             # Auto-refresh sidebar health every 30s
             self.set_interval(30, self._auto_refresh)
 
@@ -1131,6 +1132,9 @@ def create_textual_app(container, chat_id: int = 0):
             cwd = str(container.get_session(chat_id).file_mgr.get_working_dir())
             _git_status_cache.pop(cwd, None)
             self._refresh_all()
+            # Keep idle bar fresh (git branch / ctx may have changed)
+            if self._status_timer is None:
+                self.query_one("#statusline", StatusLineWidget).update(self._idle_status_renderable())
 
         def _titlebar_text(self) -> str:
             session = container.get_session(chat_id)
@@ -1139,16 +1143,11 @@ def create_textual_app(container, chat_id: int = 0):
             ctx_tok = self._ctx_input_tokens
             import pathlib
             p = pathlib.Path(cwd)
-            try:
-                short_cwd = "…/" + "/".join(p.parts[-2:])
-            except Exception:
-                short_cwd = cwd
+            short_cwd = p.name or cwd
             color = self._provider_color()
             suffix_parts = [f"{self.current_provider}  ·  {short_cwd}"]
             if git:
                 suffix_parts.append(git)
-            if ctx_tok >= 1000:
-                suffix_parts.append(f"ctx:~{ctx_tok // 1000}k")
             if self.current_mode != "idle":
                 suffix_parts.append(self.current_mode)
             if self.remote_state != "stopped":
@@ -1263,7 +1262,34 @@ def create_textual_app(container, chat_id: int = 0):
             # Strip any static trailing ellipsis/dots from the action label —
             # the animated dot suffix takes over.
             action = self._status_state["action"].rstrip("…·. ")
-            return f"[{color}]{spinner}[/] {action}[dim]{dot}[/dim]  [dim]({time_str} · {tok_str} tokens)[/dim]"
+            # Show model name next to provider when available
+            session = container.get_session(chat_id)
+            provider = self.current_provider
+            model_str = session.provider_models.get(provider, "")
+            if not model_str:
+                runtime = session.runtimes.get(provider)
+                model_str = (runtime.manager.model_name if runtime and hasattr(runtime, "manager") else "") or ""
+            model_part = f"  [dim]{model_str}[/dim]" if model_str else ""
+            return f"[{color}]{spinner}[/] {action}[dim]{dot}[/dim]{model_part}  [dim]({time_str} · {tok_str} tokens)[/dim]"
+
+        def _idle_status_renderable(self) -> str:
+            session = container.get_session(chat_id)
+            cwd = str(session.file_mgr.get_working_dir())
+            from pathlib import Path as _PL
+            basename = _PL(cwd).name or cwd
+            git = _git_status_short(cwd)
+            git_part = f"  [{git}]" if git else ""
+            provider = self.current_provider
+            color = self._provider_color()
+            # Model name: prefer explicit override, then runtime's actual model
+            model_str = session.provider_models.get(provider, "")
+            if not model_str:
+                runtime = session.runtimes.get(provider)
+                model_str = (runtime.manager.model_name if runtime and hasattr(runtime, "manager") else "") or ""
+            model_part = f"  [dim]·[/dim]  {model_str}" if model_str else ""
+            ctx = self._ctx_input_tokens
+            ctx_part = f"  [dim]·[/dim]  ctx {ctx // 1000}k" if ctx >= 1000 else (f"  [dim]·[/dim]  ctx {ctx}" if ctx else "")
+            return f"[{color}]◆[/{color}]  {provider}{model_part}  [dim]·[/dim]  {basename}{git_part}{ctx_part}"
 
         def _show_status_line(self, provider: str | None = None):
             self._status_state["start"] = _time.monotonic()
@@ -1286,7 +1312,7 @@ def create_textual_app(container, chat_id: int = 0):
                 self._status_timer = None
             sl = self.query_one("#statusline", StatusLineWidget)
             sl.remove_class("active")
-            sl.update("")
+            sl.update(self._idle_status_renderable())
 
         def _open_password_dialog(self) -> None:
             """Open the password modal if an agent is running and the modal isn't already shown."""

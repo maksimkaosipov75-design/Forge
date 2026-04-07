@@ -1144,23 +1144,16 @@ def create_textual_app(container, chat_id: int = 0):
                 self.query_one("#statusline", StatusLineWidget).update(self._idle_status_renderable())
 
         def _titlebar_text(self) -> str:
-            session = container.get_session(chat_id)
-            cwd = str(session.file_mgr.get_working_dir())
-            git = _git_status_short(cwd)
-            ctx_tok = self._ctx_input_tokens
-            import pathlib
-            p = pathlib.Path(cwd)
-            short_cwd = p.name or cwd
             color = self._provider_color()
-            suffix_parts = [f"{self.current_provider}  ·  {short_cwd}"]
-            if git:
-                suffix_parts.append(git)
+            # Path, git and model live in the bottom bar — titlebar shows only
+            # Forge identity, the active provider name, and transient mode flags.
+            suffix_parts: list[str] = []
             if self.current_mode != "idle":
                 suffix_parts.append(self.current_mode)
             if self.remote_state != "stopped":
                 suffix_parts.append(f"remote:{self.remote_state}")
-            suffix = "  ·  ".join(suffix_parts)
-            return f"  [{color}]◆[/{color}] [bold white]Forge[/bold white]  [dim]v0.1  ·  {suffix}[/dim]"
+            mode_str = ("  ·  " + "  ·  ".join(suffix_parts)) if suffix_parts else ""
+            return f"  [{color}]◆[/{color}] [bold white]Forge[/bold white]  [dim]v0.1  ·  {self.current_provider}{mode_str}[/dim]"
 
         def _provider_specialties(self) -> str:
             mapping = {

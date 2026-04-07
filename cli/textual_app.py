@@ -1087,12 +1087,16 @@ def create_textual_app(container, chat_id: int = 0):
 
             # ── Commands ──────────────────────────────────────────────────────
             cmd_cols = quick_reference_commands()
+            # Compute column widths from actual data so layout stays aligned
+            # even if entries change in the future.
+            cmd_w = max(len(c[0]) for c in cmd_cols) + 2   # command name col
+            desc_w = max(len(c[1]) for c in cmd_cols) + 2  # description col
             cmd_lines = []
             for i in range(0, len(cmd_cols), 2):
                 left = cmd_cols[i]
                 right = cmd_cols[i + 1] if i + 1 < len(cmd_cols) else None
-                lstr = f"  [{color}]{left[0]:<18}[/{color}][dim]{left[1]}[/dim]"
-                rstr = f"  [{color}]{right[0]:<18}[/{color}][dim]{right[1]}[/dim]" if right else ""
+                lstr = f"  [{color}]{left[0]:<{cmd_w}}[/{color}][dim]{left[1]:<{desc_w}}[/dim]"
+                rstr = f"  [{color}]{right[0]:<{cmd_w}}[/{color}][dim]{right[1]}[/dim]" if right else ""
                 cmd_lines.append(lstr + rstr)
 
             # ── Assemble ──────────────────────────────────────────────────────

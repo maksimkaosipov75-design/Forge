@@ -1804,7 +1804,7 @@ def create_textual_app(container, chat_id: int = 0):
                 self._run_prompt(value, provider_override=provider_override)
             )
 
-        async def _build_plan_ai(self, session, prompt: str):
+        async def _build_plan_ai(self, session, prompt: str, stream_event_callback=None):
             """Try AI planner first; fall back to rule-based silently."""
             planner = container.build_ai_planner(session)
             planning_provider = container.pick_planning_provider(session)
@@ -1814,6 +1814,7 @@ def create_textual_app(container, chat_id: int = 0):
                 container.execution_service,
                 session,
                 planning_runtime,
+                stream_event_callback=stream_event_callback,
             )
 
         async def _handle_command(self, raw: str):
@@ -2355,7 +2356,24 @@ def create_textual_app(container, chat_id: int = 0):
                 if not arg:
                     self._push_output("Usage: /plan <task>")
                     return
-                plan = await self._build_plan_ai(session, arg)
+                color = self._provider_color()
+                planning_provider = container.pick_planning_provider(session)
+                self._append_stream(
+                    "",
+                    "  [dim]" + "─  " * 28 + "[/dim]",
+                    f"  [dim]>[/dim] [white]{arg[:120]}[/white]",
+                    f"[{color}]◆[/] [bold]Planning…[/bold]  [dim][{planning_provider}][/dim]",
+                    "",
+                )
+                self._status_state = {"action": "Planning…", "tokens": 0, "start": _time.monotonic(), "input_tokens": 0, "output_tokens": 0}
+                self._show_status_line()
+
+                def _plan_stream_cb(line: str):
+                    self._update_status_event(line)
+                    self._append_stream_event(line)
+
+                plan = await self._build_plan_ai(session, arg, stream_event_callback=_plan_stream_cb)
+                self._hide_status_line()
                 session.last_plan = plan
                 container.save_session(session)
                 self._add_timeline(f"Planned: {arg[:48]}")
@@ -2591,7 +2609,11 @@ def create_textual_app(container, chat_id: int = 0):
             if prebuilt_plan is not None:
                 plan = prebuilt_plan
             else:
-                plan = await self._build_plan_ai(session, expanded_prompt)
+                def _orch_plan_stream_cb(line: str):
+                    self._update_status_event(line)
+                    self._append_stream_event(line)
+
+                plan = await self._build_plan_ai(session, expanded_prompt, stream_event_callback=_orch_plan_stream_cb)
             session.last_plan = plan
             container.save_session(session)
 

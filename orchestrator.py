@@ -197,6 +197,7 @@ class AIOrchestrator:
         execution_service,
         session,
         runtime,
+        stream_event_callback=None,
     ) -> OrchestrationPlan:
         """Build an AI-driven plan. Falls back to rule-based on any failure."""
         # Check cache before calling AI
@@ -215,6 +216,7 @@ class AIOrchestrator:
                 runtime=runtime,
                 provider_name=runtime.provider,
                 prompt=planning_prompt,
+                stream_event_callback=stream_event_callback,
             )
             if result.exit_code == 0 and result.answer_text.strip():
                 plan = self._parse_response(prompt, result.answer_text)

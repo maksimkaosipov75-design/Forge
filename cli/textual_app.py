@@ -2237,10 +2237,12 @@ def create_textual_app(container, chat_id: int = 0):
                         ("qwen-coder-turbo",             "Qwen2.5 fast balanced"),
                     ],
                     "codex": [
-                        ("gpt-5.4",       "GPT-5.4  [default]"),
-                        ("gpt-5.4-mini",  "GPT-5.4 Mini — fast, cheap"),
-                        ("gpt-5.2",       "GPT-5.2"),
-                        ("gpt-5.1-mini",  "GPT-5.1 Mini — lightweight"),
+                        ("gpt-5.3-codex",      "latest frontier agentic  [default]"),
+                        ("gpt-5.4",            "latest frontier agentic model"),
+                        ("gpt-5.2-codex",      "frontier agentic coding model"),
+                        ("gpt-5.1-codex-max",  "deep and fast reasoning"),
+                        ("gpt-5.2",            "frontier model — knowledge, reasoning, coding"),
+                        ("gpt-5.1-codex-mini", "cheaper, faster, less capable"),
                     ],
                     "claude": [
                         ("claude-sonnet-4-6",            "Claude Sonnet 4.6  [default]"),

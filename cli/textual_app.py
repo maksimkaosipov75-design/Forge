@@ -785,6 +785,14 @@ def create_textual_app(container, chat_id: int = 0):
             self._awaiting_plan_confirm: bool = False  # True after /plan — next Enter runs or cancels
             self._password_modal_open: bool = False  # True while PasswordModal is on screen
 
+        def watch_current_provider(self, _old: str, _new: str) -> None:
+            """Refresh the idle status bar whenever the active provider changes."""
+            if self._status_timer is None:
+                try:
+                    self.query_one("#statusline", StatusLineWidget).update(self._idle_status_renderable())
+                except Exception:
+                    pass
+
         def _provider_color(self) -> str:
             mapping = {
                 "qwen": "#b07cff",
@@ -1114,7 +1122,6 @@ def create_textual_app(container, chat_id: int = 0):
 
         def on_mount(self):
             self._load_history()
-            self._sync_remote_state()
             self._apply_provider_theme()
             self._refresh_all()
             self._set_stream(self._welcome_text())
@@ -2222,26 +2229,23 @@ def create_textual_app(container, chat_id: int = 0):
                 # Known model catalogs per provider
                 _MODEL_CATALOG: dict[str, list[tuple[str, str]]] = {
                     "qwen": [
-                        ("qwen-coder-plus",              "best quality, slower"),
-                        ("qwen-coder-turbo",             "fast balanced  [default]"),
-                        ("qwen2.5-coder-32b-instruct",   "open-weights 32B"),
-                        ("qwen2.5-coder-7b-instruct",    "open-weights 7B, fastest"),
-                        ("qwen-plus",                    "general purpose"),
-                        ("qwen-max",                     "highest capability"),
+                        ("qwen3-coder-plus",             "Qwen3 best quality  [default]"),
+                        ("qwen3-coder",                  "Qwen3 balanced"),
+                        ("qwen3-235b-a22b",              "Qwen3 open-weights 235B MoE"),
+                        ("qwen3-32b",                    "Qwen3 open-weights 32B"),
+                        ("qwen-coder-plus",              "Qwen2.5 best quality"),
+                        ("qwen-coder-turbo",             "Qwen2.5 fast balanced"),
                     ],
                     "codex": [
-                        ("o4-mini",    "fast reasoning  [default]"),
-                        ("o3",         "full reasoning, slower"),
-                        ("o3-mini",    "lightweight reasoning"),
-                        ("o1",         "original reasoning model"),
-                        ("gpt-4o",     "balanced multimodal"),
-                        ("gpt-4o-mini","cheapest / fastest"),
+                        ("gpt-5.4",       "GPT-5.4  [default]"),
+                        ("gpt-5.4-mini",  "GPT-5.4 Mini — fast, cheap"),
+                        ("gpt-5.2",       "GPT-5.2"),
+                        ("gpt-5.1-mini",  "GPT-5.1 Mini — lightweight"),
                     ],
                     "claude": [
-                        ("claude-sonnet-4-6",            "best balance  [default]"),
-                        ("claude-opus-4-6",              "highest quality, slow"),
-                        ("claude-haiku-4-5-20251001",    "fastest, cheapest"),
-                        ("claude-sonnet-3-5",            "previous gen sonnet"),
+                        ("claude-sonnet-4-6",            "Claude Sonnet 4.6  [default]"),
+                        ("claude-opus-4-6",              "Claude Opus 4.6 — highest quality"),
+                        ("claude-haiku-4-5-20251001",    "Claude Haiku 4.5 — fastest"),
                         ("sonnet",                       "alias → latest sonnet"),
                         ("opus",                         "alias → latest opus"),
                         ("haiku",                        "alias → latest haiku"),

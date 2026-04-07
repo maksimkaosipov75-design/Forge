@@ -2370,7 +2370,6 @@ def create_textual_app(container, chat_id: int = 0):
 
                 def _plan_stream_cb(line: str):
                     self._update_status_event(line)
-                    self._append_stream_event(line)
 
                 plan = await self._build_plan_ai(session, arg, stream_event_callback=_plan_stream_cb)
                 self._hide_status_line()
@@ -2611,7 +2610,6 @@ def create_textual_app(container, chat_id: int = 0):
             else:
                 def _orch_plan_stream_cb(line: str):
                     self._update_status_event(line)
-                    self._append_stream_event(line)
 
                 plan = await self._build_plan_ai(session, expanded_prompt, stream_event_callback=_orch_plan_stream_cb)
             session.last_plan = plan

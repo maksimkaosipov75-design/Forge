@@ -210,6 +210,116 @@ class OrchestratorServiceTests(unittest.TestCase):
         self.assertIn("ordered-v1", aggregate_result.error_text)
         self.assertEqual(container.metrics.statuses, ["failed"])
 
+    def test_next_ready_group_uses_dependencies(self):
+        plan = OrchestrationPlan(
+            prompt="build app",
+            complexity="complex",
+            strategy="split",
+            subtasks=[
+                PlannedSubtask(
+                    subtask_id="backend",
+                    title="Backend",
+                    description="Build backend",
+                    task_kind="backend_core",
+                    suggested_provider="codex",
+                    reason="backend fit",
+                    parallel_group=0,
+                ),
+                PlannedSubtask(
+                    subtask_id="docs",
+                    title="Docs",
+                    description="Write docs",
+                    task_kind="docs",
+                    suggested_provider="qwen",
+                    reason="docs fit",
+                    parallel_group=0,
+                ),
+                PlannedSubtask(
+                    subtask_id="ui",
+                    title="UI",
+                    description="Build UI",
+                    task_kind="ui_surface",
+                    suggested_provider="claude",
+                    reason="ui fit",
+                    depends_on=["backend"],
+                    parallel_group=1,
+                ),
+            ],
+        )
+        run = TaskRun(run_id="run-1", prompt="build app")
+
+        first_group = OrchestratorService._next_ready_group(plan, run)
+
+        self.assertEqual([item[1].subtask_id for item in first_group], ["backend", "docs"])
+
+        run.subtasks.append(SubtaskRun(subtask_id="backend", title="Backend", provider="codex", status="success"))
+        run.subtasks.append(SubtaskRun(subtask_id="docs", title="Docs", provider="qwen", status="success"))
+
+        second_group = OrchestratorService._next_ready_group(plan, run)
+
+        self.assertEqual([item[1].subtask_id for item in second_group], ["ui"])
+
+    def test_blocked_subtasks_report_missing_dependencies(self):
+        plan = OrchestrationPlan(
+            prompt="build app",
+            complexity="complex",
+            strategy="split",
+            subtasks=[
+                PlannedSubtask(
+                    subtask_id="backend",
+                    title="Backend",
+                    description="Build backend",
+                    task_kind="backend_core",
+                    suggested_provider="codex",
+                    reason="backend fit",
+                ),
+                PlannedSubtask(
+                    subtask_id="ui",
+                    title="UI",
+                    description="Build UI",
+                    task_kind="ui_surface",
+                    suggested_provider="claude",
+                    reason="ui fit",
+                    depends_on=["backend"],
+                ),
+            ],
+        )
+        run = TaskRun(
+            run_id="run-1",
+            prompt="build app",
+            subtasks=[SubtaskRun(subtask_id="backend", title="Backend", provider="codex", status="failed")],
+        )
+
+        blocked = OrchestratorService._blocked_subtasks(plan, run)
+
+        self.assertEqual(len(blocked), 1)
+        self.assertEqual(blocked[0][1].subtask_id, "ui")
+        self.assertEqual(blocked[0][2], ["backend"])
+
+    def test_build_handoff_record_is_structured(self):
+        result = type(
+            "Result",
+            (),
+            {
+                "provider": "qwen",
+                "model_name": "test-model",
+                "transport": "cli",
+                "exit_code": 0,
+                "answer_text": "Implemented parser and CLI",
+                "error_text": "",
+                "new_files": ["src/parser.py"],
+                "changed_files": ["src/cli.py"],
+            },
+        )()
+
+        record = OrchestratorService.build_handoff_record("parser", "Parser", result)
+
+        self.assertEqual(record["subtask_id"], "parser")
+        self.assertEqual(record["provider"], "qwen")
+        self.assertEqual(record["status"], "success")
+        self.assertEqual(record["touched_files"], ["src/parser.py", "src/cli.py"])
+        self.assertTrue(record["notes"])
+
 
 if __name__ == "__main__":
     unittest.main()

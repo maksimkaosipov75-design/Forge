@@ -1,12 +1,12 @@
+import json
 import tempfile
 import unittest
-import json
 from pathlib import Path
 
 from file_manager import FileManager
 from orchestrator import OrchestrationPlan, PlannedSubtask
 from session_store import SessionStore
-from task_models import ChatSession, TaskResult, TaskRun
+from task_models import ChatSession, SubtaskRun, TaskResult, TaskRun
 
 
 class SessionStoreTests(unittest.TestCase):
@@ -110,6 +110,54 @@ class SessionStoreTests(unittest.TestCase):
             self.assertIn("Model summary", content)
             self.assertIn("Transport summary", content)
             self.assertIn("Tokens: 12 in / 34 out", content)
+
+    def test_save_and_load_preserves_structured_handoffs(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            store = SessionStore(root)
+            session = ChatSession(chat_id=7, file_mgr=FileManager(projects_file=str(root / "projects.json")))
+            session.last_task_run = TaskRun(
+                run_id="run-1",
+                prompt="build app",
+                handoff_artifacts=["plain summary"],
+                handoff_records=[
+                    {
+                        "subtask_id": "backend",
+                        "title": "Backend",
+                        "provider": "codex",
+                        "status": "success",
+                        "summary": "Implemented API",
+                        "touched_files": ["src/api.py"],
+                        "notes": ["created 1 files"],
+                    }
+                ],
+                subtasks=[
+                    SubtaskRun(
+                        subtask_id="backend",
+                        title="Backend",
+                        provider="codex",
+                        status="success",
+                        handoff_summary="plain summary",
+                        handoff_record={
+                            "subtask_id": "backend",
+                            "title": "Backend",
+                            "provider": "codex",
+                            "status": "success",
+                            "summary": "Implemented API",
+                            "touched_files": ["src/api.py"],
+                            "notes": ["created 1 files"],
+                        },
+                    )
+                ],
+            )
+
+            store.save(session)
+
+            restored = ChatSession(chat_id=7, file_mgr=FileManager(projects_file=str(root / "projects.json")))
+            store.load(restored)
+
+            self.assertEqual(restored.last_task_run.handoff_records[0]["subtask_id"], "backend")
+            self.assertEqual(restored.last_task_run.subtasks[0].handoff_record["provider"], "codex")
 
 
 if __name__ == "__main__":

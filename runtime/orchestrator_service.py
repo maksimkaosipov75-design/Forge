@@ -170,6 +170,7 @@ class OrchestratorService:
         plan: OrchestrationPlan,
         subtask,
         previous_results: list[TaskResult],
+        previous_handoffs: list[dict] | None = None,
         cwd: str | None = None,
         files_touched: list[str] | None = None,
         is_first: bool = False,
@@ -212,10 +213,54 @@ class OrchestratorService:
                     f"Result: {result.answer_text[:800]}"
                 )
                 parts.append(summary)
+        if previous_handoffs:
+            handoff_lines = ["Structured handoff from previous steps:"]
+            for item in previous_handoffs[-4:]:
+                if not isinstance(item, dict):
+                    continue
+                header = (
+                    f"- {item.get('title', item.get('subtask_id', 'step'))} "
+                    f"[{item.get('provider', 'unknown')}] status={item.get('status', 'unknown')}"
+                )
+                handoff_lines.append(header)
+                summary = str(item.get("summary", "")).strip()
+                if summary:
+                    handoff_lines.append(f"  summary: {summary[:400]}")
+                files = [str(path) for path in item.get("touched_files", []) if str(path).strip()]
+                if files:
+                    handoff_lines.append("  files: " + ", ".join(Path(path).name for path in files[:8]))
+                notes = [str(note) for note in item.get("notes", []) if str(note).strip()]
+                if notes:
+                    handoff_lines.append("  notes: " + " | ".join(notes[:3]))
+            parts.append("\n".join(handoff_lines))
         parts.append(
             "Complete your role thoroughly. Be specific and produce working code or output."
         )
         return "\n\n".join(parts)
+
+    @staticmethod
+    def build_handoff_record(subtask_id: str, title: str, task_result: TaskResult) -> dict:
+        touched_files = list(dict.fromkeys(task_result.new_files + task_result.changed_files))
+        notes: list[str] = []
+        if task_result.new_files:
+            notes.append(f"created {len(task_result.new_files)} files")
+        if task_result.changed_files:
+            notes.append(f"changed {len(task_result.changed_files)} files")
+        if task_result.error_text.strip():
+            notes.append(task_result.error_text[:240])
+        return {
+            "subtask_id": subtask_id,
+            "title": title,
+            "provider": task_result.provider,
+            "model_name": task_result.model_name,
+            "transport": task_result.transport,
+            "status": "success" if task_result.exit_code == 0 else "failed",
+            "summary": (task_result.answer_text or task_result.error_text or "").strip()[:1200],
+            "touched_files": touched_files,
+            "new_files": list(task_result.new_files),
+            "changed_files": list(task_result.changed_files),
+            "notes": notes,
+        }
 
     @staticmethod
     def build_handoff_summary(task_result: TaskResult, title: str) -> str:
@@ -242,6 +287,23 @@ class OrchestratorService:
             "Summarize what was implemented, mention key files changed, and call out any remaining issues.",
             "Subtask artifacts:",
         ]
+        if task_run.handoff_records:
+            for item in task_run.handoff_records[-6:]:
+                if not isinstance(item, dict):
+                    continue
+                line = (
+                    f"- {item.get('title', item.get('subtask_id', 'step'))} "
+                    f"[{item.get('provider', 'unknown')}] "
+                    f"status={item.get('status', 'unknown')}"
+                )
+                parts.append(line)
+                if item.get("summary"):
+                    parts.append(f"  summary: {str(item['summary'])[:500]}")
+                touched = item.get("touched_files", [])
+                if touched:
+                    parts.append(
+                        "  files: " + ", ".join(Path(str(path)).name for path in touched[:8])
+                    )
         for artifact in task_run.handoff_artifacts[-6:]:
             parts.append(f"- {artifact}")
         return "\n\n".join(parts)
@@ -312,6 +374,56 @@ class OrchestratorService:
             seen_ids.append(subtask.subtask_id)
             seen_set.add(subtask.subtask_id)
         return None
+
+    @staticmethod
+    def _completed_subtask_ids(task_run: TaskRun) -> set[str]:
+        return {
+            item.subtask_id
+            for item in task_run.subtasks
+            if item.status in {"success", "reused"}
+        }
+
+    @staticmethod
+    def _scheduled_subtask_ids(task_run: TaskRun) -> set[str]:
+        return {item.subtask_id for item in task_run.subtasks}
+
+    @staticmethod
+    def _remaining_subtasks(plan: OrchestrationPlan, task_run: TaskRun, resume_from: int = 0) -> list[tuple[int, object]]:
+        scheduled_ids = OrchestratorService._scheduled_subtask_ids(task_run)
+        return [
+            (global_index, subtask)
+            for global_index, subtask in enumerate(plan.subtasks, start=1)
+            if global_index - 1 >= resume_from and subtask.subtask_id not in scheduled_ids
+        ]
+
+    @classmethod
+    def _next_ready_group(cls, plan: OrchestrationPlan, task_run: TaskRun, resume_from: int = 0) -> list[tuple[int, object]]:
+        remaining = cls._remaining_subtasks(plan, task_run, resume_from=resume_from)
+        if not remaining:
+            return []
+        completed_ids = cls._completed_subtask_ids(task_run)
+        ready = [
+            (index, subtask)
+            for index, subtask in remaining
+            if set(subtask.depends_on).issubset(completed_ids)
+        ]
+        if not ready:
+            return []
+        first_group = ready[0][1].parallel_group
+        return [item for item in ready if item[1].parallel_group == first_group]
+
+    @staticmethod
+    def _blocked_subtasks(plan: OrchestrationPlan, task_run: TaskRun, resume_from: int = 0) -> list[tuple[int, object, list[str]]]:
+        completed_ids = OrchestratorService._completed_subtask_ids(task_run)
+        scheduled_ids = OrchestratorService._scheduled_subtask_ids(task_run)
+        blocked: list[tuple[int, object, list[str]]] = []
+        for global_index, subtask in enumerate(plan.subtasks, start=1):
+            if global_index - 1 < resume_from or subtask.subtask_id in scheduled_ids:
+                continue
+            missing = [dep for dep in subtask.depends_on if dep not in completed_ids]
+            if missing:
+                blocked.append((global_index, subtask, missing))
+        return blocked
 
     # ------------------------------------------------------------------ #
     # Dynamic replanning                                                    #
@@ -542,28 +654,20 @@ class OrchestratorService:
                 new_files=list(preserved.new_files),
                 changed_files=list(preserved.changed_files),
                 handoff_summary=preserved.handoff_summary,
+                handoff_record=dict(preserved.handoff_record),
             )
             task_run.subtasks.append(reused)
             if reused.handoff_summary:
                 task_run.handoff_artifacts.append(reused.handoff_summary)
+            if reused.handoff_record:
+                task_run.handoff_records.append(dict(reused.handoff_record))
             subtask_results.append(self.task_result_from_subtask_run(reused, plan.prompt))
 
-        # Group subtasks by parallel_group for concurrent execution
-        pending = [
-            (global_index, subtask)
-            for global_index, subtask in enumerate(plan.subtasks, start=1)
-            if global_index - 1 >= resume_from
-        ]
-        grouped_pending: "OrderedDict[int, list[tuple[int, object]]]" = OrderedDict()
-        for item in pending:
-            grouped_pending.setdefault(item[1].parallel_group, []).append(item)
-        groups = list(grouped_pending.values())
-
         replan_attempted = False
-        for group in groups:
-            if task_run.status in {"failed"}:
-                break  # hard failure in previous group — stop
-
+        while True:
+            group = self._next_ready_group(plan, task_run, resume_from=resume_from)
+            if not group:
+                break
             if len(group) == 1:
                 ok = await self._run_group_sequential(
                     session, plan, task_run, subtask_results,
@@ -597,9 +701,33 @@ class OrchestratorService:
                     if all_new_ok:
                         task_run.status = "running"
                         task_run.error_text = ""
-                break  # dynamic replan handles remaining work
-            elif not ok:
-                break  # group had a hard failure and no replan available
+                        continue
+            # Continue scheduling other ready groups even after a failure.
+
+        blocked_subtasks = self._blocked_subtasks(plan, task_run, resume_from=resume_from)
+        for index, subtask, missing in blocked_subtasks:
+            if any(item.subtask_id == subtask.subtask_id for item in task_run.subtasks):
+                continue
+            message = (
+                "Skipped because dependencies were not completed: "
+                + ", ".join(missing)
+            )
+            task_run.subtasks.append(
+                SubtaskRun(
+                    subtask_id=subtask.subtask_id,
+                    title=subtask.title,
+                    provider=subtask.suggested_provider,
+                    task_kind=subtask.task_kind,
+                    description=subtask.description,
+                    depends_on=list(subtask.depends_on),
+                    status="skipped",
+                    error_text=message,
+                )
+            )
+            if task_run.status == "running":
+                task_run.status = "partial"
+            if not task_run.error_text:
+                task_run.error_text = message
 
         session.active_provider = ""
         task_run.duration_ms = int((monotonic() - started_at) * 1000)
@@ -748,6 +876,7 @@ class OrchestratorService:
 
         prompt = self.build_subtask_prompt(
             plan, subtask, subtask_results,
+            previous_handoffs=task_run.handoff_records,
             cwd=cwd, files_touched=files_touched, is_first=is_first,
         )
 
@@ -808,8 +937,10 @@ class OrchestratorService:
                     task_result = retry_result
 
         subtask_results.append(task_result)
+        handoff_record = self.build_handoff_record(subtask.subtask_id, subtask.title, task_result)
         handoff_summary = self.build_handoff_summary(task_result, subtask.title)
         task_run.handoff_artifacts.append(handoff_summary)
+        task_run.handoff_records.append(handoff_record)
 
         sub_status = "success" if task_result.exit_code == 0 else "failed"
         task_run.subtasks.append(SubtaskRun(
@@ -832,6 +963,7 @@ class OrchestratorService:
             new_files=list(task_result.new_files),
             changed_files=list(task_result.changed_files),
             handoff_summary=handoff_summary,
+            handoff_record=handoff_record,
             retry_count=retry_count,
             original_provider=original_provider,
         ))

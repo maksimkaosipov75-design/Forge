@@ -405,6 +405,8 @@ class SessionStore:
                 ])
                 if item.handoff_summary:
                     lines.extend(["#### Handoff", "", "```text", item.handoff_summary, "```", ""])
+                if item.handoff_record:
+                    lines.extend(["#### Handoff Record", "", "```json", json.dumps(item.handoff_record, ensure_ascii=False, indent=2)[:6000], "```", ""])
                 if item.answer_text:
                     lines.extend(["#### Answer", "", "```text", item.answer_text[:6000], "```", ""])
                 if item.error_text:
@@ -413,6 +415,10 @@ class SessionStore:
             lines.extend(["## Handoff Artifacts", ""])
             for index, artifact in enumerate(task_run.handoff_artifacts, start=1):
                 lines.extend([f"### Artifact {index}", "", "```text", artifact[:6000], "```", ""])
+        if task_run.handoff_records:
+            lines.extend(["## Structured Handoffs", ""])
+            for index, artifact in enumerate(task_run.handoff_records, start=1):
+                lines.extend([f"### Handoff {index}", "", "```json", json.dumps(artifact, ensure_ascii=False, indent=2)[:6000], "```", ""])
         if task_run.synthesis_provider:
             lines.extend([
                 "## Synthesis", "",

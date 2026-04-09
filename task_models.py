@@ -89,6 +89,7 @@ class SubtaskRun:
     new_files: list[str] = field(default_factory=list)
     changed_files: list[str] = field(default_factory=list)
     handoff_summary: str = ""
+    handoff_record: dict[str, Any] = field(default_factory=dict)
     retry_count: int = 0
     original_provider: str = ""
 
@@ -129,6 +130,7 @@ class TaskRun:
     review_prompt: str = ""
     review_answer: str = ""
     handoff_artifacts: list[str] = field(default_factory=list)
+    handoff_records: list[dict[str, Any]] = field(default_factory=list)
     artifact_file: str = ""
     ai_plan_rationale: str = ""
 

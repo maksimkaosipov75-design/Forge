@@ -1,4 +1,5 @@
 import asyncio
+import getpass
 import re as _re
 import shlex
 from pathlib import Path
@@ -146,9 +147,17 @@ class BridgeShell:
                     lines.append(f"models: {len(definition.available_models)} curated")
                 self.ui.print_block(f"Provider · {name}", "\n".join(lines), border_style=name)
             return
+        if command == "/auth":
+            self.leave_home_if_needed()
+            await self.handle_auth(args)
+            return
         if command == "/model":
             self.leave_home_if_needed()
             await self.handle_model(args)
+            return
+        if command == "/smoke":
+            self.leave_home_if_needed()
+            await self.handle_smoke(args)
             return
         if command == "/status":
             self.leave_home_if_needed()
@@ -256,6 +265,10 @@ class BridgeShell:
         session.current_provider = provider
         self.container.save_session(session)
         self.ui.print_notice(f"Default provider set to {provider}.", provider=provider, kind="success")
+        ready, _ = self.container.provider_is_ready(provider)
+        if provider == "openrouter" and not ready:
+            self.ui.print_notice("OpenRouter is selected, but no API key is configured. Let's set it now.", provider=provider, kind="warning")
+            await self.handle_auth(["openrouter"])
 
     async def handle_model(self, args: list[str]):
         session = self.container.get_session(self.chat_id)
@@ -291,6 +304,90 @@ class BridgeShell:
             f"{provider_name} model set to {label}. The new model will be used on the next prompt.",
             provider=provider_name,
             kind="success",
+        )
+
+    async def handle_auth(self, args: list[str]):
+        if not args:
+            if not self.container.resolve_api_key("openrouter"):
+                self.ui.print_notice("OpenRouter API key is not configured. Paste it below.", provider="openrouter", kind="warning")
+                await self.handle_auth(["openrouter"])
+                return
+            source = "env" if self.container.settings.OPENROUTER_API_KEY.strip() else "saved"
+            self.ui.print_block(
+                "Auth",
+                f"openrouter\n  source: {source}\n\nUse /auth openrouter to replace the key or /auth remove openrouter to delete it.",
+                border_style="green",
+            )
+            return
+
+        if args[0] == "status":
+            source = "env" if self.container.settings.OPENROUTER_API_KEY.strip() else ("saved" if self.container.credential_store.has_api_key("openrouter") else "missing")
+            self.ui.print_block("Auth", f"openrouter\n  source: {source}", border_style="green")
+            return
+
+        if args[0] == "remove":
+            provider_name = normalize_provider_name(args[1] if len(args) > 1 else "")
+            if provider_name != "openrouter":
+                self.ui.print_notice("Only OpenRouter API credentials are currently supported.", kind="warning")
+                return
+            self.container.credential_store.delete_api_key(provider_name)
+            self.ui.print_notice(f"Removed saved credentials for {provider_name}.", provider=provider_name, kind="success")
+            return
+
+        provider_name = normalize_provider_name(args[0])
+        if provider_name != "openrouter":
+            self.ui.print_notice("Only OpenRouter API credentials are currently supported.", kind="warning")
+            return
+
+        self.ui.print_notice("Paste your OpenRouter API key. Input is hidden.", provider=provider_name, kind="info")
+        api_key = getpass.getpass("OpenRouter API key: ").strip()
+        if not api_key:
+            self.ui.print_notice("No API key entered.", kind="warning")
+            return
+        self.container.credential_store.set_api_key(provider_name, api_key)
+        self.ui.print_notice(f"Saved credentials for {provider_name}.", provider=provider_name, kind="success")
+
+    async def handle_smoke(self, args: list[str]):
+        session = self.container.get_session(self.chat_id)
+        provider_name = normalize_provider_name(args[0] if args else session.current_provider)
+        ready, message = self.container.provider_is_ready(provider_name)
+        if not ready:
+            if provider_name == "openrouter":
+                self.ui.print_notice("OpenRouter smoke test needs an API key first. Let's configure it now.", provider=provider_name, kind="warning")
+                await self.handle_auth([provider_name])
+                ready, message = self.container.provider_is_ready(provider_name)
+                if not ready:
+                    self.ui.print_notice(f"{provider_name}: {message}", kind="warning")
+                    return
+            else:
+                self.ui.print_notice(f"{provider_name}: {message} Use /auth {provider_name} first.", kind="warning")
+                return
+        runtime = await self.container.ensure_runtime_started(session, provider_name)
+        prompt = (
+            "Reply in exactly two short lines.\n"
+            "Line 1: SMOKE_OK\n"
+            "Line 2: one short sentence naming the selected model if you know it."
+        )
+        result = await self.container.execution_service.execute_provider_task(
+            session=session,
+            runtime=runtime,
+            provider_name=provider_name,
+            prompt=prompt,
+        )
+        self.container.remember_task_result(session, result)
+        self.ui.print_block(
+            f"Smoke · {provider_name}",
+            "\n".join(
+                [
+                    f"exit_code: {result.exit_code}",
+                    f"model: {result.model_name or 'default'}",
+                    f"transport: {result.transport}",
+                    f"tokens: {result.total_input_tokens} in / {result.total_output_tokens} out",
+                    "",
+                    result.answer_text[:2000] or (result.error_text[:2000] if result.error_text else "No response."),
+                ]
+            ),
+            border_style=provider_name,
         )
 
     def _print_model_block(self, session, provider_name: str):

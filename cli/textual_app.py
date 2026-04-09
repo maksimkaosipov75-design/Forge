@@ -654,6 +654,179 @@ def create_textual_app(container, chat_id: int = 0):
             if event.key == "escape":
                 self.dismiss(None)
 
+    class TextEntryModal(ModalScreen):
+        def __init__(self, title: str, placeholder: str, password: bool = False, initial_value: str = ""):
+            super().__init__()
+            self.modal_title = title
+            self.placeholder = placeholder
+            self.password = password
+            self.initial_value = initial_value
+
+        CSS = """
+        TextEntryModal {
+            align: center middle;
+        }
+        #text-dialog {
+            width: 68;
+            height: auto;
+            border: round #555;
+            background: #1e1e1e;
+            padding: 1 2;
+        }
+        #text-title {
+            text-align: center;
+            color: #d4d4d4;
+            margin-bottom: 1;
+        }
+        #text-input {
+            border: round #555;
+            background: #2d2d2d;
+            color: #d4d4d4;
+            width: 100%;
+        }
+        #text-input:focus {
+            border: round #58c777;
+        }
+        #text-hint {
+            text-align: center;
+            color: #666;
+            margin-top: 1;
+        }
+        """
+
+        def compose(self) -> ComposeResult:
+            with Container(id="text-dialog"):
+                yield Label(self.modal_title, id="text-title")
+                yield Input(value=self.initial_value, password=self.password, placeholder=self.placeholder, id="text-input")
+                yield Label("Enter to confirm  ·  Esc to cancel", id="text-hint")
+
+        def on_mount(self) -> None:
+            self.query_one("#text-input", Input).focus()
+
+        def on_input_submitted(self, event: Input.Submitted) -> None:
+            self.dismiss(event.value)
+
+        def on_key(self, event) -> None:
+            if event.key == "escape":
+                self.dismiss(None)
+
+    class ModelPickerModal(ModalScreen):
+        def __init__(self, provider_name: str, current_model: str, default_model: str, catalog: list):
+            super().__init__()
+            self.provider_name = provider_name
+            self.current_model = current_model
+            self.default_model = default_model
+            self.catalog = list(catalog)
+            self.filtered: list[tuple[str, str, str]] = []
+            self.selected = 0
+
+        CSS = """
+        ModelPickerModal {
+            align: center middle;
+        }
+        #model-dialog {
+            width: 96;
+            height: auto;
+            max-height: 28;
+            border: round #555;
+            background: #1e1e1e;
+            padding: 1 2;
+        }
+        #model-title {
+            text-align: center;
+            color: #d4d4d4;
+            margin-bottom: 1;
+        }
+        #model-filter {
+            border: round #555;
+            background: #2d2d2d;
+            color: #d4d4d4;
+            width: 100%;
+            margin-bottom: 1;
+        }
+        #model-filter:focus {
+            border: round #58c777;
+        }
+        #model-list {
+            height: auto;
+            max-height: 18;
+            color: #d4d4d4;
+        }
+        #model-hint {
+            text-align: center;
+            color: #666;
+            margin-top: 1;
+        }
+        """
+
+        def compose(self) -> ComposeResult:
+            with Container(id="model-dialog"):
+                count = len(self.catalog)
+                yield Label(f"Select model · {self.provider_name}  [dim]({count} curated + custom)[/dim]", id="model-title")
+                yield Input(placeholder="filter models…", id="model-filter")
+                yield Static("", id="model-list")
+                yield Label("Up/Down to move  ·  Enter to select  ·  Esc to cancel", id="model-hint")
+
+        def on_mount(self) -> None:
+            self.query_one("#model-filter", Input).focus()
+            self._refresh_list("")
+
+        def _refresh_list(self, query: str):
+            lowered = query.strip().casefold()
+            items: list[tuple[str, str, str]] = []
+            for model in self.catalog:
+                haystack = " ".join([model.name, model.label, model.description]).casefold()
+                if lowered and lowered not in haystack:
+                    continue
+                items.append((model.name, model.label, model.description))
+            items.append(("__custom__", "Custom model…", "Enter any exact model id manually"))
+            self.filtered = items
+            self.selected = min(self.selected, max(0, len(items) - 1))
+            self._render_list()
+
+        def _render_list(self):
+            lines: list[str] = []
+            lines.append(f"[dim]Current:[/dim] {self.current_model or self.default_model or 'default'}")
+            lines.append(f"[dim]Default:[/dim] {self.default_model or 'none'}")
+            lines.append("")
+            for index, (name, label, description) in enumerate(self.filtered[:12]):
+                is_selected = index == self.selected
+                marker = "▶" if is_selected else " "
+                style = "bold reverse" if is_selected else "dim"
+                model_line = label if name == "__custom__" else f"{label}  [dim]{name}[/dim]"
+                tags = []
+                if name != "__custom__" and name == self.current_model:
+                    tags.append("[green](current)[/green]")
+                if name != "__custom__" and name == self.default_model:
+                    tags.append("[cyan](default)[/cyan]")
+                tag_text = f"  {' '.join(tags)}" if tags else ""
+                lines.append(f"[{style}] {marker} {model_line}{tag_text}[/{style}]")
+                if description:
+                    lines.append(f"   [dim]{description}[/dim]")
+            self.query_one("#model-list", Static).update("\n".join(lines))
+
+        def on_input_changed(self, event: Input.Changed) -> None:
+            if event.input.id == "model-filter":
+                self._refresh_list(event.value)
+
+        def on_key(self, event) -> None:
+            if event.key == "down" and self.filtered:
+                self.selected = (self.selected + 1) % len(self.filtered)
+                self._render_list()
+                event.prevent_default()
+                return
+            if event.key == "up" and self.filtered:
+                self.selected = (self.selected - 1) % len(self.filtered)
+                self._render_list()
+                event.prevent_default()
+                return
+            if event.key in {"enter", "return"} and self.filtered:
+                self.dismiss(self.filtered[self.selected][0])
+                event.prevent_default()
+                return
+            if event.key == "escape":
+                self.dismiss(None)
+
     class BridgeTextualApp(App):
         CSS = """
         Screen {
@@ -984,8 +1157,9 @@ def create_textual_app(container, chat_id: int = 0):
 
             # 1. Provider-specific readiness checks
             if name == "openrouter":
-                if _po.getenv("OPENROUTER_API_KEY"):
-                    return "ready  (env key)", "#44dd88"
+                if container.resolve_api_key("openrouter"):
+                    source = "env key" if container.settings.OPENROUTER_API_KEY.strip() else "saved key"
+                    return f"ready  ({source})", "#44dd88"
                 return "no api key", "#ffaa44"
 
             # 2. Binary installed?
@@ -1370,6 +1544,88 @@ def create_textual_app(container, chat_id: int = 0):
                 asyncio.create_task(_send())
 
             self.push_screen(PasswordModal(), _on_dismiss)
+
+        def _open_api_key_dialog(self, provider_name: str) -> None:
+            def _on_dismiss(value: str | None) -> None:
+                if value is None:
+                    self._append_stream("  [dim]API key entry dismissed.[/dim]")
+                    return
+                api_key = value.strip()
+                if not api_key:
+                    self._append_stream("  [yellow]No API key entered.[/yellow]")
+                    return
+                container.credential_store.set_api_key(provider_name, api_key)
+                self._add_timeline(f"Saved credentials for {provider_name}.")
+                self._append_stream(f"  [green]Saved credentials for {provider_name}.[/green]")
+                self._refresh_all()
+
+            self.push_screen(
+                TextEntryModal(
+                    title=f"API key · {provider_name}",
+                    placeholder="paste API key…",
+                    password=True,
+                ),
+                _on_dismiss,
+            )
+
+        def _push_openrouter_setup_hint(self, reason: str = ""):
+            lines = [
+                "[bold]OpenRouter setup required[/bold]",
+                "",
+                reason or "This action needs an OpenRouter API key.",
+                "",
+                "Next step:",
+                "  1. Paste your OpenRouter API key in the dialog",
+                "  2. Pick a model with /model openrouter",
+                "  3. Retry the action or run /smoke openrouter",
+            ]
+            self._push_output("\n".join(lines))
+
+        def _open_model_picker(self, provider_name: str) -> None:
+            session = container.get_session(chat_id)
+            current_model = container.resolve_provider_model(session, provider_name)
+            default_model = provider_default_model(provider_name)
+            catalog = list_provider_models(provider_name)
+
+            def _on_pick(value: str | None) -> None:
+                if value is None:
+                    return
+                if value == "__custom__":
+                    self.push_screen(
+                        TextEntryModal(
+                            title=f"Custom model · {provider_name}",
+                            placeholder="enter exact model id…",
+                            initial_value=session.provider_models.get(provider_name, "").strip(),
+                        ),
+                        lambda custom_value: self._set_provider_model_from_modal(provider_name, custom_value),
+                    )
+                    return
+                self._set_provider_model(provider_name, value)
+
+            self.push_screen(ModelPickerModal(provider_name, current_model, default_model, catalog), _on_pick)
+
+        def _set_provider_model_from_modal(self, provider_name: str, value: str | None):
+            if value is None:
+                return
+            cleaned = value.strip()
+            if not cleaned:
+                self._append_stream("  [yellow]No custom model entered.[/yellow]")
+                return
+            self._set_provider_model(provider_name, cleaned)
+
+        def _set_provider_model(self, provider_name: str, model_name: str):
+            session = container.get_session(chat_id)
+            new_model = "" if model_name.strip().lower() == "default" else model_name.strip()
+            session.provider_models[provider_name] = new_model
+            container.reset_runtime(session, provider_name)
+            container.save_session(session)
+            label = new_model or provider_default_model(provider_name) or "default"
+            self._add_timeline(f"Model {provider_name} → {label}")
+            self._append_stream(
+                f"  [green]Model set:[/green] [{_PROVIDER_COLORS.get(provider_name, self._provider_color())}]{provider_name}[/{_PROVIDER_COLORS.get(provider_name, self._provider_color())}]"
+                f" → [bold]{label}[/bold]"
+            )
+            self._refresh_all()
 
         def _update_status_event(self, line: str):
             action = _action_from_event(line)
@@ -2268,7 +2524,8 @@ def create_textual_app(container, chat_id: int = 0):
                             lines.append(f"    [dim]{marker} {mname:<36} {mdesc}[/dim]")
                         lines.append("")
                     lines.append("[dim]Usage:  /model <provider> <model>    e.g. /model qwen qwen-coder-plus[/dim]")
-                    lines.append("[dim]         /model <provider> default     reset to provider default[/dim]")
+                    lines.append("[dim]         /model <provider>            open model picker[/dim]")
+                    lines.append("[dim]         /model <provider> default    reset to provider default[/dim]")
                     self._push_output("\n".join(lines))
                     return
 
@@ -2283,39 +2540,92 @@ def create_textual_app(container, chat_id: int = 0):
                     new_model = parts_arg[1].strip() if len(parts_arg) > 1 else ""
 
                 if not new_model:
-                    # Show models for that provider
-                    cur = session.provider_models.get(target_provider, "").strip()
-                    lines = [f"[bold]{target_provider} models[/bold]", ""]
-                    for item in list_provider_models(target_provider):
-                        mname = item.name
-                        mdesc = item.label
-                        marker = "▶" if cur == mname else " "
-                        style = "bold" if cur == mname else "dim"
-                        lines.append(f"  [{style}]{marker} {mname:<38} {mdesc}[/{style}]")
-                    lines.append("")
-                    lines.append(f"[dim]Current: {cur or provider_default_model(target_provider) or 'provider default'}[/dim]")
-                    lines.append(f"[dim]/model {target_provider} <model>   to switch[/dim]")
-                    self._push_output("\n".join(lines))
+                    if target_provider == "openrouter" and not container.resolve_api_key("openrouter"):
+                        self._push_openrouter_setup_hint("Choose or configure OpenRouter first.")
+                        self._open_api_key_dialog("openrouter")
+                        return
+                    self._open_model_picker(target_provider)
                     return
 
                 # Actually set the model
-                if new_model.lower() == "default":
-                    new_model = ""
-
-                session.provider_models[target_provider] = new_model
-                container.reset_runtime(session, target_provider)
-                container.save_session(session)
-
-                label = new_model if new_model else provider_default_model(target_provider) or "default"
-                self._add_timeline(f"Model {target_provider} → {label}")
-                target_color = _PROVIDER_COLORS.get(target_provider, color)
-                self._push_output(
-                    f"[{color}]✓[/{color}]  [{target_color}]{target_provider}[/{target_color}] model set to [bold]{label}[/bold]\n"
-                    f"[dim]  The new model will be used on the next prompt.[/dim]"
-                )
+                self._set_provider_model(target_provider, new_model)
                 # Refresh welcome screen so the model shows there too
                 if self.current_mode == "idle":
                     self._push_output(self._welcome_text())
+                return
+            if command == "/auth":
+                parts_arg = arg.split()
+                if not parts_arg:
+                    if not container.resolve_api_key("openrouter"):
+                        self._push_openrouter_setup_hint("OpenRouter API key is not configured yet.")
+                        self._open_api_key_dialog("openrouter")
+                        return
+                    source = "env" if container.settings.OPENROUTER_API_KEY.strip() else "saved"
+                    self._push_output(
+                        "[bold]Auth[/bold]\n\n"
+                        f"openrouter: configured ({source})\n\n"
+                        "Use /auth openrouter to replace the key or /auth remove openrouter to delete it."
+                    )
+                    return
+                if parts_arg[0] == "status":
+                    source = "env" if container.settings.OPENROUTER_API_KEY.strip() else ("saved" if container.credential_store.has_api_key("openrouter") else "missing")
+                    self._push_output(f"[bold]Auth[/bold]\n\nopenrouter: {source}")
+                    return
+                if parts_arg[0] == "remove":
+                    provider_name = normalize_provider_name(parts_arg[1] if len(parts_arg) > 1 else "")
+                    if provider_name != "openrouter":
+                        self._push_output("[yellow]Only OpenRouter API credentials are currently supported.[/yellow]")
+                        return
+                    container.credential_store.delete_api_key(provider_name)
+                    self._add_timeline(f"Removed credentials for {provider_name}.")
+                    self._push_output(f"[green]Removed saved credentials for {provider_name}.[/green]")
+                    self._refresh_all()
+                    return
+                provider_name = normalize_provider_name(parts_arg[0])
+                if provider_name != "openrouter":
+                    self._push_output("[yellow]Only OpenRouter API credentials are currently supported.[/yellow]")
+                    return
+                self._push_openrouter_setup_hint("Paste your OpenRouter API key in the next dialog.")
+                self._open_api_key_dialog(provider_name)
+                return
+            if command == "/smoke":
+                provider_name = normalize_provider_name(arg or session.current_provider)
+                ready, message = container.provider_is_ready(provider_name)
+                if not ready:
+                    if provider_name == "openrouter":
+                        self._push_openrouter_setup_hint("OpenRouter smoke test needs an API key first.")
+                        self._open_api_key_dialog(provider_name)
+                    else:
+                        self._push_output(f"[yellow]{provider_name}: {message} Use /auth {provider_name} first.[/yellow]")
+                    return
+                runtime = await container.ensure_runtime_started(session, provider_name)
+                prompt = (
+                    "Reply in exactly two short lines.\n"
+                    "Line 1: SMOKE_OK\n"
+                    "Line 2: one short sentence naming the selected model if you know it."
+                )
+                result = await container.execution_service.execute_provider_task(
+                    session=session,
+                    runtime=runtime,
+                    provider_name=provider_name,
+                    prompt=prompt,
+                )
+                container.remember_task_result(session, result)
+                self._add_timeline(f"Smoke test: {provider_name}.")
+                self._push_output(
+                    "\n".join(
+                        [
+                            f"[bold]Smoke · {provider_name}[/bold]",
+                            "",
+                            f"exit_code: {result.exit_code}",
+                            f"model: {result.model_name or 'default'}",
+                            f"transport: {result.transport}",
+                            f"tokens: {result.total_input_tokens} in / {result.total_output_tokens} out",
+                            "",
+                            _md_to_rich(result.answer_text[:2000] or (result.error_text[:2000] if result.error_text else "No response.")),
+                        ]
+                    )
+                )
                 return
             if command == "/retry":
                 last = session.last_task_result
@@ -2367,6 +2677,10 @@ def create_textual_app(container, chat_id: int = 0):
                 self._apply_provider_theme()
                 self._add_timeline(f"Provider set to {provider}.")
                 self._refresh_all()
+                if provider == "openrouter" and not container.resolve_api_key("openrouter"):
+                    self._push_openrouter_setup_hint("OpenRouter was selected as the current provider, but no API key is configured.")
+                    self._open_api_key_dialog("openrouter")
+                    return
                 # Show welcome screen with new provider logo so the brand change is visible
                 self._push_output(self._welcome_text())
                 return
@@ -2642,6 +2956,18 @@ def create_textual_app(container, chat_id: int = 0):
 
             session = container.get_session(chat_id)
             provider_name = normalize_provider_name(provider_override or session.current_provider)
+            ready, message = container.provider_is_ready(provider_name)
+            if not ready:
+                if provider_name == "openrouter":
+                    self._push_openrouter_setup_hint(message)
+                    self._open_api_key_dialog(provider_name)
+                    self.current_mode = "idle"
+                    self._refresh_all()
+                    return
+                self._push_output(f"[yellow]{provider_name}: {message}[/yellow]")
+                self.current_mode = "idle"
+                self._refresh_all()
+                return
             runtime = await container.ensure_runtime_started(session, provider_name)
             self.current_mode = "single"
             self._active_runtime = runtime

@@ -3,6 +3,7 @@ import os as _os
 from pathlib import Path
 
 from config import Settings, settings as default_settings
+from credential_store import CredentialStore
 from file_manager import FileManager
 from metrics import MetricsCollector
 from orchestrator import AIOrchestrator, RuleBasedOrchestrator
@@ -29,6 +30,7 @@ class RuntimeContainer:
         parser: LogParser | None = None,
         file_mgr: FileManager | None = None,
         sessions_root: Path | None = None,
+        credential_store: CredentialStore | None = None,
     ):
         self.settings = settings
         self.manager = manager
@@ -66,6 +68,7 @@ class RuntimeContainer:
         self.metrics = MetricsCollector()
         self.execution_service = ExecutionService()
         self.orchestrator_service = OrchestratorService(self, self.execution_service)
+        self.credential_store = credential_store or CredentialStore()
 
     def session_projects_file(self, chat_id: int) -> Path:
         stem = self.base_projects_file.stem or "projects"
@@ -87,7 +90,7 @@ class RuntimeContainer:
         elif is_api_provider(normalized_provider):
             definition = get_provider_definition(normalized_provider)
             runtime_manager = OpenRouterExecutionBackend(
-                api_key=self.settings.OPENROUTER_API_KEY,
+                api_key=self.resolve_api_key(normalized_provider),
                 base_url=self.settings.OPENROUTER_BASE_URL,
                 on_output=lambda line, target_parser=runtime_parser: target_parser.feed(line),
                 model_name=selected_model or definition.default_model,
@@ -148,9 +151,15 @@ class RuntimeContainer:
 
     def provider_is_ready(self, provider_name: str) -> tuple[bool, str]:
         normalized = normalize_provider_name(provider_name)
-        if normalized == "openrouter" and not self.settings.OPENROUTER_API_KEY.strip():
-            return False, "OPENROUTER_API_KEY is not configured."
+        if normalized == "openrouter" and not self.resolve_api_key(normalized).strip():
+            return False, "OpenRouter API key is not configured."
         return True, ""
+
+    def resolve_api_key(self, provider_name: str) -> str:
+        normalized = normalize_provider_name(provider_name)
+        if normalized == "openrouter":
+            return self.settings.OPENROUTER_API_KEY.strip() or self.credential_store.get_api_key(normalized).strip()
+        return ""
 
     def reset_runtime(self, session: ChatSession, provider_name: str):
         runtime = session.runtimes.pop(provider_name, None)

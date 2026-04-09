@@ -9,10 +9,12 @@ from runtime import RuntimeContainer
 
 
 COMMAND_MODULES = {
+    "auth": "cli.commands.auth",
     "providers": "cli.commands.providers",
     "model": "cli.commands.model",
     "plan": "cli.commands.plan",
     "run": "cli.commands.run",
+    "smoke": "cli.commands.smoke",
     "orchestrate": "cli.commands.orchestrate",
     "runs": "cli.commands.runs",
     "show": "cli.commands.show",

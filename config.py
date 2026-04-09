@@ -22,6 +22,8 @@ class Settings:
         self.OPENROUTER_BASE_URL = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
         self.OPENROUTER_DEFAULT_MODEL = os.getenv("OPENROUTER_DEFAULT_MODEL", "qwen/qwen3-coder:free")
         self.OPENROUTER_HTTP_TIMEOUT = int(os.getenv("OPENROUTER_HTTP_TIMEOUT", "120"))
+        self.OPENROUTER_MODELS_HTTP_TIMEOUT = int(os.getenv("OPENROUTER_MODELS_HTTP_TIMEOUT", "8"))
+        self.OPENROUTER_MODEL_CACHE_TTL_SECONDS = int(os.getenv("OPENROUTER_MODEL_CACHE_TTL_SECONDS", "21600"))
         self.RATE_LIMIT_MAX_REQUESTS = int(os.getenv("RATE_LIMIT_MAX_REQUESTS", "20"))
         self.RATE_LIMIT_WINDOW_SECONDS = int(os.getenv("RATE_LIMIT_WINDOW_SECONDS", "3600"))
         self.MAX_PROMPT_LENGTH = int(os.getenv("MAX_PROMPT_LENGTH", "12000"))

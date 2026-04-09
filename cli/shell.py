@@ -18,7 +18,6 @@ from cli.session_actions import (
 from providers import (
     get_provider_definition,
     is_supported_provider,
-    list_provider_models,
     normalize_provider_name,
     provider_default_model,
 )
@@ -293,8 +292,29 @@ class BridgeShell:
             self._print_model_block(session, provider_name)
             return
 
-        if new_model.lower() == "default":
-            new_model = ""
+        if provider_name == "openrouter" and new_model.lower() == "refresh":
+            refreshed = self.container.list_available_models(provider_name, refresh=True)
+            self.ui.print_notice(
+                f"Refreshed OpenRouter model catalog ({len(refreshed)} models cached).",
+                provider=provider_name,
+                kind="success",
+            )
+            self._print_model_block(session, provider_name)
+            return
+
+        resolution = self.container.resolve_model_selection(provider_name, new_model)
+        if resolution.status == "ambiguous":
+            lines = [resolution.message or "Several models matched your query.", ""]
+            for item in resolution.matches[:8]:
+                lines.append(f"- {item.label}  [{item.name}]")
+            lines.append("")
+            lines.append("Tip: rerun /model openrouter <more specific query> or use an exact id.")
+            self.ui.print_block(f"Model Search · {provider_name}", "\n".join(lines), border_style=provider_name)
+            return
+        if resolution.status == "missing":
+            self.ui.print_notice(resolution.message, provider=provider_name, kind="warning")
+            return
+        new_model = resolution.model_name
 
         session.provider_models[provider_name] = new_model
         self.container.reset_runtime(session, provider_name)
@@ -394,13 +414,20 @@ class BridgeShell:
         current = session.provider_models.get(provider_name, "").strip()
         resolved = current or provider_default_model(provider_name) or "default"
         lines = [f"current: {resolved}"]
-        catalog = list_provider_models(provider_name)
+        catalog = self.container.list_available_models(provider_name)
         if catalog:
             lines.append("")
             lines.append("available:")
-            for item in catalog:
+            for item in catalog[:10]:
                 marker = "*" if item.name == current else "-"
                 lines.append(f"  {marker} {item.name}  {item.label}")
+            if provider_name == "openrouter":
+                lines.append("")
+                lines.append("tips:")
+                lines.append("  /model openrouter sonnet")
+                lines.append("  /model openrouter deepseek")
+                lines.append("  /model openrouter free")
+                lines.append("  /model openrouter refresh")
         self.ui.print_block(f"Model · {provider_name}", "\n".join(lines), border_style=provider_name)
 
     async def show_status(self):

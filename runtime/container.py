@@ -6,6 +6,7 @@ from config import Settings, settings as default_settings
 from credential_store import CredentialStore
 from file_manager import FileManager
 from metrics import MetricsCollector
+from openrouter_catalog import ModelResolveResult, OpenRouterModelCatalog
 from orchestrator import AIOrchestrator, RuleBasedOrchestrator
 from parser import LogParser
 from process_manager import (
@@ -20,6 +21,7 @@ from runtime.executor import ExecutionService
 from runtime.orchestrator_service import OrchestratorService
 from session_store import SessionStore
 from task_models import ChatSession, ProviderRuntime, ProviderStats, TaskResult, TaskRun
+from providers import list_provider_models
 
 
 class RuntimeContainer:
@@ -69,6 +71,13 @@ class RuntimeContainer:
         self.execution_service = ExecutionService()
         self.orchestrator_service = OrchestratorService(self, self.execution_service)
         self.credential_store = credential_store or CredentialStore()
+        self.openrouter_catalog = OpenRouterModelCatalog(
+            cache_path=self.sessions_root / "openrouter_models.json",
+            base_url=self.settings.OPENROUTER_BASE_URL,
+            timeout=self.settings.OPENROUTER_MODELS_HTTP_TIMEOUT,
+            ttl_seconds=self.settings.OPENROUTER_MODEL_CACHE_TTL_SECONDS,
+            api_key_getter=lambda: self.resolve_api_key("openrouter"),
+        )
 
     def session_projects_file(self, chat_id: int) -> Path:
         stem = self.base_projects_file.stem or "projects"
@@ -148,6 +157,23 @@ class RuntimeContainer:
     def resolve_provider_model(self, session: ChatSession, provider_name: str) -> str:
         configured = session.provider_models.get(provider_name, "").strip()
         return configured or provider_default_model(provider_name)
+
+    def list_available_models(self, provider_name: str, refresh: bool = False):
+        normalized = normalize_provider_name(provider_name)
+        if normalized == "openrouter":
+            return self.openrouter_catalog.list_models(refresh=refresh)
+        return list_provider_models(normalized)
+
+    def resolve_model_selection(self, provider_name: str, query: str, refresh: bool = False) -> ModelResolveResult:
+        normalized = normalize_provider_name(provider_name)
+        if normalized == "openrouter":
+            return self.openrouter_catalog.resolve_model(query, refresh=refresh)
+        cleaned = (query or "").strip()
+        if not cleaned:
+            return ModelResolveResult(status="empty", message="No model query provided.")
+        if cleaned.lower() == "default":
+            return ModelResolveResult(status="exact", model_name="")
+        return ModelResolveResult(status="raw", model_name=cleaned, message="Using the exact model name you entered.")
 
     def provider_is_ready(self, provider_name: str) -> tuple[bool, str]:
         normalized = normalize_provider_name(provider_name)

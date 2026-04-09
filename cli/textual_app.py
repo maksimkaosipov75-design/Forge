@@ -711,13 +711,14 @@ def create_textual_app(container, chat_id: int = 0):
                 self.dismiss(None)
 
     class ModelPickerModal(ModalScreen):
-        def __init__(self, provider_name: str, current_model: str, default_model: str, catalog: list):
+        def __init__(self, provider_name: str, current_model: str, default_model: str, catalog: list, initial_query: str = ""):
             super().__init__()
             self.provider_name = provider_name
             self.current_model = current_model
             self.default_model = default_model
             self.catalog = list(catalog)
-            self.filtered: list[tuple[str, str, str]] = []
+            self.initial_query = initial_query
+            self.filtered: list[tuple[str, str, str, tuple[str, ...]]] = []
             self.selected = 0
 
         CSS = """
@@ -768,18 +769,21 @@ def create_textual_app(container, chat_id: int = 0):
                 yield Label("Up/Down to move  ·  Enter to select  ·  Esc to cancel", id="model-hint")
 
         def on_mount(self) -> None:
-            self.query_one("#model-filter", Input).focus()
-            self._refresh_list("")
+            control = self.query_one("#model-filter", Input)
+            control.focus()
+            if self.initial_query:
+                control.value = self.initial_query
+            self._refresh_list(self.initial_query)
 
         def _refresh_list(self, query: str):
             lowered = query.strip().casefold()
-            items: list[tuple[str, str, str]] = []
+            items: list[tuple[str, str, str, tuple[str, ...]]] = []
             for model in self.catalog:
-                haystack = " ".join([model.name, model.label, model.description]).casefold()
+                haystack = " ".join([model.name, model.label, model.description, *getattr(model, "aliases", ())]).casefold()
                 if lowered and lowered not in haystack:
                     continue
-                items.append((model.name, model.label, model.description))
-            items.append(("__custom__", "Custom model…", "Enter any exact model id manually"))
+                items.append((model.name, model.label, model.description, tuple(getattr(model, "aliases", ()))))
+            items.append(("__custom__", "Custom model…", "Enter any exact model id manually", ()))
             self.filtered = items
             self.selected = min(self.selected, max(0, len(items) - 1))
             self._render_list()
@@ -789,7 +793,7 @@ def create_textual_app(container, chat_id: int = 0):
             lines.append(f"[dim]Current:[/dim] {self.current_model or self.default_model or 'default'}")
             lines.append(f"[dim]Default:[/dim] {self.default_model or 'none'}")
             lines.append("")
-            for index, (name, label, description) in enumerate(self.filtered[:12]):
+            for index, (name, label, description, aliases) in enumerate(self.filtered[:12]):
                 is_selected = index == self.selected
                 marker = "▶" if is_selected else " "
                 style = "bold reverse" if is_selected else "dim"
@@ -803,6 +807,11 @@ def create_textual_app(container, chat_id: int = 0):
                 lines.append(f"[{style}] {marker} {model_line}{tag_text}[/{style}]")
                 if description:
                     lines.append(f"   [dim]{description}[/dim]")
+                if aliases and name != "__custom__":
+                    alias_items = list(dict.fromkeys(item for item in aliases if item))
+                    alias_preview = ", ".join(alias_items[:4])
+                    if alias_preview:
+                        lines.append(f"   [dim]aliases: {alias_preview}[/dim]")
             self.query_one("#model-list", Static).update("\n".join(lines))
 
         def on_input_changed(self, event: Input.Changed) -> None:
@@ -1581,11 +1590,11 @@ def create_textual_app(container, chat_id: int = 0):
             ]
             self._push_output("\n".join(lines))
 
-        def _open_model_picker(self, provider_name: str) -> None:
+        def _open_model_picker(self, provider_name: str, initial_query: str = "") -> None:
             session = container.get_session(chat_id)
             current_model = container.resolve_provider_model(session, provider_name)
             default_model = provider_default_model(provider_name)
-            catalog = list_provider_models(provider_name)
+            catalog = container.list_available_models(provider_name)
 
             def _on_pick(value: str | None) -> None:
                 if value is None:
@@ -1602,7 +1611,7 @@ def create_textual_app(container, chat_id: int = 0):
                     return
                 self._set_provider_model(provider_name, value)
 
-            self.push_screen(ModelPickerModal(provider_name, current_model, default_model, catalog), _on_pick)
+            self.push_screen(ModelPickerModal(provider_name, current_model, default_model, catalog, initial_query=initial_query), _on_pick)
 
         def _set_provider_model_from_modal(self, provider_name: str, value: str | None):
             if value is None:
@@ -1615,7 +1624,19 @@ def create_textual_app(container, chat_id: int = 0):
 
         def _set_provider_model(self, provider_name: str, model_name: str):
             session = container.get_session(chat_id)
-            new_model = "" if model_name.strip().lower() == "default" else model_name.strip()
+            resolution = container.resolve_model_selection(provider_name, model_name)
+            if resolution.status == "ambiguous":
+                self._push_output(
+                    "[yellow]"
+                    + (resolution.message or "Several models matched your query.")
+                    + "[/yellow]"
+                )
+                self._open_model_picker(provider_name, initial_query=model_name)
+                return
+            if resolution.status == "missing":
+                self._append_stream(f"  [yellow]{resolution.message}[/yellow]")
+                return
+            new_model = resolution.model_name
             session.provider_models[provider_name] = new_model
             container.reset_runtime(session, provider_name)
             container.save_session(session)
@@ -2572,7 +2593,7 @@ def create_textual_app(container, chat_id: int = 0):
                         display = cur or actual or provider_default_model(pname) or "[dim]default[/dim]"
                         pcolor = _PROVIDER_COLORS.get(pname, color)
                         lines.append(f"  [{pcolor}]{pname:<10}[/{pcolor}]  {display}")
-                        for item in list_provider_models(pname):
+                        for item in container.list_available_models(pname)[:10]:
                             mname = item.name
                             mdesc = item.label
                             marker = "▶" if (cur or actual) == mname else " "
@@ -2581,6 +2602,8 @@ def create_textual_app(container, chat_id: int = 0):
                     lines.append("[dim]Usage:  /model <provider> <model>    e.g. /model qwen qwen-coder-plus[/dim]")
                     lines.append("[dim]         /model <provider>            open model picker[/dim]")
                     lines.append("[dim]         /model <provider> default    reset to provider default[/dim]")
+                    lines.append("[dim]         /model openrouter sonnet     search by family/name[/dim]")
+                    lines.append("[dim]         /model openrouter refresh    refresh live OpenRouter catalog[/dim]")
                     self._push_output("\n".join(lines))
                     return
 
@@ -2599,6 +2622,14 @@ def create_textual_app(container, chat_id: int = 0):
                         self._push_openrouter_setup_hint("Choose or configure OpenRouter first.")
                         self._open_api_key_dialog("openrouter")
                         return
+                    self._open_model_picker(target_provider)
+                    return
+
+                if target_provider == "openrouter" and new_model.lower() == "refresh":
+                    refreshed = container.list_available_models("openrouter", refresh=True)
+                    self._push_output(
+                        f"[green]Refreshed OpenRouter model catalog[/green]\n\nCached models: {len(refreshed)}"
+                    )
                     self._open_model_picker(target_provider)
                     return
 

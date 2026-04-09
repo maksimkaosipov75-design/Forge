@@ -2,6 +2,7 @@ import unittest
 import json
 from urllib import error
 
+from event_protocol import decode_forge_event
 from runtime.api_backends import OpenRouterExecutionBackend
 
 
@@ -105,6 +106,16 @@ class OpenRouterExecutionBackendTests(unittest.TestCase):
         self.assertTrue(events)
         self.assertIn("accepted the key", events[0])
         self.assertIn("free model/router", events[0])
+
+    def test_parse_sse_line_supports_forge_event_payload(self):
+        raw = 'data: {"forge_event":{"type":"approval","text":"Allow shell?","title":"Shell access"}}'
+
+        events, text_delta = OpenRouterExecutionBackend.parse_sse_line(raw)
+
+        decoded = decode_forge_event(events[0])
+        self.assertEqual(decoded["type"], "approval")
+        self.assertEqual(decoded["title"], "Shell access")
+        self.assertEqual(text_delta, "")
 
 
 if __name__ == "__main__":

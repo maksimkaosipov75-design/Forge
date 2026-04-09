@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Callable, Optional
 from urllib import error, request
 
+from event_protocol import encode_forge_event, extract_forge_event
 from provider_status import FailureReason, ProviderHealth, classify_failure_text
 
 
@@ -166,6 +167,15 @@ class OpenRouterExecutionBackend(BaseApiBackend):
 
         events: list[str] = []
         text_delta = ""
+        forge_event = extract_forge_event(payload)
+        if forge_event:
+            event_type = str(forge_event.get("type") or "").strip().lower()
+            text = str(forge_event.get("text") or forge_event.get("message") or "").strip()
+            event_payload = {k: v for k, v in forge_event.items() if k not in {"type", "text"}}
+            events.append(encode_forge_event(event_type, text=text, **event_payload))
+            if event_type == "result" and text:
+                text_delta = text
+            return events, text_delta
 
         error_payload = payload.get("error")
         if isinstance(error_payload, dict):

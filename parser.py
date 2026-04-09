@@ -4,6 +4,8 @@ from dataclasses import dataclass, field
 from typing import List, Optional
 from enum import Enum
 
+from event_protocol import decode_forge_event
+
 
 class ActionCategory(Enum):
     THINKING = "thinking"
@@ -11,6 +13,9 @@ class ActionCategory(Enum):
     TOOL = "tool"
     SYSTEM = "system"
     DONE = "done"
+    QUESTION = "question"
+    APPROVAL = "approval"
+    PROMPT = "prompt"
 
 
 @dataclass
@@ -20,6 +25,7 @@ class StreamEvent:
     text: str
     tool_name: Optional[str] = None
     file_path: Optional[str] = None
+    payload: Optional[dict] = None
 
 
 @dataclass
@@ -192,6 +198,20 @@ class LogParser:
 
     def _parse_stream_event(self, line: str) -> Optional[StreamEvent]:
         """Парсит строку как stream-json событие."""
+        forge_event = decode_forge_event(line)
+        if forge_event:
+            event_type = str(forge_event.get("type") or "").strip().lower()
+            text = str(forge_event.get("text") or forge_event.get("message") or "").strip()
+            if event_type == "thinking":
+                return StreamEvent(category=ActionCategory.THINKING, text=text, payload=forge_event)
+            if event_type == "question":
+                return StreamEvent(category=ActionCategory.QUESTION, text=text, payload=forge_event)
+            if event_type == "approval":
+                return StreamEvent(category=ActionCategory.APPROVAL, text=text, payload=forge_event)
+            if event_type == "prompt":
+                return StreamEvent(category=ActionCategory.PROMPT, text=text, payload=forge_event)
+            if event_type == "result":
+                return StreamEvent(category=ActionCategory.DONE, text=text, payload=forge_event)
         if line.startswith("🧠 "):
             return StreamEvent(category=ActionCategory.THINKING, text=line[2:].strip())
         elif line.startswith("💬 "):
@@ -309,6 +329,26 @@ class LogParser:
 
     def get_actionable_line(self, line: str) -> str:
         """Извлекает значимую строку действия из stream-json вывода."""
+        forge_event = decode_forge_event(line)
+        if forge_event:
+            event_type = str(forge_event.get("type") or "").strip().lower()
+            text = str(forge_event.get("text") or forge_event.get("message") or "").strip()
+            if event_type == "thinking":
+                return f"🧠 {text}" if text else "🧠 thinking"
+            if event_type == "question":
+                title = str(forge_event.get("title") or "").strip()
+                summary = title or text or "question"
+                return f"❓ {summary}"
+            if event_type == "approval":
+                title = str(forge_event.get("title") or "").strip()
+                summary = title or text or "approval"
+                return f"✅ {summary}"
+            if event_type == "prompt":
+                title = str(forge_event.get("title") or "").strip()
+                summary = title or text or "prompt"
+                return f"💭 {summary}"
+            if event_type == "result":
+                return f"🏁 {text}" if text else "🏁 result"
         # Stream-json уже имеет чистые события с эмодзи
         if line.startswith(("⚙️", "🧠", "💬", "🔧", "🏁", "🔢", "✏️", "📂", "👁️", "🐚", "❌", "✅")):
             return line

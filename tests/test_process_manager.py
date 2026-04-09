@@ -1,5 +1,6 @@
 import unittest
 
+from event_protocol import decode_forge_event
 from process_manager import ClaudeProcessManager, CodexProcessManager, QwenProcessManager
 
 
@@ -153,6 +154,23 @@ class ProcessManagerPayloadParsingTests(unittest.TestCase):
 
         self.assertEqual(events, ["🏁 Завершено (success): 75ms", "🔢 12,34"])
         self.assertEqual(final_text, "done")
+
+    def test_parse_qwen_forge_event_passthrough(self):
+        payload = {
+            "type": "assistant",
+            "forge_event": {
+                "type": "question",
+                "text": "Need API key?",
+                "title": "Authorization",
+            },
+        }
+
+        events, final_text = QwenProcessManager.parse_stream_payload(payload)
+
+        self.assertIsNone(final_text)
+        decoded = decode_forge_event(events[0])
+        self.assertEqual(decoded["type"], "question")
+        self.assertEqual(decoded["title"], "Authorization")
 
 
 if __name__ == "__main__":

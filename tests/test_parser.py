@@ -1,5 +1,6 @@
 import unittest
 
+from event_protocol import encode_forge_event
 from parser import LogParser
 
 
@@ -45,6 +46,28 @@ class LogParserTests(unittest.TestCase):
         parser.feed("🔢 5,6")
 
         self.assertEqual(parser.get_token_usage(), (5, 6, 17, 40))
+
+    def test_feed_parses_forge_question_event(self):
+        parser = LogParser()
+
+        parser.feed(
+            encode_forge_event(
+                "question",
+                text="Need API key?",
+                title="Authorization",
+                options=[{"id": "key", "label": "API key"}],
+            )
+        )
+
+        self.assertEqual(parser.state.events[-1].category.value, "question")
+        self.assertEqual(parser.state.events[-1].payload["title"], "Authorization")
+
+    def test_get_actionable_line_formats_forge_question_event(self):
+        parser = LogParser()
+
+        line = encode_forge_event("question", text="Need API key?", title="Authorization")
+
+        self.assertEqual(parser.get_actionable_line(line), "❓ Authorization")
 
 
 if __name__ == "__main__":

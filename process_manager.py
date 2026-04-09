@@ -5,6 +5,7 @@ import tempfile
 from pathlib import Path
 from typing import Optional, Callable
 
+from event_protocol import encode_forge_event, extract_forge_event
 from provider_status import FailureReason, ProviderHealth, classify_failure_text
 from providers import normalize_provider_name
 
@@ -100,6 +101,15 @@ class QwenProcessManager(BaseProcessManager):
         events: list[str] = []
         final_text: Optional[str] = None
         payload_type = payload.get("type", "")
+        forge_event = extract_forge_event(payload)
+        if forge_event:
+            event_type = str(forge_event.get("type") or "").strip().lower()
+            text = str(forge_event.get("text") or forge_event.get("message") or "").strip()
+            event_payload = {k: v for k, v in forge_event.items() if k not in {"type", "text"}}
+            events.append(encode_forge_event(event_type, text=text, **event_payload))
+            if event_type == "result":
+                final_text = text or (forge_event.get("result") if isinstance(forge_event.get("result"), str) else None)
+            return events, final_text
 
         if payload_type == "system":
             events.append("⚙️ Инициализация сессии...")
@@ -280,6 +290,15 @@ class CodexProcessManager(BaseProcessManager):
         payload_type = payload.get("type", "")
         events: list[str] = []
         final_text: Optional[str] = None
+        forge_event = extract_forge_event(payload)
+        if forge_event:
+            event_type = str(forge_event.get("type") or "").strip().lower()
+            text = str(forge_event.get("text") or forge_event.get("message") or "").strip()
+            event_payload = {k: v for k, v in forge_event.items() if k not in {"type", "text"}}
+            events.append(encode_forge_event(event_type, text=text, **event_payload))
+            if event_type == "result":
+                final_text = text or (forge_event.get("result") if isinstance(forge_event.get("result"), str) else None)
+            return events, final_text
 
         if payload_type in {"thread.started", "turn.started"}:
             if payload_type == "thread.started":
@@ -474,6 +493,14 @@ class ClaudeProcessManager(BaseProcessManager):
     def parse_stream_payload(cls, payload: dict) -> tuple[list[str], Optional[str]]:
         payload_type = payload.get("type", "")
         payload_subtype = payload.get("subtype", "")
+        forge_event = extract_forge_event(payload)
+        if forge_event:
+            event_type = str(forge_event.get("type") or "").strip().lower()
+            text = str(forge_event.get("text") or forge_event.get("message") or "").strip()
+            event_payload = {k: v for k, v in forge_event.items() if k not in {"type", "text"}}
+            event_line = encode_forge_event(event_type, text=text, **event_payload)
+            final_text = text if event_type == "result" and text else None
+            return [event_line], final_text
 
         if payload_type == "system" and payload_subtype == "init":
             return ["⚙️ Инициализация сессии..."], None

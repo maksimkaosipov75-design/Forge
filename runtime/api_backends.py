@@ -67,6 +67,48 @@ class BaseApiBackend:
 
 class OpenRouterExecutionBackend(BaseApiBackend):
     @staticmethod
+    def _extract_error_message(detail: str, fallback: str = "") -> str:
+        text = (detail or fallback or "").strip()
+        if not text:
+            return ""
+        try:
+            payload = json.loads(text)
+        except json.JSONDecodeError:
+            return text
+
+        if isinstance(payload, dict):
+            error_payload = payload.get("error")
+            if isinstance(error_payload, dict):
+                message = error_payload.get("message")
+                if isinstance(message, str) and message.strip():
+                    return message.strip()
+        return text
+
+    @staticmethod
+    def _friendly_http_error_message(code: int, detail: str, reason: str, model_name: str) -> str:
+        raw_message = OpenRouterExecutionBackend._extract_error_message(detail, reason) or "Unknown OpenRouter error"
+        selected_model = model_name.strip() or "current model"
+        is_free_model = selected_model.endswith(":free") or selected_model == "openrouter/free"
+
+        if code == 401:
+            return (
+                "OpenRouter rejected the API key. Re-enter the key with /auth openrouter "
+                "or rotate it in OpenRouter if it may have been revoked. "
+                f"Details: {raw_message}"
+            )
+
+        if code == 429:
+            hint = (
+                f"The selected free model/router ({selected_model}) is currently rate-limited or unavailable. "
+                "Try another free model, wait a bit, or use a paid model."
+                if is_free_model
+                else f"The selected model ({selected_model}) is currently rate-limited. Try again shortly or switch models."
+            )
+            return f"OpenRouter accepted the key, but request limits blocked this call. {hint} Details: {raw_message}"
+
+        return f"HTTP {code}: {raw_message}"
+
+    @staticmethod
     def _usage_event(payload: dict) -> str:
         usage = payload.get("usage")
         if not isinstance(usage, dict):
@@ -213,7 +255,12 @@ class OpenRouterExecutionBackend(BaseApiBackend):
             return 0
         except error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
-            message = f"HTTP {exc.code}: {detail or exc.reason}"
+            message = self._friendly_http_error_message(
+                exc.code,
+                detail,
+                str(exc.reason or ""),
+                model_name,
+            )
             self._notify(f"❌ {message[:300]}")
             self.mark_failure(message)
             return exc.code or -1

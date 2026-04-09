@@ -1,5 +1,6 @@
 import unittest
 import json
+from urllib import error
 
 from runtime.api_backends import OpenRouterExecutionBackend
 
@@ -47,6 +48,63 @@ class OpenRouterExecutionBackendTests(unittest.TestCase):
         payload = json.loads(req.data.decode("utf-8"))
 
         self.assertEqual(payload["stream_options"], {"include_usage": True})
+
+    def test_friendly_http_error_message_for_401(self):
+        message = OpenRouterExecutionBackend._friendly_http_error_message(
+            401,
+            '{"error":{"message":"Missing Authentication header"}}',
+            "Unauthorized",
+            "qwen/qwen3-coder:free",
+        )
+
+        self.assertIn("rejected the API key", message)
+        self.assertIn("/auth openrouter", message)
+        self.assertIn("Missing Authentication header", message)
+
+    def test_friendly_http_error_message_for_429_free_model(self):
+        message = OpenRouterExecutionBackend._friendly_http_error_message(
+            429,
+            '{"error":{"message":"Rate limit exceeded"}}',
+            "Too Many Requests",
+            "qwen/qwen3-coder:free",
+        )
+
+        self.assertIn("accepted the key", message)
+        self.assertIn("free model/router", message)
+        self.assertIn("qwen/qwen3-coder:free", message)
+        self.assertIn("Rate limit exceeded", message)
+
+    def test_send_command_reports_friendly_http_429_message(self):
+        events: list[str] = []
+        backend = OpenRouterExecutionBackend(
+            api_key="test-key",
+            base_url="https://openrouter.ai/api/v1",
+            on_output=events.append,
+            model_name="qwen/qwen3-coder:free",
+        )
+
+        backend._running = True
+
+        def raise_http_error(_prompt: str, _model_name: str):
+            raise error.HTTPError(
+                "https://openrouter.ai/api/v1/chat/completions",
+                429,
+                "Too Many Requests",
+                hdrs=None,
+                fp=None,
+            )
+
+        backend._send_request_sync = raise_http_error  # type: ignore[method-assign]
+
+        async def run():
+            return await backend.send_command("hello")
+
+        exit_code = __import__("asyncio").run(run())
+
+        self.assertEqual(exit_code, 429)
+        self.assertTrue(events)
+        self.assertIn("accepted the key", events[0])
+        self.assertIn("free model/router", events[0])
 
 
 if __name__ == "__main__":

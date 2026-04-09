@@ -1894,8 +1894,12 @@ def create_textual_app(container, chat_id: int = 0):
             if not text:
                 return
             try:
-                inp = self.query_one("#input", Input)
-                inp.focus()
+                focused = self.focused
+                if isinstance(focused, Input):
+                    inp = focused
+                else:
+                    inp = self.query_one("#input", Input)
+                    inp.focus()
                 lines = text.splitlines()
                 if len(lines) > 1:
                     # First line into input, remaining into multiline buffer
@@ -1904,7 +1908,7 @@ def create_textual_app(container, chat_id: int = 0):
                     inp.value = val[:pos] + lines[0] + val[pos:]
                     inp.cursor_position = pos + len(lines[0])
                     non_empty = [l for l in lines[1:] if l.strip()]
-                    if non_empty:
+                    if non_empty and inp.id == "input":
                         self._multiline_buffer.extend(non_empty)
                         self._update_multiline_preview()
                 else:
@@ -1920,6 +1924,29 @@ def create_textual_app(container, chat_id: int = 0):
             text = getattr(event, "text", "")
             if text:
                 self._paste_into_input(text)
+
+        def on_mouse_down(self, event) -> None:
+            """Right click pastes clipboard content into the input field when possible."""
+            button = getattr(event, "button", 0)
+            if button not in (2, 3):
+                return
+            try:
+                self.query_one("#input", Input).focus()
+            except Exception:
+                return
+            text = _clipboard_paste()
+            if text:
+                self._paste_into_input(text)
+                self._append_stream("  [dim]Pasted from clipboard.[/dim]")
+            else:
+                self._append_stream(
+                    "  [dim]Clipboard is empty or unavailable.[/dim]",
+                    "  [dim]Use Ctrl+Shift+V if your terminal handles paste itself.[/dim]",
+                )
+            try:
+                event.prevent_default()
+            except Exception:
+                pass
 
         def _update_multiline_preview(self):
             preview = self.query_one("#multiline-preview", MultilinePreview)
@@ -1951,6 +1978,10 @@ def create_textual_app(container, chat_id: int = 0):
             dd.remove_class("active")
 
         async def on_key(self, event) -> None:
+            focused = self.focused
+            focused_input = focused if isinstance(focused, Input) else None
+            focused_input_id = focused_input.id if focused_input is not None else ""
+
             # Dropdown navigation — intercept before other handlers
             if self._dropdown_active():
                 dd = self.query_one("#command-dropdown", CommandDropdown)
@@ -2016,6 +2047,16 @@ def create_textual_app(container, chat_id: int = 0):
                     self._append_stream("  [yellow]↩ Cancelled (Esc)[/yellow]")
                     self._hide_status_line()
                     self.current_mode = "idle"
+                    event.prevent_default()
+                    return
+            if focused_input is not None and focused_input_id != "input":
+                if event.key == "ctrl+v":
+                    text = _clipboard_paste()
+                    if text:
+                        self._paste_into_input(text)
+                    event.prevent_default()
+                    return
+                if event.key == "ctrl+c":
                     event.prevent_default()
                     return
             if event.key == "ctrl+v":
@@ -2085,6 +2126,20 @@ def create_textual_app(container, chat_id: int = 0):
                     self._append_stream("  [yellow]↩ Cancelled[/yellow]")
                     self._hide_status_line()
                     self.current_mode = "idle"
+                    event.prevent_default()
+                    return
+                input_widget = self.query_one("#input", Input)
+                candidate = input_widget.value.strip()
+                if not candidate:
+                    session = container.get_session(chat_id)
+                    candidate = session.last_task_result.answer_text.strip() if session.last_task_result else ""
+                if candidate:
+                    msg = _clipboard_copy(candidate)
+                    self._add_timeline(msg[:80])
+                    self._append_stream(f"  [dim]{msg}[/dim]")
+                else:
+                    self._append_stream("  [dim]Nothing to copy yet.[/dim]")
+                event.prevent_default()
                 return
             input_widget = self.query_one("#input", Input)
             if event.key == "up":
@@ -2665,8 +2720,6 @@ def create_textual_app(container, chat_id: int = 0):
                 if not arg:
                     self._push_output(f"provider: {session.current_provider}")
                     return
-                from providers import is_supported_provider, normalize_provider_name
-
                 provider = normalize_provider_name(arg)
                 if not is_supported_provider(provider):
                     self._push_output(f"Unsupported provider: {arg}")
@@ -2935,7 +2988,6 @@ def create_textual_app(container, chat_id: int = 0):
             self._push_output(f"Unknown command: {raw}")
 
         async def _run_prompt(self, prompt: str, provider_override: str | None = None):
-            from providers import normalize_provider_name
             try:
               await self._run_prompt_inner(prompt, provider_override)
             except asyncio.CancelledError:
@@ -2952,8 +3004,6 @@ def create_textual_app(container, chat_id: int = 0):
                 self._active_task = None
 
         async def _run_prompt_inner(self, prompt: str, provider_override: str | None = None):
-            from providers import normalize_provider_name
-
             session = container.get_session(chat_id)
             provider_name = normalize_provider_name(provider_override or session.current_provider)
             ready, message = container.provider_is_ready(provider_name)

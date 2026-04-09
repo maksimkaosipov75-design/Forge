@@ -121,6 +121,10 @@ class SessionStore:
             if isinstance(pm, dict):
                 session.provider_models = {k: v for k, v in pm.items() if isinstance(v, str)}
 
+            preferences = payload.get("ui_preferences")
+            if isinstance(preferences, dict):
+                session.ui_preferences = {k: v for k, v in preferences.items() if isinstance(v, str)}
+
         except Exception as exc:
             log.warning("Failed to hydrate session state for chat %s: %s", session.chat_id, exc)
 
@@ -149,6 +153,7 @@ class SessionStore:
         payload = {
             "current_provider": session.current_provider,
             "provider_models": dict(session.provider_models),
+            "ui_preferences": dict(session.ui_preferences),
             "last_task_result": asdict(session.last_task_result),
             "history": [asdict(item) for item in session.history[-MAX_HISTORY:]],
             "last_task_run": asdict(session.last_task_run) if session.last_task_run else None,

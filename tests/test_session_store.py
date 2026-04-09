@@ -46,6 +46,7 @@ class SessionStoreTests(unittest.TestCase):
             self.assertEqual(restored.last_task_result.answer_text, "world")
             self.assertEqual(len(restored.run_history), 1)
             self.assertEqual(restored.last_plan.subtasks[0].suggested_provider, "claude")
+            self.assertEqual(restored.ui_preferences, {})
 
     def test_load_migrates_legacy_json_session(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -158,6 +159,20 @@ class SessionStoreTests(unittest.TestCase):
 
             self.assertEqual(restored.last_task_run.handoff_records[0]["subtask_id"], "backend")
             self.assertEqual(restored.last_task_run.subtasks[0].handoff_record["provider"], "codex")
+
+    def test_save_and_load_preserves_ui_preferences(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            store = SessionStore(root)
+            session = ChatSession(chat_id=9, file_mgr=FileManager(projects_file=str(root / "projects.json")))
+            session.ui_preferences["thinking_mode"] = "full"
+
+            store.save(session)
+
+            restored = ChatSession(chat_id=9, file_mgr=FileManager(projects_file=str(root / "projects.json")))
+            store.load(restored)
+
+            self.assertEqual(restored.ui_preferences["thinking_mode"], "full")
 
 
 if __name__ == "__main__":

@@ -130,6 +130,19 @@ def build_commit_message(session, explicit: str = "") -> str:
     return compact or "AI: update project"
 
 
+def get_thinking_mode(session) -> str:
+    mode = session.ui_preferences.get("thinking_mode", "").strip().lower()
+    return mode if mode in {"off", "compact", "full"} else "compact"
+
+
+def set_thinking_mode(session, mode: str) -> str:
+    normalized = (mode or "").strip().lower()
+    if normalized not in {"off", "compact", "full"}:
+        return "Thinking mode must be one of: off, compact, full."
+    session.ui_preferences["thinking_mode"] = normalized
+    return f"Thinking mode set to {normalized}."
+
+
 def run_git_commit(cwd: str, message: str) -> tuple[bool, str]:
     try:
         inside = subprocess.run(

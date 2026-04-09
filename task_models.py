@@ -282,6 +282,7 @@ class ChatSession:
     # User-selected model per provider (e.g. {"qwen": "qwen-coder-plus", "codex": "o3-mini"})
     # Empty string means "use the provider's default model"
     provider_models: dict[str, str] = field(default_factory=dict)
+    ui_preferences: dict[str, str] = field(default_factory=dict)
     # Persisted health snapshots for providers not yet instantiated as runtimes
     provider_health_cache: dict[str, Any] = field(default_factory=dict)
     task_queue: asyncio.Queue = field(default_factory=asyncio.Queue)

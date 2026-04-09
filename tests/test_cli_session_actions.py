@@ -2,7 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from cli.session_actions import build_commit_message, compact_session, render_todos_lines
+from cli.session_actions import build_commit_message, compact_session, get_thinking_mode, render_todos_lines, set_thinking_mode
 from file_manager import FileManager
 from task_models import ChatSession, TaskResult, TaskRun
 
@@ -41,6 +41,21 @@ class CliSessionActionsTests(unittest.TestCase):
             message = build_commit_message(session)
 
             self.assertIn("Implement better CLI help output", message)
+
+    def test_thinking_mode_defaults_to_compact(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            session = ChatSession(chat_id=1, file_mgr=FileManager(projects_file=str(Path(tmpdir) / "projects.json")))
+
+            self.assertEqual(get_thinking_mode(session), "compact")
+
+    def test_set_thinking_mode_updates_session_preferences(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            session = ChatSession(chat_id=1, file_mgr=FileManager(projects_file=str(Path(tmpdir) / "projects.json")))
+
+            message = set_thinking_mode(session, "full")
+
+            self.assertEqual(message, "Thinking mode set to full.")
+            self.assertEqual(get_thinking_mode(session), "full")
 
 
 if __name__ == "__main__":

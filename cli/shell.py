@@ -10,10 +10,12 @@ from cli.session_actions import (
     build_commit_message,
     clear_session_state,
     compact_session,
+    get_thinking_mode,
     render_todos_lines,
     render_usage_lines,
     run_git_commit,
     run_review_pass,
+    set_thinking_mode,
 )
 from providers import (
     get_provider_definition,
@@ -174,6 +176,22 @@ class BridgeShell:
         if command == "/metrics":
             self.leave_home_if_needed()
             self.ui.print_block("Metrics", self.container.metrics.render_prometheus(), border_style="cyan")
+            return
+        if command == "/thinking":
+            self.leave_home_if_needed()
+            session = self.container.get_session(self.chat_id)
+            if not args:
+                self.ui.print_notice(
+                    f"Thinking mode: {get_thinking_mode(session)}. Use /thinking off|compact|full.",
+                    kind="info",
+                )
+                return
+            message = set_thinking_mode(session, args[0])
+            if message.startswith("Thinking mode set"):
+                self.container.save_session(session)
+                self.ui.print_notice(message, kind="success")
+            else:
+                self.ui.print_notice(message, kind="warning")
             return
         if command == "/todos":
             self.leave_home_if_needed()
@@ -494,7 +512,7 @@ class BridgeShell:
                 state["action"] = action
             if line.startswith("💬 "):
                 state["tokens"] += max(1, len(line[2:]) // 4)
-            self.ui.print_stream_event(line, provider_name)
+            self.ui.print_stream_event(line, provider_name, thinking_mode=get_thinking_mode(session))
             self.ui.refresh_status_bar(live, start_time, state, provider_name)
 
         try:
@@ -605,7 +623,7 @@ class BridgeShell:
             if line.startswith("💬 "):
                 state["tokens"] += max(1, len(line[2:]) // 4)
             active = session.active_provider or session.current_provider
-            self.ui.print_stream_event(line, active)
+            self.ui.print_stream_event(line, active, thinking_mode=get_thinking_mode(session))
             self.ui.refresh_status_bar(live, start_time_ref[0], state, active)
 
         try:

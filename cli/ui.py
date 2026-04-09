@@ -814,19 +814,30 @@ class CliUi:
         print(f"  {dim}{short}{reset}")
         print()
 
-    def print_stream_event(self, line: str, provider: str = ""):
+    def print_stream_event(self, line: str, provider: str = "", thinking_mode: str = "compact"):
         """Print a single real-time stream event inline."""
         style = self._provider_style(provider) if provider else "cyan"
         if not self.console:
             if line.startswith("💬 "):
                 print("  " + line[2:].strip())
+            elif line.startswith("🧠 ") and thinking_mode != "off":
+                thought = line[2:].strip()
+                if thinking_mode == "compact" and len(thought) > 140:
+                    thought = thought[:139] + "…"
+                print(f"  Thinking: {thought}")
             elif line.startswith(("🔧", "⚙️", "📂", "✏️", "👁️", "🐚", "🏁")):
                 print("  " + line)
-            # skip 🧠 thinking
             return
 
         if line.startswith("💬 "):
             self.console.print("  " + line[2:].strip())
+        elif line.startswith("🧠 "):
+            if thinking_mode == "off":
+                return
+            thought = line[2:].strip()
+            if thinking_mode == "compact" and len(thought) > 180:
+                thought = thought[:179] + "…"
+            self.console.print(f"  [#6fa86f]Thinking:[/] [dim]{thought}[/dim]")
         elif line.startswith("🔧 Использую: ") or line.startswith("🔧 "):
             tool = line.split(": ", 1)[-1].strip() if ": " in line else line[2:].strip()
             self.console.print(f"  [{style}]✦[/] [bright_black]{tool}[/bright_black]")
@@ -844,7 +855,6 @@ class CliUi:
             pass  # completion marker — suppress, shown via print_task_result_inline
         elif line.startswith(("❌ ", "✅ ")):
             self.console.print(f"  [bright_black]{line}[/bright_black]")
-        # skip 🧠 thinking
 
     def print_task_result_inline(self, result):
         """Print task result inline without panels."""

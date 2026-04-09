@@ -16,6 +16,7 @@ from providers import (
     normalize_provider_name,
     provider_default_model,
 )
+from cli.session_actions import get_thinking_mode, set_thinking_mode
 
 _HTML_TAG = _re.compile(r"<[^>]+>")
 
@@ -1767,6 +1768,8 @@ def create_textual_app(container, chat_id: int = 0):
         def _append_stream_event(self, line: str):
             """Format and append a stream event line to the stream widget."""
             color = self._provider_color()
+            session = container.get_session(chat_id)
+            thinking_mode = get_thinking_mode(session)
             if line.startswith("💬 "):
                 # Auto-open password dialog if the agent is asking for a password
                 if _PASSWORD_RE.search(line[2:]) and not self._password_modal_open:
@@ -1856,8 +1859,15 @@ def create_textual_app(container, chat_id: int = 0):
                 formatted = f"  [dim]{line[2:].strip().replace('[', chr(92) + '[')}[/dim]"
             elif line.startswith(("❌ ", "✅ ")):
                 formatted = f"  [dim]{line.replace('[', chr(92) + '[')}[/dim]"
-            elif line.startswith(("🧠 ", "🏁 ", "🔢 ")):
-                return  # skip thinking, raw completion markers, and token counts
+            elif line.startswith("🧠 "):
+                if thinking_mode == "off":
+                    return
+                thought = line[2:].strip().replace("[", chr(92) + "[")
+                if thinking_mode == "compact" and len(thought) > 180:
+                    thought = thought[:179] + "…"
+                formatted = f"  [#6fa86f]Thinking:[/#6fa86f] [dim]{thought}[/dim]"
+            elif line.startswith(("🏁 ", "🔢 ")):
+                return
             else:
                 return
             self._stream_lines.append(formatted)
@@ -2579,6 +2589,21 @@ def create_textual_app(container, chat_id: int = 0):
                 ok, output = run_git_commit(cwd=str(session.file_mgr.get_working_dir()), message=message)
                 self._add_timeline(f"Commit: {output[:72]}")
                 self._push_output(f"[{'green' if ok else 'yellow'}]{output}[/{'green' if ok else 'yellow'}]")
+                return
+            if command == "/thinking":
+                if not arg:
+                    self._push_output(
+                        f"[bold]Thinking[/bold]\n\nCurrent mode: [cyan]{get_thinking_mode(session)}[/cyan]\n\n"
+                        "[dim]Usage: /thinking off|compact|full[/dim]"
+                    )
+                    return
+                message = set_thinking_mode(session, arg)
+                if message.startswith("Thinking mode set"):
+                    container.save_session(session)
+                    self._add_timeline(message)
+                    self._append_stream(f"  [green]{message}[/green]")
+                else:
+                    self._append_stream(f"  [yellow]{message}[/yellow]")
                 return
             if command == "/model":
                 color = self._provider_color()

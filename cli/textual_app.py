@@ -17,6 +17,7 @@ from providers import (
     provider_default_model,
 )
 from cli.session_actions import get_thinking_mode, set_thinking_mode
+from cli.thinking import append_thinking_chunk, render_thinking_text
 
 _HTML_TAG = _re.compile(r"<[^>]+>")
 
@@ -980,6 +981,8 @@ def create_textual_app(container, chat_id: int = 0):
             self._text_buffer: str = ""       # incomplete current line accumulator
             self._text_in_code: bool = False  # inside a ``` code fence?
             self._text_has_partial: bool = False  # is the last _stream_lines entry an unfinished partial?
+            self._thinking_buffer: str = ""   # consecutive 🧠 chunks accumulator
+            self._thinking_line_idx: int = -1 # index of current thinking line in _stream_lines
             self._awaiting_plan_confirm: bool = False  # True after /plan — next Enter runs or cancels
             self._password_modal_open: bool = False  # True while PasswordModal is on screen
 
@@ -1818,6 +1821,26 @@ def create_textual_app(container, chat_id: int = 0):
                 self.call_after_refresh(self._scroll_to_bottom)
                 return
 
+            if line.startswith("🧠 "):
+                if thinking_mode == "off":
+                    return
+                self._thinking_buffer = append_thinking_chunk(self._thinking_buffer, line)
+                rendered = render_thinking_text(self._thinking_buffer, thinking_mode, rich=True)
+                if not rendered:
+                    return
+                if 0 <= self._thinking_line_idx < len(self._stream_lines):
+                    self._stream_lines[self._thinking_line_idx] = rendered
+                else:
+                    self._stream_lines.append(rendered)
+                    self._thinking_line_idx = len(self._stream_lines) - 1
+                self._stream_lines = self._stream_lines[-5000:]
+                self.query_one("#stream", StreamWidget).update("\n".join(self._stream_lines))
+                self.call_after_refresh(self._scroll_to_bottom)
+                return
+
+            self._thinking_buffer = ""
+            self._thinking_line_idx = -1
+
             # Any non-text event ends the current text run
             self._last_stream_was_text = False
 
@@ -1859,13 +1882,6 @@ def create_textual_app(container, chat_id: int = 0):
                 formatted = f"  [dim]{line[2:].strip().replace('[', chr(92) + '[')}[/dim]"
             elif line.startswith(("❌ ", "✅ ")):
                 formatted = f"  [dim]{line.replace('[', chr(92) + '[')}[/dim]"
-            elif line.startswith("🧠 "):
-                if thinking_mode == "off":
-                    return
-                thought = line[2:].strip().replace("[", chr(92) + "[")
-                if thinking_mode == "compact" and len(thought) > 180:
-                    thought = thought[:179] + "…"
-                formatted = f"  [#6fa86f]Thinking:[/#6fa86f] [dim]{thought}[/dim]"
             elif line.startswith(("🏁 ", "🔢 ")):
                 return
             else:
@@ -3107,6 +3123,8 @@ def create_textual_app(container, chat_id: int = 0):
             self._text_buffer = ""
             self._text_in_code = False
             self._text_has_partial = False
+            self._thinking_buffer = ""
+            self._thinking_line_idx = -1
             self._show_status_line(provider_name)
 
             def stream_event_callback(line: str):

@@ -3,6 +3,8 @@ import subprocess as _subprocess
 import time as _time
 from pathlib import Path
 
+from cli.thinking import extract_thinking_chunk, render_thinking_text
+
 from providers import provider_default_model
 
 try:
@@ -821,10 +823,9 @@ class CliUi:
             if line.startswith("💬 "):
                 print("  " + line[2:].strip())
             elif line.startswith("🧠 ") and thinking_mode != "off":
-                thought = line[2:].strip()
-                if thinking_mode == "compact" and len(thought) > 140:
-                    thought = thought[:139] + "…"
-                print(f"  Thinking: {thought}")
+                rendered = render_thinking_text(extract_thinking_chunk(line), thinking_mode, rich=False)
+                if rendered:
+                    print(rendered)
             elif line.startswith(("🔧", "⚙️", "📂", "✏️", "👁️", "🐚", "🏁")):
                 print("  " + line)
             return
@@ -832,12 +833,9 @@ class CliUi:
         if line.startswith("💬 "):
             self.console.print("  " + line[2:].strip())
         elif line.startswith("🧠 "):
-            if thinking_mode == "off":
-                return
-            thought = line[2:].strip()
-            if thinking_mode == "compact" and len(thought) > 180:
-                thought = thought[:179] + "…"
-            self.console.print(f"  [#6fa86f]Thinking:[/] [dim]{thought}[/dim]")
+            rendered = render_thinking_text(extract_thinking_chunk(line), thinking_mode, rich=True)
+            if rendered:
+                self.console.print(rendered)
         elif line.startswith("🔧 Использую: ") or line.startswith("🔧 "):
             tool = line.split(": ", 1)[-1].strip() if ": " in line else line[2:].strip()
             self.console.print(f"  [{style}]✦[/] [bright_black]{tool}[/bright_black]")

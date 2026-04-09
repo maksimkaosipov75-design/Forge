@@ -17,6 +17,7 @@ from cli.session_actions import (
     run_review_pass,
     set_thinking_mode,
 )
+from cli.thinking import append_thinking_chunk, render_thinking_text
 from providers import (
     get_provider_definition,
     is_supported_provider,
@@ -67,6 +68,19 @@ class BridgeShell:
         self.remote = RemoteControlManager()
         self.running = True
         self.home_visible = False
+
+    def _flush_thinking_buffer(self, provider_name: str, session, thinking_state: dict[str, str]) -> None:
+        rendered = render_thinking_text(
+            thinking_state["buffer"],
+            get_thinking_mode(session),
+            rich=bool(self.ui.console),
+        )
+        thinking_state["buffer"] = ""
+        if rendered:
+            if self.ui.console:
+                self.ui.console.print(rendered)
+            else:
+                print(rendered)
 
     async def run(self):
         self.show_home()
@@ -498,6 +512,7 @@ class BridgeShell:
 
         live, start_time, state = self.ui.start_status_bar(provider_name)
         task_done = asyncio.Event()
+        thinking_state = {"buffer": ""}
 
         async def tick():
             while not task_done.is_set():
@@ -512,6 +527,12 @@ class BridgeShell:
                 state["action"] = action
             if line.startswith("💬 "):
                 state["tokens"] += max(1, len(line[2:]) // 4)
+            if line.startswith("🧠 "):
+                thinking_state["buffer"] = append_thinking_chunk(thinking_state["buffer"], line)
+                self.ui.refresh_status_bar(live, start_time, state, provider_name)
+                return
+            if thinking_state["buffer"]:
+                self._flush_thinking_buffer(provider_name, session, thinking_state)
             self.ui.print_stream_event(line, provider_name, thinking_mode=get_thinking_mode(session))
             self.ui.refresh_status_bar(live, start_time, state, provider_name)
 
@@ -524,6 +545,8 @@ class BridgeShell:
                 stream_event_callback=stream_event_callback,
             )
         finally:
+            if thinking_state["buffer"]:
+                self._flush_thinking_buffer(provider_name, session, thinking_state)
             task_done.set()
             try:
                 await asyncio.wait_for(timer, timeout=1.0)
@@ -575,6 +598,7 @@ class BridgeShell:
         current_step = {"index": -1}
         live, start_time, state = self.ui.start_status_bar(session.current_provider)
         orch_done = asyncio.Event()
+        thinking_state = {"buffer": ""}
 
         async def tick():
             while not orch_done.is_set():
@@ -623,6 +647,12 @@ class BridgeShell:
             if line.startswith("💬 "):
                 state["tokens"] += max(1, len(line[2:]) // 4)
             active = session.active_provider or session.current_provider
+            if line.startswith("🧠 "):
+                thinking_state["buffer"] = append_thinking_chunk(thinking_state["buffer"], line)
+                self.ui.refresh_status_bar(live, start_time_ref[0], state, active)
+                return
+            if thinking_state["buffer"]:
+                self._flush_thinking_buffer(active, session, thinking_state)
             self.ui.print_stream_event(line, active, thinking_mode=get_thinking_mode(session))
             self.ui.refresh_status_bar(live, start_time_ref[0], state, active)
 
@@ -634,6 +664,9 @@ class BridgeShell:
                 stream_event_callback=stream_event_callback,
             )
         finally:
+            if thinking_state["buffer"]:
+                active = session.active_provider or session.current_provider
+                self._flush_thinking_buffer(active, session, thinking_state)
             orch_done.set()
             try:
                 await asyncio.wait_for(timer, timeout=1.0)

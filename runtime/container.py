@@ -1,3 +1,4 @@
+import asyncio
 import os as _os
 from pathlib import Path
 
@@ -12,11 +13,12 @@ from process_manager import (
     QwenProcessManager,
     create_process_manager,
 )
+from providers import get_provider_definition, is_api_provider, normalize_provider_name, provider_default_model
+from runtime.api_backends import OpenRouterExecutionBackend
 from runtime.executor import ExecutionService
 from runtime.orchestrator_service import OrchestratorService
 from session_store import SessionStore
 from task_models import ChatSession, ProviderRuntime, ProviderStats, TaskResult, TaskRun
-from providers import normalize_provider_name
 
 
 class RuntimeContainer:
@@ -45,6 +47,7 @@ class RuntimeContainer:
             "qwen": settings.QWEN_CLI_PATH,
             "codex": settings.CODEX_CLI_PATH,
             "claude": settings.CLAUDE_CLI_PATH,
+            "openrouter": settings.OPENROUTER_BASE_URL,
         }
         if manager is not None:
             self.provider_paths[self.default_provider] = manager.cli_path
@@ -77,14 +80,29 @@ class RuntimeContainer:
         model_name: str = "",
     ) -> ProviderRuntime:
         runtime_parser = provided_parser or LogParser()
-        runtime_manager = provided_manager or create_process_manager(
-            provider=provider_name,
-            cli_path=self.provider_paths[provider_name],
-            on_output=lambda line, target_parser=runtime_parser: target_parser.feed(line),
-            model_name=model_name,
-        )
+        normalized_provider = normalize_provider_name(provider_name)
+        selected_model = model_name or provider_default_model(normalized_provider)
+        if provided_manager is not None:
+            runtime_manager = provided_manager
+        elif is_api_provider(normalized_provider):
+            definition = get_provider_definition(normalized_provider)
+            runtime_manager = OpenRouterExecutionBackend(
+                api_key=self.settings.OPENROUTER_API_KEY,
+                base_url=self.settings.OPENROUTER_BASE_URL,
+                on_output=lambda line, target_parser=runtime_parser: target_parser.feed(line),
+                model_name=selected_model or definition.default_model,
+                timeout=self.settings.OPENROUTER_HTTP_TIMEOUT,
+                app_name="Forge",
+            )
+        else:
+            runtime_manager = create_process_manager(
+                provider=normalized_provider,
+                cli_path=self.provider_paths[normalized_provider],
+                on_output=lambda line, target_parser=runtime_parser: target_parser.feed(line),
+                model_name=selected_model,
+            )
         return ProviderRuntime(
-            provider=provider_name,
+            provider=normalized_provider,
             manager=runtime_manager,
             parser=runtime_parser,
             health=runtime_manager.health,
@@ -119,10 +137,28 @@ class RuntimeContainer:
     def get_runtime(self, session: ChatSession, provider_name: str) -> ProviderRuntime:
         runtime = session.runtimes.get(provider_name)
         if runtime is None:
-            model = session.provider_models.get(provider_name, "")
+            model = self.resolve_provider_model(session, provider_name)
             runtime = self.build_runtime(provider_name, model_name=model)
             session.runtimes[provider_name] = runtime
         return runtime
+
+    def resolve_provider_model(self, session: ChatSession, provider_name: str) -> str:
+        configured = session.provider_models.get(provider_name, "").strip()
+        return configured or provider_default_model(provider_name)
+
+    def provider_is_ready(self, provider_name: str) -> tuple[bool, str]:
+        normalized = normalize_provider_name(provider_name)
+        if normalized == "openrouter" and not self.settings.OPENROUTER_API_KEY.strip():
+            return False, "OPENROUTER_API_KEY is not configured."
+        return True, ""
+
+    def reset_runtime(self, session: ChatSession, provider_name: str):
+        runtime = session.runtimes.pop(provider_name, None)
+        if runtime and runtime.manager.is_running:
+            try:
+                asyncio.create_task(runtime.manager.stop())
+            except Exception:
+                pass
 
     async def ensure_runtime_started(self, session: ChatSession, provider_name: str) -> ProviderRuntime:
         runtime = self.get_runtime(session, provider_name)
@@ -144,9 +180,12 @@ class RuntimeContainer:
         return AIOrchestrator(available, fallback)
 
     def pick_planning_provider(self, session: ChatSession) -> str:
-        """Choose the best provider for AI planning (prefers claude > qwen > codex)."""
-        for preferred in ("claude", "qwen", "codex"):
-            if preferred in self.provider_paths:
+        """Choose the best provider for AI planning (prefers openrouter > claude > qwen > codex)."""
+        for preferred in ("openrouter", "claude", "qwen", "codex"):
+            if preferred not in self.provider_paths:
+                continue
+            ready, _ = self.provider_is_ready(preferred)
+            if ready:
                 return preferred
         return session.current_provider
 

@@ -4,6 +4,7 @@ from pathlib import Path
 from time import monotonic
 from typing import Awaitable, Callable
 
+from providers import provider_transport
 from task_models import ProviderRuntime, TaskResult, utc_now_iso
 
 
@@ -46,6 +47,7 @@ class ExecutionService:
         work_dir = session.file_mgr.get_working_dir()
         session.last_task_result = TaskResult(provider=provider_name, prompt=prompt)
         runtime.last_file_state = await self.scan_dir(work_dir)
+        _, _, prev_total_in, prev_total_out = runtime.parser.get_token_usage()
         runtime.parser.clear_full_buffer()
 
         stream_queue: asyncio.Queue[str] = asyncio.Queue()
@@ -127,12 +129,21 @@ class ExecutionService:
             if path in runtime.last_file_state and current[path] > runtime.last_file_state[path]
         ]
         answer_text = runtime.parser.get_full_response() if returncode == 0 else ""
+        last_in, last_out, total_in, total_out = runtime.parser.get_token_usage()
+        run_total_in = max(0, total_in - prev_total_in)
+        run_total_out = max(0, total_out - prev_total_out)
         task_result = TaskResult(
             provider=provider_name,
+            model_name=getattr(runtime.manager, "model_name", "") or "",
+            transport=provider_transport(provider_name),
             prompt=prompt,
             answer_text=answer_text or "",
             new_files=new_files if returncode == 0 else [],
             changed_files=changed_files if returncode == 0 else [],
+            input_tokens=last_in,
+            output_tokens=last_out,
+            total_input_tokens=run_total_in,
+            total_output_tokens=run_total_out,
             exit_code=returncode,
             started_at=session.last_task_result.started_at,
             duration_ms=session.last_task_result.duration_ms,

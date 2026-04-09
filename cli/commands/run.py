@@ -13,6 +13,9 @@ async def handle(args, container, ui):
     if args.provider and not is_supported_provider(args.provider):
         raise SystemExit(f"Unsupported provider: {args.provider}")
     provider_name = normalize_provider_name(args.provider or session.current_provider)
+    ready, message = container.provider_is_ready(provider_name)
+    if not ready:
+        raise SystemExit(f"{provider_name}: {message}")
     runtime = await container.ensure_runtime_started(session, provider_name)
 
     last_status = {"text": ""}

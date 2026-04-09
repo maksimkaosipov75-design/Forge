@@ -375,8 +375,11 @@ class SessionStore:
             f"- Status: {task_run.status}",
             f"- Mode: {task_run.mode}",
             f"- Provider summary: {task_run.provider_summary or 'mixed'}",
+            f"- Model summary: {task_run.model_summary or 'n/a'}",
+            f"- Transport summary: {task_run.transport_summary or 'n/a'}",
             f"- Complexity: {task_run.complexity}",
             f"- Duration: {task_run.duration_text}",
+            f"- Tokens: {task_run.total_input_tokens} in / {task_run.total_output_tokens} out",
             f"- Working dir: {session.file_mgr.get_working_dir()}",
         ]
         if task_run.ai_plan_rationale:
@@ -392,9 +395,12 @@ class SessionStore:
                     f"### {item.subtask_id} · {item.title}",
                     "",
                     f"- Provider: {item.provider}{retry_note}",
+                    f"- Model: {item.model_name or 'default'}",
+                    f"- Transport: {item.transport or 'unknown'}",
                     f"- Status: {item.status}",
                     f"- Kind: {item.task_kind}",
                     f"- Duration: {item.duration_ms}ms",
+                    f"- Tokens: {item.input_tokens} in / {item.output_tokens} out",
                     "",
                 ])
                 if item.handoff_summary:
@@ -408,11 +414,23 @@ class SessionStore:
             for index, artifact in enumerate(task_run.handoff_artifacts, start=1):
                 lines.extend([f"### Artifact {index}", "", "```text", artifact[:6000], "```", ""])
         if task_run.synthesis_provider:
-            lines.extend(["## Synthesis", "", f"- Provider: {task_run.synthesis_provider}", ""])
+            lines.extend([
+                "## Synthesis", "",
+                f"- Provider: {task_run.synthesis_provider}",
+                f"- Model: {task_run.synthesis_model or 'default'}",
+                f"- Transport: {task_run.synthesis_transport or 'unknown'}",
+                "",
+            ])
             if task_run.synthesis_answer:
                 lines.extend(["```text", task_run.synthesis_answer[:8000], "```", ""])
         if task_run.review_provider:
-            lines.extend(["## Review", "", f"- Provider: {task_run.review_provider}", ""])
+            lines.extend([
+                "## Review", "",
+                f"- Provider: {task_run.review_provider}",
+                f"- Model: {task_run.review_model or 'default'}",
+                f"- Transport: {task_run.review_transport or 'unknown'}",
+                "",
+            ])
             if task_run.review_answer:
                 lines.extend(["```text", task_run.review_answer[:8000], "```", ""])
         if task_run.answer_text:

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import subprocess
 
+from providers import provider_default_model
+
 
 def extract_todos(answer_text: str) -> list[str]:
     todos: list[str] = []
@@ -104,7 +106,7 @@ def render_usage_lines(session, provider_paths: dict[str, str]) -> list[str]:
             [
                 "",
                 provider_name,
-                f"  model: {session.provider_models.get(provider_name, '') or 'default'}",
+                f"  model: {session.provider_models.get(provider_name, '').strip() or provider_default_model(provider_name) or 'default'}",
                 f"  tasks: {stats.total_tasks if stats else 0}",
                 f"  success: {stats.successful_tasks if stats else 0}",
                 f"  failed: {stats.failed_tasks if stats else 0}",
@@ -192,7 +194,13 @@ async def run_review_pass(container, session, review_focus: str = "") -> tuple[b
 
     source_provider = last_result.provider or session.current_provider
     review_provider = next(
-        (candidate for candidate in ("claude", "codex", "qwen") if candidate != source_provider and candidate in container.provider_paths),
+        (
+            candidate
+            for candidate in ("openrouter", "claude", "codex", "qwen")
+            if candidate != source_provider
+            and candidate in container.provider_paths
+            and container.provider_is_ready(candidate)[0]
+        ),
         session.current_provider,
     )
     runtime = await container.ensure_runtime_started(session, review_provider)

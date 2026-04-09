@@ -9,6 +9,14 @@ import subprocess as _subprocess
 import time as _time
 from pathlib import Path
 
+from providers import (
+    get_provider_definition,
+    is_supported_provider,
+    list_provider_models,
+    normalize_provider_name,
+    provider_default_model,
+)
+
 _HTML_TAG = _re.compile(r"<[^>]+>")
 
 # ---------------------------------------------------------------------------
@@ -74,6 +82,13 @@ _LANG_MAP = {
     "rs": "rust", "go": "go", "sh": "bash", "json": "json",
     "yaml": "yaml", "yml": "yaml", "toml": "toml", "md": "markdown",
     "html": "html", "css": "css", "sql": "sql", "nim": "nim",
+}
+
+_PROVIDER_COLORS = {
+    "qwen": "#b07cff",
+    "codex": "#6aa7ff",
+    "claude": "#ff9e57",
+    "openrouter": "#58c777",
 }
 
 
@@ -794,12 +809,7 @@ def create_textual_app(container, chat_id: int = 0):
                     pass
 
         def _provider_color(self) -> str:
-            mapping = {
-                "qwen": "#b07cff",
-                "codex": "#6aa7ff",
-                "claude": "#ff9e57",
-            }
-            return mapping.get(self.current_provider, "#6aa7ff")
+            return _PROVIDER_COLORS.get(self.current_provider, "#6aa7ff")
 
         def _dim_stream_history(self):
             """Dim all existing stream lines when a new session begins."""
@@ -972,11 +982,17 @@ def create_textual_app(container, chat_id: int = 0):
             # ── Static probe (no runtime yet) ─────────────────────────────────
             home = _PP.home()
 
-            # 1. Binary installed?
+            # 1. Provider-specific readiness checks
+            if name == "openrouter":
+                if _po.getenv("OPENROUTER_API_KEY"):
+                    return "ready  (env key)", "#44dd88"
+                return "no api key", "#ffaa44"
+
+            # 2. Binary installed?
             if not _sh.which(cli_path) and not _PP(cli_path).is_file():
                 return "not installed", "#666666"
 
-            # 2. Auth / credentials check (provider-specific)
+            # 3. Auth / credentials check (provider-specific)
             if name == "qwen":
                 creds_file = home / ".qwen" / "oauth_creds.json"
                 if not creds_file.exists():
@@ -1058,12 +1074,12 @@ def create_textual_app(container, chat_id: int = 0):
             ]
 
             # ── Providers ─────────────────────────────────────────────────────
-            prov_colors = {"qwen": "#b07cff", "codex": "#6aa7ff", "claude": "#ff9e57"}
+            prov_colors = _PROVIDER_COLORS
             prov_lines = [SEP, ""]
             for pname, pcli in container.provider_paths.items():
                 label, col = self._probe_provider_status(pname, pcli)
                 pcol = prov_colors.get(pname, color)
-                model_tag = session.provider_models.get(pname, "")
+                model_tag = session.provider_models.get(pname, "").strip() or provider_default_model(pname)
                 model_str = f"  [dim]{model_tag}[/dim]" if model_tag else ""
                 prov_lines.append(
                     f"  [{pcol}]{pname:<8}[/{pcol}]  [{col}]{label}[/{col}]{model_str}"
@@ -1170,12 +1186,8 @@ def create_textual_app(container, chat_id: int = 0):
             return f"  [{color}]◆[/{color}] [bold white]Forge[/bold white]  [dim]v0.1  ·  {self.current_provider}{mode_str}[/dim]"
 
         def _provider_specialties(self) -> str:
-            mapping = {
-                "qwen": "python · scripting · data",
-                "codex": "systems · backend · refactor",
-                "claude": "ui · ux · writing",
-            }
-            return mapping.get(self.current_provider, "general purpose")
+            definition = get_provider_definition(self.current_provider)
+            return " · ".join(definition.specialties) if definition.specialties else "general purpose"
 
         def _side_text(self) -> str:
             session = container.get_session(chat_id)
@@ -1277,24 +1289,18 @@ def create_textual_app(container, chat_id: int = 0):
             # the animated dot suffix takes over.
             action = self._status_state["action"].rstrip("…·. ")
             # Show model name next to provider when available
-            _DEFAULT_MODELS = {"qwen": "qwen3-coder-plus", "codex": "gpt-5.3-codex", "claude": "claude-sonnet-4-6"}
             session = container.get_session(chat_id)
             provider = self.current_provider
-            model_str = session.provider_models.get(provider, "")
+            model_str = session.provider_models.get(provider, "").strip()
             if not model_str:
                 runtime = session.runtimes.get(provider)
                 model_str = (runtime.manager.model_name if runtime and hasattr(runtime, "manager") else "") or ""
             if not model_str:
-                model_str = _DEFAULT_MODELS.get(provider, "")
+                model_str = provider_default_model(provider)
             model_part = f"  [dim]{model_str}[/dim]" if model_str else ""
             return f"[{color}]{spinner}[/] {action}[dim]{dot}[/dim]{model_part}  [dim]({time_str} · {tok_str} tokens)[/dim]"
 
         def _idle_status_renderable(self) -> str:
-            _DEFAULT_MODELS = {
-                "qwen":   "qwen3-coder-plus",
-                "codex":  "gpt-5.3-codex",
-                "claude": "claude-sonnet-4-6",
-            }
             session = container.get_session(chat_id)
             cwd = str(session.file_mgr.get_working_dir())
             from pathlib import Path as _PL
@@ -1305,12 +1311,12 @@ def create_textual_app(container, chat_id: int = 0):
             provider = self.current_provider
             color = self._provider_color()
             # Model name: explicit override → runtime actual → provider default
-            model_str = session.provider_models.get(provider, "")
+            model_str = session.provider_models.get(provider, "").strip()
             if not model_str:
                 runtime = session.runtimes.get(provider)
                 model_str = (runtime.manager.model_name if runtime and hasattr(runtime, "manager") else "") or ""
             if not model_str:
-                model_str = _DEFAULT_MODELS.get(provider, "")
+                model_str = provider_default_model(provider)
             model_part = f"  [dim]·[/dim]  {model_str}" if model_str else ""
             ctx = self._ctx_input_tokens
             ctx_part = f"  [dim]·[/dim]  ctx {ctx // 1000}k" if ctx >= 1000 else (f"  [dim]·[/dim]  ctx {ctx}" if ctx else "")
@@ -1944,9 +1950,9 @@ def create_textual_app(container, chat_id: int = 0):
 
             # @provider: prefix — run with a specific provider without permanently switching
             provider_override: str | None = None
-            m_prov = _re.match(r'^@(qwen|codex|claude):\s*', value, _re.IGNORECASE)
+            available_names = "|".join(_re.escape(name) for name in container.provider_paths)
+            m_prov = _re.match(rf'^@({available_names}):\s*', value, _re.IGNORECASE)
             if m_prov:
-                from providers import normalize_provider_name, is_supported_provider
                 candidate = normalize_provider_name(m_prov.group(1))
                 if is_supported_provider(candidate):
                     provider_override = candidate
@@ -2243,46 +2249,21 @@ def create_textual_app(container, chat_id: int = 0):
                 self._push_output(f"[{'green' if ok else 'yellow'}]{output}[/{'green' if ok else 'yellow'}]")
                 return
             if command == "/model":
-                # Known model catalogs per provider
-                _MODEL_CATALOG: dict[str, list[tuple[str, str]]] = {
-                    "qwen": [
-                        ("qwen3-coder-plus",             "Qwen3 best quality  [default]"),
-                        ("qwen3-coder",                  "Qwen3 balanced"),
-                        ("qwen3-235b-a22b",              "Qwen3 open-weights 235B MoE"),
-                        ("qwen3-32b",                    "Qwen3 open-weights 32B"),
-                        ("qwen-coder-plus",              "Qwen2.5 best quality"),
-                        ("qwen-coder-turbo",             "Qwen2.5 fast balanced"),
-                    ],
-                    "codex": [
-                        ("gpt-5.3-codex",      "latest frontier agentic  [default]"),
-                        ("gpt-5.4",            "latest frontier agentic model"),
-                        ("gpt-5.2-codex",      "frontier agentic coding model"),
-                        ("gpt-5.1-codex-max",  "deep and fast reasoning"),
-                        ("gpt-5.2",            "frontier model — knowledge, reasoning, coding"),
-                        ("gpt-5.1-codex-mini", "cheaper, faster, less capable"),
-                    ],
-                    "claude": [
-                        ("claude-sonnet-4-6",            "Claude Sonnet 4.6  [default]"),
-                        ("claude-opus-4-6",              "Claude Opus 4.6 — highest quality"),
-                        ("claude-haiku-4-5-20251001",    "Claude Haiku 4.5 — fastest"),
-                        ("sonnet",                       "alias → latest sonnet"),
-                        ("opus",                         "alias → latest opus"),
-                        ("haiku",                        "alias → latest haiku"),
-                    ],
-                }
                 color = self._provider_color()
 
                 # /model — show all providers
                 if not arg:
                     lines = ["[bold]Active models[/bold]", ""]
                     for pname in container.provider_paths:
-                        cur = session.provider_models.get(pname, "")
+                        cur = session.provider_models.get(pname, "").strip()
                         runtime = session.runtimes.get(pname)
                         actual = runtime.manager.model_name if (runtime and hasattr(runtime, "manager")) else ""
-                        display = cur or actual or "[dim]default[/dim]"
-                        lines.append(f"  [{color}]{pname:<10}[/{color}]  {display}")
-                        catalog = _MODEL_CATALOG.get(pname, [])
-                        for mname, mdesc in catalog:
+                        display = cur or actual or provider_default_model(pname) or "[dim]default[/dim]"
+                        pcolor = _PROVIDER_COLORS.get(pname, color)
+                        lines.append(f"  [{pcolor}]{pname:<10}[/{pcolor}]  {display}")
+                        for item in list_provider_models(pname):
+                            mname = item.name
+                            mdesc = item.label
                             marker = "▶" if (cur or actual) == mname else " "
                             lines.append(f"    [dim]{marker} {mname:<36} {mdesc}[/dim]")
                         lines.append("")
@@ -2303,14 +2284,16 @@ def create_textual_app(container, chat_id: int = 0):
 
                 if not new_model:
                     # Show models for that provider
-                    cur = session.provider_models.get(target_provider, "")
+                    cur = session.provider_models.get(target_provider, "").strip()
                     lines = [f"[bold]{target_provider} models[/bold]", ""]
-                    for mname, mdesc in _MODEL_CATALOG.get(target_provider, []):
+                    for item in list_provider_models(target_provider):
+                        mname = item.name
+                        mdesc = item.label
                         marker = "▶" if cur == mname else " "
                         style = "bold" if cur == mname else "dim"
                         lines.append(f"  [{style}]{marker} {mname:<38} {mdesc}[/{style}]")
                     lines.append("")
-                    lines.append(f"[dim]Current: {cur or 'provider default'}[/dim]")
+                    lines.append(f"[dim]Current: {cur or provider_default_model(target_provider) or 'provider default'}[/dim]")
                     lines.append(f"[dim]/model {target_provider} <model>   to switch[/dim]")
                     self._push_output("\n".join(lines))
                     return
@@ -2320,18 +2303,14 @@ def create_textual_app(container, chat_id: int = 0):
                     new_model = ""
 
                 session.provider_models[target_provider] = new_model
+                container.reset_runtime(session, target_provider)
                 container.save_session(session)
 
-                # Rebuild the runtime for this provider so the next run uses the new model
-                old_runtime = session.runtimes.pop(target_provider, None)
-                if old_runtime and old_runtime.manager.is_running:
-                    import asyncio as _asyncio
-                    _asyncio.create_task(old_runtime.manager.stop())
-
-                label = new_model if new_model else "default"
+                label = new_model if new_model else provider_default_model(target_provider) or "default"
                 self._add_timeline(f"Model {target_provider} → {label}")
+                target_color = _PROVIDER_COLORS.get(target_provider, color)
                 self._push_output(
-                    f"[{color}]✓[/{color}]  [{color}]{target_provider}[/{color}] model set to [bold]{label}[/bold]\n"
+                    f"[{color}]✓[/{color}]  [{target_color}]{target_provider}[/{target_color}] model set to [bold]{label}[/bold]\n"
                     f"[dim]  The new model will be used on the next prompt.[/dim]"
                 )
                 # Refresh welcome screen so the model shows there too
@@ -2392,12 +2371,20 @@ def create_textual_app(container, chat_id: int = 0):
                 self._push_output(self._welcome_text())
                 return
             if command == "/providers":
-                self._push_output(
-                    "\n".join(
-                        f"{name} · {path}"
-                        for name, path in container.provider_paths.items()
+                lines = ["[bold]Providers[/bold]", ""]
+                for name, path in container.provider_paths.items():
+                    definition = get_provider_definition(name)
+                    default_model = provider_default_model(name) or "default"
+                    lines.append(
+                        f"[{_PROVIDER_COLORS.get(name, self._provider_color())}]{name}[/{_PROVIDER_COLORS.get(name, self._provider_color())}]"
+                        f"  [dim][{definition.transport}][/dim]  {path}"
                     )
-                )
+                    lines.append(f"  [dim]default_model: {default_model}[/dim]")
+                    lines.append(f"  [dim]specialties: {', '.join(definition.specialties)}[/dim]")
+                    if definition.available_models:
+                        lines.append(f"  [dim]models: {len(definition.available_models)} curated[/dim]")
+                    lines.append("")
+                self._push_output("\n".join(lines).rstrip())
                 return
             if command == "/status":
                 self._add_timeline("Viewed status.")
@@ -2447,6 +2434,7 @@ def create_textual_app(container, chat_id: int = 0):
                 self._push_output(
                     "\n".join(
                         f"{index}. {run.status_emoji} {run.mode} [{run.provider_summary or 'mixed'}]"
+                        + (f" · {run.model_summary}" if run.model_summary else "")
                         for index, run in enumerate(runs, start=1)
                     )
                 )
@@ -2474,15 +2462,26 @@ def create_textual_app(container, chat_id: int = 0):
                     details.append(f"strategy: {run.strategy}")
                 if run.provider_summary:
                     details.append(f"providers: {run.provider_summary}")
+                if run.model_summary:
+                    details.append(f"models: {run.model_summary}")
+                if run.transport_summary:
+                    details.append(f"transport: {run.transport_summary}")
+                if run.total_input_tokens or run.total_output_tokens:
+                    details.append(f"tokens: {run.total_input_tokens} in / {run.total_output_tokens} out")
                 if run.artifact_file:
                     details.append(f"artifact: {run.artifact_file}")
                 if run.subtasks:
                     details.append("")
                     details.append("subtasks:")
-                    details.extend(
-                        f"- {item.subtask_id}: {item.title} [{item.provider}] ({item.status})"
-                        for item in run.subtasks
-                    )
+                    for item in run.subtasks:
+                        sub_detail = item.provider
+                        if item.model_name:
+                            sub_detail += f" · {item.model_name}"
+                        if item.transport:
+                            sub_detail += f" [{item.transport}]"
+                        if item.input_tokens or item.output_tokens:
+                            sub_detail += f" · {item.input_tokens}/{item.output_tokens} tok"
+                        details.append(f"- {item.subtask_id}: {item.title} [{sub_detail}] ({item.status})")
                 self._push_output("\n".join(details))
                 return
             if command == "/artifacts":
@@ -2531,7 +2530,7 @@ def create_textual_app(container, chat_id: int = 0):
                 eta = container.orchestrator_service.estimate_plan_eta(plan, session)
                 cached_tag = "  [dim][cached][/dim]" if "[cached]" in plan.ai_rationale else ""
                 color = self._provider_color()
-                prov_colors = {"qwen": "#b07cff", "codex": "#6aa7ff", "claude": "#ff9e57"}
+                prov_colors = _PROVIDER_COLORS
                 panel_lines = self._plan_panel_lines(
                     strategy=plan.strategy,
                     complexity=f"{plan.complexity}{ai_tag}{cached_tag}",
@@ -2810,7 +2809,7 @@ def create_textual_app(container, chat_id: int = 0):
             self._status_state.update({"action": "Executing…", "tokens": 0})
             self._last_stream_was_text = False
 
-            _prov_colors = {"qwen": "#b07cff", "codex": "#6aa7ff", "claude": "#ff9e57"}
+            _prov_colors = _PROVIDER_COLORS
 
             async def status_callback(text: str):
                 if not text:

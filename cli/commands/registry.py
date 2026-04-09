@@ -1,8 +1,9 @@
-from cli.commands import artifacts, orchestrate, plan, providers, remote_control, run, runs, show
+from cli.commands import artifacts, model, orchestrate, plan, providers, remote_control, run, runs, show
 
 
 def register_commands(subparsers):
     providers.register(subparsers)
+    model.register(subparsers)
     plan.register(subparsers)
     run.register(subparsers)
     orchestrate.register(subparsers)

@@ -15,10 +15,16 @@ def utc_now_iso() -> str:
 @dataclass
 class TaskResult:
     provider: str = "qwen"
+    model_name: str = ""
+    transport: str = "cli"
     prompt: str = ""
     answer_text: str = ""
     new_files: list[str] = field(default_factory=list)
     changed_files: list[str] = field(default_factory=list)
+    input_tokens: int = 0
+    output_tokens: int = 0
+    total_input_tokens: int = 0
+    total_output_tokens: int = 0
     exit_code: int = 0
     started_at: str = field(default_factory=utc_now_iso)
     finished_at: str = ""
@@ -67,6 +73,8 @@ class SubtaskRun:
     subtask_id: str
     title: str
     provider: str
+    model_name: str = ""
+    transport: str = "cli"
     task_kind: str = "general"
     description: str = ""
     depends_on: list[str] = field(default_factory=list)
@@ -76,6 +84,8 @@ class SubtaskRun:
     started_at: str = ""
     finished_at: str = ""
     duration_ms: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
     new_files: list[str] = field(default_factory=list)
     changed_files: list[str] = field(default_factory=list)
     handoff_summary: str = ""
@@ -96,16 +106,26 @@ class TaskRun:
     strategy: str = ""
     complexity: str = "simple"
     provider_summary: str = ""
+    model_summary: str = ""
+    transport_summary: str = ""
     subtasks: list[SubtaskRun] = field(default_factory=list)
     started_at: str = field(default_factory=utc_now_iso)
     finished_at: str = ""
     duration_ms: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    total_input_tokens: int = 0
+    total_output_tokens: int = 0
     answer_text: str = ""
     error_text: str = ""
     synthesis_provider: str = ""
+    synthesis_model: str = ""
+    synthesis_transport: str = ""
     synthesis_prompt: str = ""
     synthesis_answer: str = ""
     review_provider: str = ""
+    review_model: str = ""
+    review_transport: str = ""
     review_prompt: str = ""
     review_answer: str = ""
     handoff_artifacts: list[str] = field(default_factory=list)
@@ -158,12 +178,16 @@ class TaskRun:
             subtask_id="single",
             title="Single-agent execution",
             provider=task_result.provider,
+            model_name=task_result.model_name,
+            transport=task_result.transport,
             status="success" if task_result.exit_code == 0 else "failed",
             answer_text=task_result.answer_text,
             error_text=task_result.error_text,
             started_at=task_result.started_at,
             finished_at=task_result.finished_at,
             duration_ms=task_result.duration_ms,
+            input_tokens=task_result.input_tokens,
+            output_tokens=task_result.output_tokens,
             new_files=list(task_result.new_files),
             changed_files=list(task_result.changed_files),
         )
@@ -175,10 +199,16 @@ class TaskRun:
             strategy="single-agent execution",
             complexity="simple",
             provider_summary=task_result.provider,
+            model_summary=task_result.model_name,
+            transport_summary=task_result.transport,
             subtasks=[subtask],
             started_at=task_result.started_at,
             finished_at=task_result.finished_at,
             duration_ms=task_result.duration_ms,
+            input_tokens=task_result.input_tokens,
+            output_tokens=task_result.output_tokens,
+            total_input_tokens=task_result.total_input_tokens,
+            total_output_tokens=task_result.total_output_tokens,
             answer_text=task_result.answer_text,
             error_text=task_result.error_text,
         )

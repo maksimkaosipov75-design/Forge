@@ -14,7 +14,13 @@ from cli.session_actions import (
     run_git_commit,
     run_review_pass,
 )
-from providers import is_supported_provider, normalize_provider_name
+from providers import (
+    get_provider_definition,
+    is_supported_provider,
+    list_provider_models,
+    normalize_provider_name,
+    provider_default_model,
+)
 
 _HTML_TAG = _re.compile(r"<[^>]+>")
 
@@ -128,7 +134,21 @@ class BridgeShell:
         if command == "/providers":
             self.leave_home_if_needed()
             for name, path in self.container.provider_paths.items():
-                self.ui.print_line(f"{name}\t{path}")
+                definition = get_provider_definition(name)
+                default_model = provider_default_model(name) or "default"
+                lines = [
+                    f"transport: {definition.transport}",
+                    f"default_model: {default_model}",
+                    f"specialties: {', '.join(definition.specialties)}",
+                    f"target: {path}",
+                ]
+                if definition.available_models:
+                    lines.append(f"models: {len(definition.available_models)} curated")
+                self.ui.print_block(f"Provider · {name}", "\n".join(lines), border_style=name)
+            return
+        if command == "/model":
+            self.leave_home_if_needed()
+            await self.handle_model(args)
             return
         if command == "/status":
             self.leave_home_if_needed()
@@ -236,6 +256,55 @@ class BridgeShell:
         session.current_provider = provider
         self.container.save_session(session)
         self.ui.print_notice(f"Default provider set to {provider}.", provider=provider, kind="success")
+
+    async def handle_model(self, args: list[str]):
+        session = self.container.get_session(self.chat_id)
+
+        if not args:
+            for provider_name in self.container.provider_paths:
+                self._print_model_block(session, provider_name)
+            return
+
+        provider_name = normalize_provider_name(args[0])
+        if provider_name not in self.container.provider_paths:
+            provider_name = session.current_provider
+            new_model = " ".join(args).strip()
+        else:
+            new_model = " ".join(args[1:]).strip()
+
+        if provider_name not in self.container.provider_paths:
+            self.ui.print_notice(f"Unsupported provider: {args[0]}", kind="error")
+            return
+
+        if not new_model:
+            self._print_model_block(session, provider_name)
+            return
+
+        if new_model.lower() == "default":
+            new_model = ""
+
+        session.provider_models[provider_name] = new_model
+        self.container.reset_runtime(session, provider_name)
+        self.container.save_session(session)
+        label = new_model or provider_default_model(provider_name) or "default"
+        self.ui.print_notice(
+            f"{provider_name} model set to {label}. The new model will be used on the next prompt.",
+            provider=provider_name,
+            kind="success",
+        )
+
+    def _print_model_block(self, session, provider_name: str):
+        current = session.provider_models.get(provider_name, "").strip()
+        resolved = current or provider_default_model(provider_name) or "default"
+        lines = [f"current: {resolved}"]
+        catalog = list_provider_models(provider_name)
+        if catalog:
+            lines.append("")
+            lines.append("available:")
+            for item in catalog:
+                marker = "*" if item.name == current else "-"
+                lines.append(f"  {marker} {item.name}  {item.label}")
+        self.ui.print_block(f"Model · {provider_name}", "\n".join(lines), border_style=provider_name)
 
     async def show_status(self):
         session = self.container.get_session(self.chat_id)

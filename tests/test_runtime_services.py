@@ -10,6 +10,30 @@ from task_models import ChatSession, SubtaskRun, TaskRun
 
 
 class OrchestratorServiceTests(unittest.TestCase):
+    def test_pick_healthy_provider_skips_api_when_cli_fallback_required(self):
+        class DummyContainer:
+            provider_paths = {"qwen": "qwen", "codex": "codex", "openrouter": "https://openrouter.ai/api/v1"}
+
+        session = type("S", (), {"runtimes": {}})()
+        service = OrchestratorService(DummyContainer(), execution_service=None)
+        service._is_provider_available = lambda _session, name: name != "qwen"
+
+        picked = service._pick_healthy_provider(session, "qwen", allow_api=False)
+
+        self.assertEqual(picked, "codex")
+
+    def test_find_alt_provider_skips_api_when_cli_fallback_required(self):
+        class DummyContainer:
+            provider_paths = {"qwen": "qwen", "openrouter": "https://openrouter.ai/api/v1", "claude": "claude"}
+
+        session = type("S", (), {"runtimes": {}})()
+        service = OrchestratorService(DummyContainer(), execution_service=None)
+        service._is_provider_available = lambda _session, name: name != "qwen"
+
+        picked = service._find_alt_provider(session, "qwen", allow_api=False)
+
+        self.assertEqual(picked, "claude")
+
     def test_find_retry_start_index_prefers_failed_subtask(self):
         run = TaskRun(
             run_id="run-1",

@@ -10,6 +10,7 @@ from runtime import RuntimeContainer
 
 COMMAND_MODULES = {
     "providers": "cli.commands.providers",
+    "model": "cli.commands.model",
     "plan": "cli.commands.plan",
     "run": "cli.commands.run",
     "orchestrate": "cli.commands.orchestrate",

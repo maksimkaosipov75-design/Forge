@@ -6,8 +6,15 @@ def register(subparsers):
 
 async def handle(args, container, ui):
     session = container.get_session(args.chat_id)
-    planner = container.build_planner(session)
-    plan = planner.build_plan(args.prompt)
+    planner = container.build_ai_planner(session)
+    planning_provider = container.pick_planning_provider(session)
+    planning_runtime = await container.ensure_runtime_started(session, planning_provider)
+    plan = await planner.build_plan(
+        args.prompt,
+        container.execution_service,
+        session,
+        planning_runtime,
+    )
     session.last_plan = plan
     container.save_session(session)
 

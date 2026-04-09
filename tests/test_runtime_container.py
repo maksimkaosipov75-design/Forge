@@ -2,7 +2,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from config import Settings
 from runtime import RuntimeContainer
+from runtime.api_backends import OpenRouterExecutionBackend
 
 
 class RuntimeContainerTests(unittest.TestCase):
@@ -16,6 +18,34 @@ class RuntimeContainerTests(unittest.TestCase):
             self.assertEqual(session.chat_id, 100)
             self.assertGreaterEqual(len(plan.subtasks), 2)
             self.assertIn("qwen", container.provider_paths)
+            self.assertIn("openrouter", container.provider_paths)
+
+    def test_build_runtime_for_openrouter_uses_api_backend(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            container = RuntimeContainer(sessions_root=Path(tmpdir))
+
+            runtime = container.build_runtime("openrouter")
+
+            self.assertEqual(runtime.provider, "openrouter")
+            self.assertIsInstance(runtime.manager, OpenRouterExecutionBackend)
+
+    def test_pick_planning_provider_prefers_openrouter_when_configured(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            settings = Settings()
+            settings.OPENROUTER_API_KEY = "test-key"
+            container = RuntimeContainer(settings=settings, sessions_root=Path(tmpdir))
+            session = container.get_session(100)
+
+            self.assertEqual(container.pick_planning_provider(session), "openrouter")
+
+    def test_pick_planning_provider_skips_openrouter_without_api_key(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            settings = Settings()
+            settings.OPENROUTER_API_KEY = ""
+            container = RuntimeContainer(settings=settings, sessions_root=Path(tmpdir))
+            session = container.get_session(100)
+
+            self.assertNotEqual(container.pick_planning_provider(session), "openrouter")
 
 
 if __name__ == "__main__":

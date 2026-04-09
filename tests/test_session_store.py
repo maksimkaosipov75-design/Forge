@@ -87,7 +87,19 @@ class SessionStoreTests(unittest.TestCase):
             root = Path(tmpdir)
             store = SessionStore(root)
             session = ChatSession(chat_id=7, file_mgr=FileManager(projects_file=str(root / "projects.json")))
-            run = TaskRun.from_task_result(TaskResult(prompt="hello", provider="qwen", answer_text="world"))
+            run = TaskRun.from_task_result(
+                TaskResult(
+                    prompt="hello",
+                    provider="qwen",
+                    model_name="qwen3-coder-plus",
+                    transport="cli",
+                    input_tokens=12,
+                    output_tokens=34,
+                    total_input_tokens=12,
+                    total_output_tokens=34,
+                    answer_text="world",
+                )
+            )
 
             artifact_path = Path(store.write_run_artifact(session, run))
 
@@ -95,6 +107,9 @@ class SessionStoreTests(unittest.TestCase):
             content = artifact_path.read_text(encoding="utf-8")
             self.assertIn("# Run", content)
             self.assertIn("Final Answer", content)
+            self.assertIn("Model summary", content)
+            self.assertIn("Transport summary", content)
+            self.assertIn("Tokens: 12 in / 34 out", content)
 
 
 if __name__ == "__main__":

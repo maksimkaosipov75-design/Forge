@@ -3,6 +3,8 @@ import subprocess as _subprocess
 import time as _time
 from pathlib import Path
 
+from providers import provider_default_model
+
 try:
     from rich.align import Align
     from rich.console import Console, Group
@@ -76,6 +78,7 @@ class CliUi:
             "qwen": "bright_magenta",
             "codex": "bright_cyan",
             "claude": "orange3",
+            "openrouter": "green3",
         }
         return mapping.get(provider, "cyan")
 
@@ -87,6 +90,7 @@ class CliUi:
             "qwen": "python · scripting · data",
             "codex": "systems · backend · refactor",
             "claude": "ui · ux · writing",
+            "openrouter": "api · planning · review",
         }
         return mapping.get(provider, "general purpose")
 
@@ -95,6 +99,7 @@ class CliUi:
             "qwen": "\033[95m",
             "codex": "\033[96m",
             "claude": "\033[33m",
+            "openrouter": "\033[92m",
         }
         return mapping.get(provider, "\033[36m")
 
@@ -368,9 +373,10 @@ class CliUi:
         self.print_block("Remote Control", "\n".join(lines), border_style="magenta")
 
     def print_session_status(self, session, remote_status):
+        current_model = session.provider_models.get(session.current_provider, "").strip() or provider_default_model(session.current_provider) or "default"
         lines = [
             f"provider: {session.current_provider}",
-            f"model: {session.provider_models.get(session.current_provider, '') or 'default'}",
+            f"model: {current_model}",
             f"active_provider: {session.active_provider or '-'}",
             f"working_dir: {session.file_mgr.get_working_dir()}",
             f"queued_tasks: {len(session.pending_tasks)}",
@@ -705,6 +711,10 @@ class CliUi:
             table.add_row("status", run.status)
             table.add_row("duration", run.duration_text)
             table.add_row("providers", run.provider_summary or "mixed")
+            if run.model_summary:
+                table.add_row("models", run.model_summary)
+            if run.transport_summary:
+                table.add_row("transport", run.transport_summary)
             self.console.print(table)
             return
 
@@ -713,18 +723,40 @@ class CliUi:
         self.print_line(f"   status: {run.status}")
         self.print_line(f"   duration: {run.duration_text}")
         self.print_line(f"   providers: {run.provider_summary or 'mixed'}")
+        if run.model_summary:
+            self.print_line(f"   models: {run.model_summary}")
+        if run.transport_summary:
+            self.print_line(f"   transport: {run.transport_summary}")
 
     def print_run_detail(self, run):
         self.print_kv("run_id", run.run_id)
         self.print_kv("status", run.status)
         self.print_kv("mode", run.mode)
         self.print_kv("complexity", run.complexity)
+        if run.provider_summary:
+            self.print_kv("providers", run.provider_summary)
+        if run.model_summary:
+            self.print_kv("models", run.model_summary)
+        if run.transport_summary:
+            self.print_kv("transport", run.transport_summary)
+        if run.total_input_tokens or run.total_output_tokens:
+            self.print_kv("tokens", f"{run.total_input_tokens} in / {run.total_output_tokens} out")
         if run.strategy:
             self.print_kv("strategy", run.strategy)
         if run.synthesis_provider:
-            self.print_kv("synthesis", run.synthesis_provider)
+            detail = run.synthesis_provider
+            if run.synthesis_model:
+                detail += f" · {run.synthesis_model}"
+            if run.synthesis_transport:
+                detail += f" [{run.synthesis_transport}]"
+            self.print_kv("synthesis", detail)
         if run.review_provider:
-            self.print_kv("review", run.review_provider)
+            detail = run.review_provider
+            if run.review_model:
+                detail += f" · {run.review_model}"
+            if run.review_transport:
+                detail += f" [{run.review_transport}]"
+            self.print_kv("review", detail)
         if run.artifact_file:
             self.print_kv("artifact", run.artifact_file)
         self.print_line()
@@ -734,7 +766,14 @@ class CliUi:
             self.print_line()
             self.print_line("subtasks:")
             for item in run.subtasks:
-                self.print_line(f"- {item.subtask_id}: {item.title} [{item.provider}] ({item.status})")
+                details = f"{item.provider}"
+                if item.model_name:
+                    details += f" · {item.model_name}"
+                if item.transport:
+                    details += f" [{item.transport}]"
+                if item.input_tokens or item.output_tokens:
+                    details += f" · {item.input_tokens}/{item.output_tokens} tok"
+                self.print_line(f"- {item.subtask_id}: {item.title} [{details}] ({item.status})")
         if run.review_answer:
             self.print_line()
             self.print_line("review:")

@@ -38,9 +38,15 @@ class TaskResultTests(unittest.TestCase):
     def test_task_run_from_task_result_preserves_files_and_status(self):
         result = TaskResult(
             provider="codex",
+            model_name="gpt-5.3-codex",
+            transport="cli",
             prompt="Refactor backend",
             new_files=["src/new.rs"],
             changed_files=["src/lib.rs"],
+            input_tokens=120,
+            output_tokens=240,
+            total_input_tokens=120,
+            total_output_tokens=240,
             exit_code=0,
             answer_text="Done",
         )
@@ -49,6 +55,10 @@ class TaskResultTests(unittest.TestCase):
 
         self.assertEqual(run.status, "success")
         self.assertEqual(run.provider_summary, "codex")
+        self.assertEqual(run.model_summary, "gpt-5.3-codex")
+        self.assertEqual(run.transport_summary, "cli")
+        self.assertEqual(run.total_input_tokens, 120)
+        self.assertEqual(run.total_output_tokens, 240)
         self.assertEqual(run.new_files, ["src/new.rs"])
         self.assertEqual(run.changed_files, ["src/lib.rs"])
         self.assertEqual(len(run.subtasks), 1)

@@ -7,6 +7,7 @@ from time import monotonic
 from typing import Awaitable, Callable
 
 from orchestrator import OrchestrationPlan
+from providers import is_api_provider
 from task_models import SubtaskRun, TaskResult, TaskRun, utc_now_iso
 
 
@@ -372,13 +373,15 @@ class OrchestratorService:
             return True  # no health info → assume available
         return runtime.health.is_available_now()
 
-    def _pick_healthy_provider(self, session, preferred: str) -> str:
+    def _pick_healthy_provider(self, session, preferred: str, allow_api: bool = True) -> str:
         """Return preferred provider if healthy, else first available alternative."""
         if self._is_provider_available(session, preferred):
             return preferred
         # Preferred is blocked — find an alternative
         for name in self.container.provider_paths:
             if name == preferred:
+                continue
+            if not allow_api and is_api_provider(name):
                 continue
             if self._is_provider_available(session, name):
                 runtime = session.runtimes.get(preferred)
@@ -390,10 +393,12 @@ class OrchestratorService:
                 return name
         return preferred  # no healthy alternative found, use preferred anyway
 
-    def _find_alt_provider(self, session, used: str) -> str | None:
+    def _find_alt_provider(self, session, used: str, allow_api: bool = True) -> str | None:
         """Find an alternative provider different from `used`."""
         for name in self.container.provider_paths:
             if name == used:
+                continue
+            if not allow_api and is_api_provider(name):
                 continue
             if self._is_provider_available(session, name):
                 return name
@@ -521,6 +526,8 @@ class OrchestratorService:
                 subtask_id=preserved.subtask_id,
                 title=preserved.title,
                 provider=preserved.provider,
+                model_name=preserved.model_name,
+                transport=preserved.transport,
                 task_kind=preserved.task_kind,
                 description=preserved.description,
                 depends_on=list(preserved.depends_on),
@@ -530,6 +537,8 @@ class OrchestratorService:
                 started_at=preserved.started_at,
                 finished_at=preserved.finished_at,
                 duration_ms=preserved.duration_ms,
+                input_tokens=preserved.input_tokens,
+                output_tokens=preserved.output_tokens,
                 new_files=list(preserved.new_files),
                 changed_files=list(preserved.changed_files),
                 handoff_summary=preserved.handoff_summary,
@@ -614,6 +623,25 @@ class OrchestratorService:
                 session, plan, task_run, status_callback, stream_event_callback
             )
 
+        provider_parts = [item.provider for item in task_run.subtasks if item.provider]
+        model_parts = [item.model_name for item in task_run.subtasks if item.model_name]
+        transport_parts = [item.transport for item in task_run.subtasks if item.transport]
+        if task_run.synthesis_provider:
+            provider_parts.append(task_run.synthesis_provider)
+        if task_run.synthesis_model:
+            model_parts.append(task_run.synthesis_model)
+        if task_run.synthesis_transport:
+            transport_parts.append(task_run.synthesis_transport)
+        if task_run.review_provider:
+            provider_parts.append(task_run.review_provider)
+        if task_run.review_model:
+            model_parts.append(task_run.review_model)
+        if task_run.review_transport:
+            transport_parts.append(task_run.review_transport)
+        task_run.provider_summary = " -> ".join(dict.fromkeys(provider_parts)) or task_run.provider_summary
+        task_run.model_summary = " -> ".join(dict.fromkeys(model_parts))
+        task_run.transport_summary = " -> ".join(dict.fromkeys(transport_parts))
+
         # Clear checkpoint on success; keep it on failure for /recover
         if task_run.status == "success":
             self.container.session_store.clear_checkpoint(session.chat_id)
@@ -628,10 +656,16 @@ class OrchestratorService:
         last_provider = task_run.subtasks[-1].provider if task_run.subtasks else session.current_provider
         aggregate_result = TaskResult(
             provider=last_provider,
+            model_name=task_run.synthesis_model or (task_run.subtasks[-1].model_name if task_run.subtasks else ""),
+            transport=task_run.synthesis_transport or (task_run.subtasks[-1].transport if task_run.subtasks else "cli"),
             prompt=plan.prompt,
             answer_text=task_run.answer_text,
             new_files=task_run.new_files,
             changed_files=task_run.changed_files,
+            input_tokens=task_run.input_tokens,
+            output_tokens=task_run.output_tokens,
+            total_input_tokens=task_run.total_input_tokens,
+            total_output_tokens=task_run.total_output_tokens,
             exit_code=0 if task_run.status == "success" else 1,
             started_at=task_run.started_at,
             finished_at=task_run.finished_at,
@@ -704,7 +738,7 @@ class OrchestratorService:
         stream_event_callback,
     ) -> bool:
         """Execute one subtask with health-aware routing, per-subtask timeout, and one retry."""
-        provider_name = self._pick_healthy_provider(session, subtask.suggested_provider)
+        provider_name = self._pick_healthy_provider(session, subtask.suggested_provider, allow_api=False)
         is_first = index == 1 and not subtask_results
 
         # Collect already-touched files for context
@@ -736,7 +770,7 @@ class OrchestratorService:
 
         # Retry with alternative provider on failure
         if task_result.exit_code != 0:
-            alt = self._find_alt_provider(session, provider_name)
+            alt = self._find_alt_provider(session, provider_name, allow_api=False)
             if alt:
                 original_provider = provider_name
                 retry_count = 1
@@ -782,6 +816,8 @@ class OrchestratorService:
             subtask_id=subtask.subtask_id,
             title=subtask.title,
             provider=provider_name,
+            model_name=task_result.model_name,
+            transport=task_result.transport,
             task_kind=subtask.task_kind,
             description=subtask.description,
             depends_on=list(subtask.depends_on),
@@ -791,12 +827,18 @@ class OrchestratorService:
             started_at=task_result.started_at,
             finished_at=task_result.finished_at,
             duration_ms=task_result.duration_ms,
+            input_tokens=task_result.input_tokens,
+            output_tokens=task_result.output_tokens,
             new_files=list(task_result.new_files),
             changed_files=list(task_result.changed_files),
             handoff_summary=handoff_summary,
             retry_count=retry_count,
             original_provider=original_provider,
         ))
+        task_run.input_tokens += task_result.input_tokens
+        task_run.output_tokens += task_result.output_tokens
+        task_run.total_input_tokens += task_result.total_input_tokens
+        task_run.total_output_tokens += task_result.total_output_tokens
 
         # Persist checkpoint after every subtask so crashes can be recovered
         self.container.session_store.write_checkpoint(session, task_run)
@@ -839,6 +881,10 @@ class OrchestratorService:
             status_prefix=prefix,
             stream_event_callback=stream_event_callback,
         )
+        task_run.synthesis_model = result.model_name
+        task_run.synthesis_transport = result.transport
+        task_run.total_input_tokens += result.total_input_tokens
+        task_run.total_output_tokens += result.total_output_tokens
         if result.exit_code == 0 and result.answer_text.strip():
             task_run.synthesis_answer = result.answer_text
             task_run.answer_text = result.answer_text
@@ -878,6 +924,10 @@ class OrchestratorService:
             status_prefix=prefix,
             stream_event_callback=stream_event_callback,
         )
+        task_run.review_model = result.model_name
+        task_run.review_transport = result.transport
+        task_run.total_input_tokens += result.total_input_tokens
+        task_run.total_output_tokens += result.total_output_tokens
         if result.exit_code == 0 and result.answer_text.strip():
             task_run.review_answer = result.answer_text
             task_run.handoff_artifacts.append(self.build_handoff_summary(result, "Review"))
@@ -889,8 +939,8 @@ class OrchestratorService:
     # ------------------------------------------------------------------ #
 
     def _pick_synthesis_provider(self, session) -> str:
-        for preferred in ("claude", "qwen", "codex"):
-            if preferred in self.container.provider_paths:
+        for preferred in ("openrouter", "claude", "qwen", "codex"):
+            if preferred in self.container.provider_paths and self.container.provider_is_ready(preferred)[0]:
                 return preferred
         subtasks = getattr(session, "last_task_run", None)
         if subtasks and subtasks.subtasks:
@@ -898,7 +948,7 @@ class OrchestratorService:
         return session.current_provider
 
     def _pick_review_provider(self, session) -> str:
-        for preferred in ("codex", "claude", "qwen"):
-            if preferred in self.container.provider_paths:
+        for preferred in ("openrouter", "codex", "claude", "qwen"):
+            if preferred in self.container.provider_paths and self.container.provider_is_ready(preferred)[0]:
                 return preferred
         return session.current_provider

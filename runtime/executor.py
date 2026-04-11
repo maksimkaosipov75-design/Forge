@@ -14,6 +14,24 @@ log = logging.getLogger(__name__)
 StatusCallback = Callable[[str], Awaitable[None]]
 StatusFormatter = Callable[[str], str]
 
+_HISTORY_WINDOW = 6  # past turn pairs to send to API providers
+
+
+def _configure_api_manager(manager, session, current_prompt: str) -> None:
+    """Populate thinking_enabled and conversation_history on an API backend before use."""
+    thinking_mode = (session.ui_preferences or {}).get("thinking_mode", "compact").strip().lower()
+    manager.thinking_enabled = thinking_mode in ("compact", "full")
+
+    messages: list[dict] = []
+    for result in session.history[-_HISTORY_WINDOW:]:
+        user_text = (result.prompt or "").strip()
+        assistant_text = (result.answer_text or "").strip()
+        if user_text:
+            messages.append({"role": "user", "content": user_text})
+        if assistant_text:
+            messages.append({"role": "assistant", "content": assistant_text})
+    manager.conversation_history = messages
+
 
 # Directories whose contents are never authored by the user / AI agents.
 # Changes in these dirs during a task are noise (compilation, IDE indexing, …).
@@ -147,6 +165,9 @@ class ExecutionService:
                     await status_callback(text)
                 except Exception:
                     pass
+
+        if is_api_provider(provider_name):
+            _configure_api_manager(runtime.manager, session, prompt)
 
         async def run_agent():
             started_at = monotonic()

@@ -149,6 +149,9 @@ class OpenRouterExecutionBackend(BaseApiBackend):
         self.api_key = api_key
         self.base_url = base_url.rstrip("/")
         self.app_name = app_name
+        # Set by the executor before each send_command call.
+        self.thinking_enabled: bool = False
+        self.conversation_history: list[dict] = []
 
     @staticmethod
     def parse_sse_line(raw: str) -> tuple[list[str], str]:
@@ -198,6 +201,13 @@ class OpenRouterExecutionBackend(BaseApiBackend):
             delta = choice.get("delta")
             if not isinstance(delta, dict):
                 continue
+            # Some models (DeepSeek-R1, Qwen3, etc.) return reasoning as a
+            # top-level "reasoning" or "reasoning_content" field in the delta.
+            for reasoning_key in ("reasoning", "reasoning_content"):
+                reasoning_chunk = delta.get(reasoning_key)
+                if isinstance(reasoning_chunk, str) and reasoning_chunk:
+                    events.append(encode_forge_event("thinking", text=reasoning_chunk))
+                    break
             content = delta.get("content")
             if isinstance(content, str) and content:
                 text_delta += content
@@ -207,8 +217,8 @@ class OpenRouterExecutionBackend(BaseApiBackend):
                     if not isinstance(block, dict):
                         continue
                     btype = block.get("type", "")
-                    if btype == "thinking":
-                        thinking_text = block.get("thinking", "").strip()
+                    if btype in ("thinking", "reasoning"):
+                        thinking_text = (block.get("thinking") or block.get("reasoning") or "").strip()
                         if thinking_text:
                             events.append(encode_forge_event("thinking", text=thinking_text))
                     elif btype in ("text", ""):
@@ -220,15 +230,27 @@ class OpenRouterExecutionBackend(BaseApiBackend):
             events.append(f"💬 {text_delta}")
         return events, text_delta
 
+    def _build_messages(self, prompt: str) -> list[dict]:
+        """Build the messages array from conversation history + current prompt."""
+        messages: list[dict] = []
+        for entry in self.conversation_history:
+            if entry.get("role") and entry.get("content"):
+                messages.append({"role": entry["role"], "content": entry["content"]})
+        messages.append({"role": "user", "content": prompt})
+        return messages
+
     def _build_request(self, prompt: str, model_name: str) -> request.Request:
-        payload = {
+        messages = self._build_messages(prompt)
+        payload: dict = {
             "model": model_name,
             "stream": True,
             "stream_options": {"include_usage": True},
-            "messages": [
-                {"role": "user", "content": prompt},
-            ],
+            "messages": messages,
         }
+        if self.thinking_enabled:
+            # OpenRouter standard reasoning parameter — works for all
+            # reasoning-capable models (Qwen3, DeepSeek-R1, Claude, etc.)
+            payload["reasoning"] = {"effort": "high"}
         body = json.dumps(payload).encode("utf-8")
         req = request.Request(
             f"{self.base_url}/chat/completions",

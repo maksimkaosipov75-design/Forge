@@ -108,7 +108,7 @@ _DOT_FRAMES = ("·  ", "·· ", "···", "·· ")
 
 def _action_from_event(line: str) -> str | None:
     """Map a stream event to a short action label for the status line."""
-    if line.startswith("🔧 Использую: ") or line.startswith("🔧 "):
+    if line.startswith("🔧 Using: ") or line.startswith("🔧 "):
         tool = line.split(": ", 1)[-1].strip() if ": " in line else line[2:].strip()
         return (tool[:38] + "…") if len(tool) > 38 else tool + "…"
     if line.startswith(("✏️ ", "📂 ")):
@@ -121,7 +121,7 @@ def _action_from_event(line: str) -> str | None:
         return f"Reading {fname}…" if fname else "Reading…"
     if line.startswith("🐚 "):
         cmd = line[2:].strip()
-        for pfx in ("Запускаю: ", "Running: "):
+        for pfx in ("Running: ",):
             if cmd.startswith(pfx):
                 cmd = cmd[len(pfx):]
                 break
@@ -1868,12 +1868,12 @@ def create_textual_app(container, chat_id: int = 0):
             self._op_files = []
             self._op_line_idx = -1
 
-            if line.startswith("🔧 Использую: ") or line.startswith("🔧 "):
+            if line.startswith("🔧 Using: ") or line.startswith("🔧 "):
                 tool = line.split(": ", 1)[-1].strip() if ": " in line else line[2:].strip()
                 formatted = f"  [{color}]✦[/] [dim]{tool.replace('[', chr(92) + '[')}[/dim]"
             elif line.startswith("🐚 "):
                 cmd = line[2:].strip()
-                for pfx in ("Запускаю: ", "Running: "):
+                for pfx in ("Running: ",):
                     if cmd.startswith(pfx):
                         cmd = cmd[len(pfx):]
                         break
@@ -3266,16 +3266,16 @@ def create_textual_app(container, chat_id: int = 0):
                     return
                 clean = _strip_html(text).strip()
                 lowered = clean.lower()
-                if "шаг " in lowered and "агент:" in lowered:
+                if "step " in lowered and "agent:" in lowered:
                     # Parse 1-based step number directly from message to avoid
                     # incrementing on every periodic update_status_loop tick
-                    m_step = _re.search(r'шаг (\d+)/', lowered)
+                    m_step = _re.search(r'step (\d+)/', lowered)
                     if m_step:
                         next_index = min(int(m_step.group(1)) - 1, len(plan.subtasks) - 1)
                     else:
                         next_index = min(current_step["index"] + 1, max(0, len(plan.subtasks) - 1))
                     # Parse actual provider name from message for per-agent colour
-                    m_prov = _re.search(r'агент:\s*(\w+)', lowered)
+                    m_prov = _re.search(r'agent:s*(w+)', lowered)
                     prov_name = m_prov.group(1) if m_prov else ""
                     step_color = _prov_colors.get(prov_name, self._provider_color())
                     if next_index != current_step["index"]:
@@ -3297,7 +3297,7 @@ def create_textual_app(container, chat_id: int = 0):
                     # Periodic updates for the same step: just refresh status label
                     else:
                         self._status_state.update({"action": f"Step {next_index+1}/{len(plan.subtasks)}…"})
-                elif "собирает итог" in lowered:
+                elif "synthesizing" in lowered:
                     if not current_step.get("synthesis_shown"):
                         current_step["synthesis_shown"] = True
                         if 0 <= current_step["index"] < len(plan.subtasks):
@@ -3306,7 +3306,7 @@ def create_textual_app(container, chat_id: int = 0):
                             self._mark_orchestration_step(synthesis_idx, "running")
                         self._status_state.update({"action": "Synthesizing…", "tokens": 0, "start": _time.monotonic()})
                         self._append_stream("", "  [dim]" + "─  " * 14 + "[/dim]", f"[{color}]▶[/] [bold]Synthesis[/bold]")
-                elif "выполняет review" in lowered:
+                elif "reviewing" in lowered:
                     if not current_step.get("review_shown"):
                         current_step["review_shown"] = True
                         if will_synthesize:

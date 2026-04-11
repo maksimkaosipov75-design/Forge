@@ -58,10 +58,10 @@ class TaskResult:
             return "?"
         seconds = self.duration_ms / 1000
         if seconds < 60:
-            return f"{seconds:.1f}с"
+            return f"{seconds:.1f}s"
         minutes = int(seconds // 60)
         remainder = int(seconds % 60)
-        return f"{minutes}м {remainder}с"
+        return f"{minutes}m {remainder}s"
 
     @property
     def finished_or_started_at(self) -> str:
@@ -144,10 +144,10 @@ class TaskRun:
             return "?"
         seconds = self.duration_ms / 1000
         if seconds < 60:
-            return f"{seconds:.1f}с"
+            return f"{seconds:.1f}s"
         minutes = int(seconds // 60)
         remainder = int(seconds % 60)
-        return f"{minutes}м {remainder}с"
+        return f"{minutes}m {remainder}s"
 
     @property
     def touched_files(self) -> list[str]:

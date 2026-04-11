@@ -35,8 +35,8 @@ def _action_from_event(line: str) -> str | None:
     """Map a stream event line to a short status-bar action label."""
     if line.startswith("🔧 "):
         raw = line[len("🔧 "):]
-        if raw.startswith("Использую: "):
-            raw = raw[len("Использую: "):]
+        if raw.startswith("Using: "):
+            raw = raw[len("Using: "):]
         short = (raw[:40] + "…") if len(raw) > 40 else raw
         return f"● {short}"
     if line.startswith(("✏️ ", "📂 ")):
@@ -49,7 +49,7 @@ def _action_from_event(line: str) -> str | None:
         return f"○ Read {name}"
     if line.startswith("🐚 "):
         cmd = line[3:].strip()
-        for pfx in ("Запускаю: ", "Запускаю:", "Running: "):
+        for pfx in ("Running: ",):
             if cmd.startswith(pfx):
                 cmd = cmd[len(pfx):]
                 break
@@ -664,7 +664,7 @@ class BridgeShell:
             if not clean:
                 return
             lowered = clean.lower()
-            if "шаг " in lowered and "агент:" in lowered:
+            if "step " in lowered and "agent:" in lowered:
                 next_index = current_step["index"] + 1
                 if next_index < len(plan.subtasks):
                     subtask = plan.subtasks[next_index]
@@ -676,13 +676,13 @@ class BridgeShell:
                     state["tokens"] = 0
                     start_time_ref[0] = __import__("time").monotonic()
                     current_step["index"] = next_index
-            elif "собирает итог" in lowered:
+            elif "synthesizing" in lowered:
                 active = session.active_provider or session.current_provider
                 self.ui.print_orchestration_label("Synthesis", active, cwd)
                 state["action"] = "Synthesizing…"
                 state["tokens"] = 0
                 start_time_ref[0] = __import__("time").monotonic()
-            elif "выполняет review" in lowered:
+            elif "reviewing" in lowered:
                 active = session.active_provider or session.current_provider
                 self.ui.print_orchestration_label("Review", active, cwd)
                 state["action"] = "Reviewing…"

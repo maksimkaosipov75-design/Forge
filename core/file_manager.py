@@ -22,7 +22,7 @@ class Project:
 
 
 class FileManager:
-    """Управление файловой системой независимо от qwen."""
+    """Filesystem manager, provider-agnostic."""
 
     def __init__(self, projects_file: str = "projects.json"):
         self.projects_file = projects_file
@@ -39,7 +39,7 @@ class FileManager:
                 for name, proj in data.items():
                     self.projects[name] = Project(**proj)
             except Exception as e:
-                log.warning(f"Ошибка загрузки проектов: {e}")
+                log.warning(f"Failed to load projects: {e}")
 
     def _save_projects(self):
         data = {name: asdict(proj) for name, proj in self.projects.items()}
@@ -47,28 +47,28 @@ class FileManager:
             json.dump(data, f, indent=2, ensure_ascii=False)
 
     def set_working_dir(self, path: str) -> str:
-        """Установить рабочую директорию."""
+        """Set the working directory."""
         p = Path(path).expanduser().resolve()
         if not p.exists():
-            return f"❌ Путь не существует: {_esc(p)}"
+            return f"❌ Path does not exist: {_esc(p)}"
         if not p.is_dir():
-            return f"❌ Это не директория: {_esc(p)}"
+            return f"❌ Not a directory: {_esc(p)}"
         self.working_dir = p
-        return f"📂 Рабочая директория: <code>{_esc(p)}</code>"
+        return f"📂 Working directory: <code>{_esc(p)}</code>"
 
     def get_working_dir(self) -> Path:
         return self.working_dir
 
     def list_dir(self, path: str = None) -> str:
-        """Содержимое директории."""
+        """Directory listing."""
         target = Path(path).expanduser().resolve() if path else self.working_dir
         if path:
             if err := self._check_path_safe(target):
                 return err
         if not target.exists():
-            return f"❌ Путь не существует: {_esc(target)}"
+            return f"❌ Path does not exist: {_esc(target)}"
         if not target.is_dir():
-            return f"❌ Это не директория: {_esc(target)}"
+            return f"❌ Not a directory: {_esc(target)}"
 
         items = sorted(target.iterdir(), key=lambda x: (not x.is_dir(), x.name.lower()))
         lines = [f"📁 <code>{_esc(target)}</code>\n"]
@@ -86,15 +86,15 @@ class FileManager:
         return "\n".join(lines)
 
     def _check_path_safe(self, target: Path) -> Optional[str]:
-        """Проверяет, что путь не выходит за пределы рабочей директории."""
+        """Validates path is within the working directory."""
         try:
             target.resolve().relative_to(self.working_dir.resolve())
             return None
         except ValueError:
-            return f"❌ Доступ запрещён: путь выходит за рабочую директорию"
+            return f"❌ Access denied: path is outside the working directory"
 
     def read_file(self, path: str, max_lines: int = 100) -> str:
-        """Прочитать файл."""
+        """Read a file."""
         target = Path(path)
         if not target.is_absolute():
             target = self.working_dir / target
@@ -103,29 +103,29 @@ class FileManager:
         if err := self._check_path_safe(target):
             return err
         if not target.exists():
-            return f"❌ Файл не найден: <code>{_esc(target.name)}</code>"
+            return f"❌ File not found: <code>{_esc(target.name)}</code>"
         if target.is_dir():
-            return f"❌ Это директория: <code>{_esc(target.name)}</code>"
+            return f"❌ Is a directory: <code>{_esc(target.name)}</code>"
         if target.stat().st_size > 100_000:
-            return f"❌ Файл слишком большой: <code>{_esc(target.name)}</code> ({self._format_size(target.stat().st_size)})"
+            return f"❌ File too large: <code>{_esc(target.name)}</code> ({self._format_size(target.stat().st_size)})"
 
         try:
             with open(target, "r", encoding="utf-8", errors="replace") as f:
                 lines = f.readlines()
             shown = lines[:max_lines]
             text = "".join(shown)
-            suffix = f"\n\n... (ещё {len(lines) - max_lines} строк)" if len(lines) > max_lines else ""
+            suffix = f"\n\n... ({len(lines) - max_lines} more lines)" if len(lines) > max_lines else ""
             return f"📄 <code>{_esc(target.name)}</code>:\n<pre>{_esc(text)}</pre>{suffix}"
         except PermissionError:
-            return f"❌ Нет прав на чтение: <code>{_esc(target.name)}</code>"
+            return f"❌ No read permission: <code>{_esc(target.name)}</code>"
         except Exception as e:
-            return f"❌ Ошибка чтения: {_esc(e)}"
+            return f"❌ Read error: {_esc(e)}"
 
     def tree(self, path: str = None, max_depth: int = 3, current_depth: int = 0) -> str:
-        """Дерево файлов."""
+        """File tree."""
         target = Path(path).expanduser().resolve() if path else self.working_dir
         if not target.exists() or not target.is_dir():
-            return f"❌ Директория не найдена: {_esc(target)}"
+            return f"❌ Directory not found: {_esc(target)}"
 
         lines = [f"{target}"]
         self._build_tree(target, lines, max_depth, current_depth, prefix="")
@@ -150,42 +150,42 @@ class FileManager:
                 self._build_tree(item, lines, max_depth, current_depth + 1, prefix + extension)
 
     def set_project(self, name: str, path: str) -> str:
-        """Сохранить проект."""
+        """Save a project."""
         p = Path(path).expanduser().resolve()
         if not p.exists():
-            return f"❌ Путь не существует: {_esc(p)}"
+            return f"❌ Path does not exist: {_esc(p)}"
         self.projects[name] = Project(name=name, path=str(p))
         self.current_project = self.projects[name]
         self.working_dir = p
         self._save_projects()
-        return f"✅ Проект <code>{_esc(name)}</code> сохранён: <code>{_esc(p)}</code>"
+        return f"✅ Project <code>{_esc(name)}</code> saved: <code>{_esc(p)}</code>"
 
     def load_project(self, name: str) -> str:
-        """Загрузить проект."""
+        """Load a project."""
         if name not in self.projects:
-            available = ", ".join(_esc(k) for k in self.projects.keys()) or "нет"
-            return f"❌ Проект <code>{_esc(name)}</code> не найден. Доступные: {available}"
+            available = ", ".join(_esc(k) for k in self.projects.keys()) or "none"
+            return f"❌ Project <code>{_esc(name)}</code> not found. Available: {available}"
         proj = self.projects[name]
         if not Path(proj.path).exists():
-            return f"❌ Путь проекта не существует: <code>{_esc(proj.path)}</code>"
+            return f"❌ Project path does not exist: <code>{_esc(proj.path)}</code>"
         self.current_project = proj
         self.working_dir = Path(proj.path)
-        return f"📂 Загружен проект <code>{_esc(name)}</code>: <code>{_esc(proj.path)}</code>"
+        return f"📂 Loaded project <code>{_esc(name)}</code>: <code>{_esc(proj.path)}</code>"
 
     def list_projects(self) -> str:
-        """Список проектов."""
+        """List projects."""
         if not self.projects:
-            return "📋 Нет сохранённых проектов."
-        lines = ["📋 Проекты:\n"]
+            return "📋 No saved projects."
+        lines = ["📋 Projects:\n"]
         for name, proj in self.projects.items():
-            current = " ← <b>текущий</b>" if self.current_project and self.current_project.name == name else ""
+            current = " ← <b>current</b>" if self.current_project and self.current_project.name == name else ""
             lines.append(f"• <code>{_esc(name)}</code> → <code>{_esc(proj.path)}</code>{current}")
         return "\n".join(lines)
 
     def get_project_context(self) -> str:
-        """Контекст текущего проекта."""
+        """Current project context."""
         if not self.current_project:
-            return f"📂 Рабочая директория: <code>{_esc(self.working_dir)}</code>\nПроект не выбран."
+            return f"📂 Working directory: <code>{_esc(self.working_dir)}</code>\nNo project selected."
 
         proj = self.current_project
         # Считаем файлы
@@ -197,9 +197,9 @@ class FileManager:
             total_files = total_dirs = "?"
 
         return (
-            f"📂 Проект: <code>{_esc(proj.name)}</code>\n"
-            f"📍 Путь: <code>{_esc(proj.path)}</code>\n"
-            f"📄 Файлов: {total_files} | 📁 Директорий: {total_dirs}"
+            f"📂 Project: <code>{_esc(proj.name)}</code>\n"
+            f"📍 Path: <code>{_esc(proj.path)}</code>\n"
+            f"📄 Files: {total_files} | 📁 Dirs: {total_dirs}"
         )
 
     @staticmethod

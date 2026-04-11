@@ -871,10 +871,10 @@ class CliUi:
 
     @staticmethod
     def _strip_emoji_prefix(line: str) -> str:
-        """Remove leading emoji + optional 'Использую: ' prefix."""
+        """Remove leading emoji + optional 'Using: ' prefix."""
         # Strip up to two chars of emoji + optional space
         for prefix in (
-            "🔧 Использую: ", "🔧 ", "✏️ ", "📂 ", "👁️ ",
+            "🔧 Using: ", "🔧 ", "✏️ ", "📂 ", "👁️ ",
             "🐚 ", "⚙️ ", "💬 ", "🧠 ", "🏁 ",
         ):
             if line.startswith(prefix):
@@ -933,7 +933,7 @@ class CliUi:
         elif line.startswith("🐚 "):
             cmd = self._strip_emoji_prefix(line)
             # strip Russian/English "Running: " prefix
-            for pfx in ("Запускаю: ", "Запускаю:", "Running: "):
+            for pfx in ("Running: ",):
                 if cmd.startswith(pfx):
                     cmd = cmd[len(pfx):]
                     break

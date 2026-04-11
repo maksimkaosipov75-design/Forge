@@ -485,7 +485,7 @@ class OrchestratorService:
 
         if status_callback:
             await status_callback(
-                "⏳ <b>Оркестратор: динамическое перепланирование…</b>"
+                "⏳ <b>Orchestrator: dynamic replanning…</b>"
             )
         log.info("Attempting dynamic replan after %d completed, %d failed", len(completed), len(failed))
 
@@ -920,11 +920,11 @@ class OrchestratorService:
             cwd=cwd, files_touched=files_touched, is_first=is_first,
         )
 
-        status_title = "⏳ <b>Оркестратор выполняет план</b>"
+        status_title = "⏳ <b>Orchestrator: running plan</b>"
         status_prefix = (
             f"{status_title}\n\n"
-            f"<b>Шаг {index}/{len(plan.subtasks)}</b>: {escape(subtask.title)}\n"
-            f"<b>Агент:</b> <code>{escape(provider_name)}</code>"
+            f"<b>Step {index}/{len(plan.subtasks)}</b>: {escape(subtask.title)}\n"
+            f"<b>Agent:</b> <code>{escape(provider_name)}</code>"
         )
         if status_callback:
             await status_callback(status_prefix)
@@ -946,7 +946,7 @@ class OrchestratorService:
                 log.info("Subtask %s failed on %s, retrying with %s", subtask.subtask_id, provider_name, alt)
                 retry_prefix = (
                     f"{status_title}\n\n"
-                    f"<b>Шаг {index}/{len(plan.subtasks)} (retry → {escape(alt)})</b>: "
+                    f"<b>Step {index}/{len(plan.subtasks)} (retry → {escape(alt)})</b>: "
                     f"{escape(subtask.title)}"
                 )
                 if status_callback:
@@ -1039,8 +1039,8 @@ class OrchestratorService:
         session.active_provider = synthesis_provider
         task_run.synthesis_prompt = self.build_synthesis_prompt(plan, task_run)
         prefix = (
-            "⏳ <b>Оркестратор собирает итог</b>\n\n"
-            f"<b>Синтезатор:</b> <code>{escape(synthesis_provider)}</code>"
+            "⏳ <b>Orchestrator: synthesizing</b>\n\n"
+            f"<b>Synthesizer:</b> <code>{escape(synthesis_provider)}</code>"
         )
         if status_callback:
             await status_callback(prefix)
@@ -1082,7 +1082,7 @@ class OrchestratorService:
         session.active_provider = review_provider
         task_run.review_prompt = self.build_review_prompt(plan, task_run)
         prefix = (
-            "⏳ <b>Оркестратор выполняет review</b>\n\n"
+            "⏳ <b>Orchestrator: reviewing</b>\n\n"
             f"<b>Reviewer:</b> <code>{escape(review_provider)}</code>"
         )
         if status_callback:

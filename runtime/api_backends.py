@@ -278,7 +278,7 @@ class OpenRouterExecutionBackend(BaseApiBackend):
 
     async def send_command(self, text: str, cwd: Path = None):
         if not self._running:
-            raise RuntimeError("Менеджер не запущен")
+            raise RuntimeError("Manager not started")
 
         model_name = self.model_name.strip()
         if not model_name:
@@ -291,7 +291,7 @@ class OpenRouterExecutionBackend(BaseApiBackend):
             )
             if final_text and self._final_result_callback:
                 self._final_result_callback(final_text)
-            self._notify("🏁 Завершено (success): 0ms")
+            self._notify("🏁 Done (success): 0ms")
             self.mark_success()
             return 0
         except error.HTTPError as exc:

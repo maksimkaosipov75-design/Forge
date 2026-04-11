@@ -12,7 +12,7 @@ from core.providers import normalize_provider_name
 log = logging.getLogger(__name__)
 
 
-DEFAULT_TIMEOUT = 600  # 10 минут
+DEFAULT_TIMEOUT = 600  # 10 minutes
 
 
 class BaseProcessManager:
@@ -33,7 +33,7 @@ class BaseProcessManager:
 
     async def start(self):
         self._running = True
-        log.info("%s инициализирован", self.__class__.__name__)
+        log.info("%s initialized", self.__class__.__name__)
 
     def set_stream_callback(self, callback: Optional[Callable[[str], None]]):
         self._stream_callback = callback
@@ -71,13 +71,13 @@ class BaseProcessManager:
 
     async def stop(self):
         if self._proc and self._proc.returncode is None:
-            log.info(f"Убиваю активный процесс PID={self._proc.pid}")
+            log.info(f"Killing active process PID={self._proc.pid}")
             self._proc.kill()
             await self._proc.wait()
             self._proc = None
         self._running = False
         self._session_active = False
-        log.info("Сессия сброшена")
+        log.info("Session reset")
 
     @property
     def is_running(self) -> bool:
@@ -112,7 +112,7 @@ class QwenProcessManager(BaseProcessManager):
             return events, final_text
 
         if payload_type == "system":
-            events.append("⚙️ Инициализация сессии...")
+            events.append("⚙️ Initializing session...")
 
         elif payload_type == "assistant":
             message = payload.get("message", {})
@@ -166,15 +166,15 @@ class QwenProcessManager(BaseProcessManager):
 
         elif payload_type == "tool_use":
             tool_name = payload.get("name", "tool")
-            events.append(f"🔧 Использую: {tool_name}")
+            events.append(f"🔧 Using: {tool_name}")
 
         elif payload_type == "tool_result":
-            events.append("🔧 Результат инструмента")
+            events.append("🔧 Tool result")
 
         elif payload_type == "result":
             subtype = payload.get("subtype", "")
             duration_ms = payload.get("duration_ms", 0)
-            events.append(f"🏁 Завершено ({subtype}): {duration_ms}ms")
+            events.append(f"🏁 Done ({subtype}): {duration_ms}ms")
             final_text = payload.get("result", "") or None
             usage = payload.get("usage") or {}
             input_tokens = usage.get("input_tokens") or usage.get("inputTokens") or 0
@@ -190,7 +190,7 @@ class QwenProcessManager(BaseProcessManager):
 
     async def _send_command_impl(self, text: str, cwd: Path = None):
         if not self._running:
-            raise RuntimeError("Менеджер не запущен")
+            raise RuntimeError("Manager not started")
 
         work_dir = cwd or Path.cwd()
         args = [
@@ -204,7 +204,7 @@ class QwenProcessManager(BaseProcessManager):
             args.append("--continue")
         args.append(text)
 
-        log.info(f"Запуск stream-json: {' '.join(args[:6])}... в {work_dir}")
+        log.info(f"Starting stream-json: {' '.join(args[:6])}... in {work_dir}")
 
         proc = await asyncio.create_subprocess_exec(
             *args,
@@ -214,14 +214,14 @@ class QwenProcessManager(BaseProcessManager):
             cwd=str(work_dir),
         )
         self._proc = proc
-        log.info(f"Процесс запущен PID={proc.pid}, cwd={work_dir}")
+        log.info(f"Process started PID={proc.pid}, cwd={work_dir}")
 
         # Read stdout line by line because qwen emits stream-json incrementally.
         while True:
             try:
                 line = await asyncio.wait_for(proc.stdout.readline(), timeout=self.timeout)
             except asyncio.TimeoutError:
-                log.error(f"Таймаут {self.timeout}с — убиваю процесс PID={proc.pid}")
+                log.error(f"Timeout {self.timeout}s — killing process PID={proc.pid}")
                 proc.kill()
                 await proc.wait()
                 self._proc = None
@@ -237,7 +237,7 @@ class QwenProcessManager(BaseProcessManager):
             try:
                 d = json.loads(raw)
             except json.JSONDecodeError:
-                log.debug(f"Невалидный JSON от qwen: {raw[:200]}")
+                log.debug(f"Invalid JSON from qwen: {raw[:200]}")
                 continue
 
             events, final_text = self.parse_stream_payload(d)
@@ -263,7 +263,7 @@ class QwenProcessManager(BaseProcessManager):
             self.mark_success()
         else:
             self.mark_failure(f"Process exited with code {proc.returncode}")
-        log.info(f"Процесс завершился с кодом {proc.returncode}")
+        log.info(f"Process exited with code {proc.returncode}")
         return proc.returncode
 
 class CodexProcessManager(BaseProcessManager):
@@ -302,7 +302,7 @@ class CodexProcessManager(BaseProcessManager):
 
         if payload_type in {"thread.started", "turn.started"}:
             if payload_type == "thread.started":
-                events.append("⚙️ Инициализация сессии...")
+                events.append("⚙️ Initializing session...")
 
         elif payload_type == "error":
             message = payload.get("message", "")
@@ -341,10 +341,10 @@ class CodexProcessManager(BaseProcessManager):
                     events.append(f"💬 {text}")
 
         elif payload_type == "turn.completed":
-            events.append("🏁 Завершено (success): 0ms")
+            events.append("🏁 Done (success): 0ms")
 
         elif payload_type == "task_complete":
-            events.append("🏁 Завершено (success): 0ms")
+            events.append("🏁 Done (success): 0ms")
             final_text = cls._extract_text(payload) or final_text
 
         return events, final_text
@@ -355,7 +355,7 @@ class CodexProcessManager(BaseProcessManager):
 
     async def _send_command_impl(self, text: str, cwd: Path = None):
         if not self._running:
-            raise RuntimeError("Менеджер не запущен")
+            raise RuntimeError("Manager not started")
 
         work_dir = cwd or Path.cwd()
         with tempfile.NamedTemporaryFile(prefix="codex-last-message-", suffix=".txt", delete=False) as handle:
@@ -378,7 +378,7 @@ class CodexProcessManager(BaseProcessManager):
         else:
             args.append(text)
 
-        log.info("Запуск codex exec --json (model=%s) в %s", self.model_name or "default", work_dir)
+        log.info("Starting codex exec --json (model=%s) in %s", self.model_name or "default", work_dir)
 
         proc = await asyncio.create_subprocess_exec(
             *args,
@@ -388,13 +388,13 @@ class CodexProcessManager(BaseProcessManager):
             cwd=str(work_dir),
         )
         self._proc = proc
-        log.info(f"Процесс запущен PID={proc.pid}, cwd={work_dir}")
+        log.info(f"Process started PID={proc.pid}, cwd={work_dir}")
 
         while True:
             try:
                 line = await asyncio.wait_for(proc.stdout.readline(), timeout=self.timeout)
             except asyncio.TimeoutError:
-                log.error(f"Таймаут {self.timeout}с — убиваю процесс PID={proc.pid}")
+                log.error(f"Timeout {self.timeout}s — killing process PID={proc.pid}")
                 proc.kill()
                 await proc.wait()
                 self._proc = None
@@ -411,7 +411,7 @@ class CodexProcessManager(BaseProcessManager):
             try:
                 payload = json.loads(raw)
             except json.JSONDecodeError:
-                log.debug("Невалидный JSON от codex: %s", raw[:200])
+                log.debug("Invalid JSON from codex: %s", raw[:200])
                 continue
 
             events, final_text = self.parse_stream_payload(payload)
@@ -450,7 +450,7 @@ class CodexProcessManager(BaseProcessManager):
         else:
             self.mark_failure(f"Process exited with code {proc.returncode}")
 
-        log.info("Процесс завершился с кодом %s", proc.returncode)
+        log.info("Process exited with code %s", proc.returncode)
         return proc.returncode
 
 
@@ -503,7 +503,7 @@ class ClaudeProcessManager(BaseProcessManager):
             return [event_line], final_text
 
         if payload_type == "system" and payload_subtype == "init":
-            return ["⚙️ Инициализация сессии..."], None
+            return ["⚙️ Initializing session..."], None
 
         if payload_type == "system" and payload_subtype == "api_retry":
             attempt = payload.get("attempt", "?")
@@ -528,8 +528,8 @@ class ClaudeProcessManager(BaseProcessManager):
         if payload_type == "tool_result":
             tool_name = payload.get("name") or payload.get("tool_name")
             if tool_name:
-                return [f"🔧 Результат инструмента: {tool_name}"], None
-            return ["🔧 Результат инструмента"], None
+                return [f"🔧 Tool result: {tool_name}"], None
+            return ["🔧 Tool result"], None
 
         if payload_type == "result":
             subtype = payload.get("subtype", "success")
@@ -538,7 +538,7 @@ class ClaudeProcessManager(BaseProcessManager):
             usage = payload.get("usage") or {}
             input_tokens = usage.get("input_tokens") or usage.get("inputTokens") or 0
             output_tokens = usage.get("output_tokens") or usage.get("outputTokens") or 0
-            events = [f"🏁 Завершено ({subtype}): {duration_ms}ms"]
+            events = [f"🏁 Done ({subtype}): {duration_ms}ms"]
             if input_tokens or output_tokens:
                 events.append(f"🔢 {input_tokens},{output_tokens}")
             return events, result_text
@@ -556,7 +556,7 @@ class ClaudeProcessManager(BaseProcessManager):
 
     async def _send_command_impl(self, text: str, cwd: Path = None):
         if not self._running:
-            raise RuntimeError("Менеджер не запущен")
+            raise RuntimeError("Manager not started")
 
         work_dir = cwd or Path.cwd()
         args = [
@@ -575,7 +575,7 @@ class ClaudeProcessManager(BaseProcessManager):
             args.append("-c")
         args.append(text)
 
-        log.info("Запуск claude stream-json (model=%s) в %s", self.model_name or "default", work_dir)
+        log.info("Starting claude stream-json (model=%s) in %s", self.model_name or "default", work_dir)
 
         proc = await asyncio.create_subprocess_exec(
             *args,
@@ -585,13 +585,13 @@ class ClaudeProcessManager(BaseProcessManager):
             cwd=str(work_dir),
         )
         self._proc = proc
-        log.info("Процесс запущен PID=%s, cwd=%s", proc.pid, work_dir)
+        log.info("Process started PID=%s, cwd=%s", proc.pid, work_dir)
 
         while True:
             try:
                 line = await asyncio.wait_for(proc.stdout.readline(), timeout=self.timeout)
             except asyncio.TimeoutError:
-                log.error("Таймаут %sс — убиваю процесс PID=%s", self.timeout, proc.pid)
+                log.error("Timeout %ss — killing process PID=%s", self.timeout, proc.pid)
                 proc.kill()
                 await proc.wait()
                 self._proc = None
@@ -608,7 +608,7 @@ class ClaudeProcessManager(BaseProcessManager):
             try:
                 payload = json.loads(raw)
             except json.JSONDecodeError:
-                log.debug("Невалидный JSON от claude: %s", raw[:200])
+                log.debug("Invalid JSON from claude: %s", raw[:200])
                 continue
 
             events, final_text = self.parse_stream_payload(payload)
@@ -639,7 +639,7 @@ class ClaudeProcessManager(BaseProcessManager):
         else:
             self.mark_failure(f"Process exited with code {proc.returncode}")
 
-        log.info("Процесс завершился с кодом %s", proc.returncode)
+        log.info("Process exited with code %s", proc.returncode)
         return proc.returncode
 
 

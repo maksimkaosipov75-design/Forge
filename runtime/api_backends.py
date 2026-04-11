@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import threading
 from pathlib import Path
 from typing import Callable, Optional
 from urllib import error, request
@@ -28,6 +29,8 @@ class BaseApiBackend:
         self._running = False
         self._stream_callback: Optional[Callable[[str], None]] = None
         self._final_result_callback: Optional[Callable[[str], None]] = None
+        self._cancel_event = threading.Event()
+        self._active_response = None  # urllib response object for the running request
 
     async def start(self):
         self._running = True
@@ -35,6 +38,14 @@ class BaseApiBackend:
 
     async def stop(self):
         self._running = False
+        self._cancel_event.set()
+        # Close the active HTTP response from another thread to unblock the reader.
+        resp = self._active_response
+        if resp is not None:
+            try:
+                resp.close()
+            except Exception:
+                pass
 
     @property
     def is_running(self) -> bool:
@@ -281,20 +292,27 @@ class OpenRouterExecutionBackend(BaseApiBackend):
         if not self.api_key.strip():
             raise RuntimeError("OPENROUTER_API_KEY is not configured")
 
+        self._cancel_event.clear()
         req = self._build_request(prompt, model_name)
         aggregated: list[str] = []
 
         with request.urlopen(req, timeout=self.timeout) as response:
-            for raw_line in response:
-                line = raw_line.decode("utf-8", errors="replace")
-                events, text_delta = self.parse_sse_line(line)
-                for event in events:
-                    # Schedule _notify on the event-loop thread so that the
-                    # stream_event_callback (which updates Rich Live) runs
-                    # in the correct asyncio context.
-                    loop.call_soon_threadsafe(self._notify, event)
-                if text_delta:
-                    aggregated.append(text_delta)
+            self._active_response = response
+            try:
+                for raw_line in response:
+                    if self._cancel_event.is_set():
+                        break
+                    line = raw_line.decode("utf-8", errors="replace")
+                    events, text_delta = self.parse_sse_line(line)
+                    for event in events:
+                        # Schedule _notify on the event-loop thread so that the
+                        # stream_event_callback (which updates Rich Live) runs
+                        # in the correct asyncio context.
+                        loop.call_soon_threadsafe(self._notify, event)
+                    if text_delta:
+                        aggregated.append(text_delta)
+            finally:
+                self._active_response = None
 
         return "".join(aggregated).strip()
 

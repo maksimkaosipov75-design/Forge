@@ -15,6 +15,33 @@ def append_thinking_chunk(buffer: str, line: str) -> str:
     return buffer + extract_thinking_chunk(line)
 
 
+def _normalize_reasoning(text: str) -> str:
+    """Heuristic cleanup for raw reasoning output that may lack spaces.
+
+    Some models (GLM-5, certain OpenRouter providers) stream tokens without
+    inter-word spaces and use the literal word 'thinking' as a section
+    separator.  This function improves readability without altering meaning.
+    """
+    # 1. 'thinking' used as inline separator → newline
+    #    - followed by uppercase/digit/*  → clear section break
+    #    - 'thinkingthinking' → '\n\n' (double separator = paragraph)
+    text = re.sub(r"thinking(?=thinking)", "\n", text)
+    text = re.sub(r"thinking(?=\s*[A-Z0-9*\-])", "\n", text)
+    # If 'thinking' still appears mid-word (lowercase follows), add a newline before it
+    # so it at least breaks the run.
+    text = re.sub(r"thinking(?=[a-zа-яё])", "\n", text)
+
+    # 2. CamelCase split: insert space between lower→upper transitions
+    text = re.sub(r"(?<=[a-zа-яё0-9])(?=[A-ZА-ЯЁ])", " ", text)
+
+    # 3. Add space after punctuation immediately followed by a word character
+    text = re.sub(r"([.,:;!?])(?=[A-Za-zА-Яа-яЁё0-9*])", r"\1 ", text)
+
+    # 4. Collapse runs of 3+ spaces to one
+    text = re.sub(r" {3,}", " ", text)
+    return text
+
+
 def _md_to_rich_inline(text: str) -> str:
     """Convert inline markdown (**bold**, *italic*) to Rich markup."""
     # Escape Rich markup brackets first
@@ -30,6 +57,9 @@ def render_thinking_text(text: str, mode: str = "compact", *, rich: bool = False
     """Render a thinking buffer for shell or TUI output."""
     if mode == "off":
         return None
+
+    # Apply heuristic cleanup to improve readability regardless of mode.
+    text = _normalize_reasoning(text)
 
     if mode == "compact":
         # Single-line preview: collapse whitespace, truncate to 180 chars

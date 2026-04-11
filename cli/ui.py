@@ -1,4 +1,5 @@
 import os
+import re as _re
 import subprocess as _subprocess
 import time as _time
 from pathlib import Path
@@ -6,6 +7,37 @@ from pathlib import Path
 from cli.thinking import extract_thinking_chunk, render_thinking_text
 
 from core.providers import provider_default_model
+
+
+# ── inline markdown → Rich markup ─────────────────────────────────────────────
+
+def _render_md_inline(text: str) -> str:
+    """
+    Convert common markdown markers to Rich markup tags for inline streaming.
+
+    Handles single lines / short chunks; does NOT attempt to parse fenced
+    code blocks (those are multi-line and handled by the thinking/diff renderers).
+    """
+    # Escape Rich markup characters that might appear in code/paths
+    # We process in order: code first (to protect its contents), then bold/italic.
+
+    # Inline code: `code`  →  dim bold
+    text = _re.sub(r"`([^`\n]{1,120})`", r"[bold dim]\1[/bold dim]", text)
+
+    # Bold: **text** or __text__
+    text = _re.sub(r"\*\*(.{1,200}?)\*\*", r"[bold]\1[/bold]", text)
+    text = _re.sub(r"__(.{1,200}?)__", r"[bold]\1[/bold]", text)
+
+    # Italic: *text* (single star, not at word boundaries to avoid false positives)
+    text = _re.sub(r"(?<!\*)\*([^*\n]{1,100})\*(?!\*)", r"[italic]\1[/italic]", text)
+
+    # Markdown headings → bold (only at line start)
+    text = _re.sub(r"^#{1,3} (.+)$", r"[bold]\1[/bold]", text, flags=_re.MULTILINE)
+
+    # List bullets — keep "- " but make them slightly accented
+    text = _re.sub(r"^([ \t]*)[*\-] ", r"\1• ", text, flags=_re.MULTILINE)
+
+    return text
 
 try:
     from rich.align import Align
@@ -266,50 +298,69 @@ class CliUi:
         )
 
     def print_home(self, session, recent_runs, remote_status):
+        """
+        Minimal welcome screen — provider, cwd, recent runs, hint line.
+        No ASCII banner; keeps visual weight low so the first prompt
+        feels immediate.
+        """
+        from importlib.metadata import version as _pkg_version
+        try:
+            forge_version = _pkg_version("forge-ai")
+        except Exception:
+            forge_version = "dev"
+
         provider = session.current_provider
         style = self._provider_style(provider)
         cwd = str(session.file_mgr.get_working_dir())
-        last_run_id = session.last_task_run.run_id if session.last_task_run else None
+        model = (session.provider_models.get(provider) or "").strip() or ""
 
         if self.console:
             self.console.print()
+            # ── title line ─────────────────────────────────────────────────
+            version_part = f"[bright_black]v{forge_version}[/bright_black]  "
+            model_part = f"[bright_black]{model}[/bright_black]  " if model else ""
+            remote_part = "[yellow]remote on[/yellow]  " if remote_status.is_running else ""
             self.console.print(
-                f"[{style}]◆[/] [bold]{provider}[/bold]  [bright_black]{cwd}[/bright_black]"
+                f"  {version_part}[{style}]◆ {provider}[/]  "
+                f"{model_part}[bright_black]{cwd}[/bright_black]  "
+                f"{remote_part}"
             )
-            self.console.print(
-                f"  [bright_black]{self._provider_tagline(provider)}"
-                f"  ·  runs: {len(session.run_history)}"
-                + (f"  ·  last: {last_run_id}" if last_run_id else "")
-                + (f"  ·  [yellow]remote on[/yellow]" if remote_status.is_running else "")
-                + "[/bright_black]"
-            )
+            # ── recent runs ────────────────────────────────────────────────
             if recent_runs:
                 self.console.print()
-                for index, run in enumerate(recent_runs, start=1):
+                for run in recent_runs[:5]:
+                    prompt_preview = " ".join((run.prompt or "").split())[:60]
+                    if len(run.prompt or "") > 60:
+                        prompt_preview += "…"
                     self.console.print(
-                        f"  [bright_black]{index}. {run.status_emoji} {run.mode}"
-                        f" [{run.provider_summary or 'mixed'}]  {run.duration_text}[/bright_black]"
+                        f"  [bright_black]{run.status_emoji} {run.duration_text:<6}"
+                        f"  {prompt_preview}[/bright_black]"
                     )
+            # ── hint line ──────────────────────────────────────────────────
             self.console.print()
             self.console.print(
-                f"[bright_black]  /help  /plan <task>  /orchestrate <task>  /provider <name>"
-                f"  /runs  /remote-control[/bright_black]"
+                "  [bright_black]"
+                "↑ history  Tab commands  Ctrl+C cancel  "
+                "/help · /plan · /orchestrate · /provider"
+                "[/bright_black]"
             )
             self.console.print()
             return
 
+        # ── plain fallback ─────────────────────────────────────────────────
         accent = self._ansi_provider_color(provider)
         dim = self._ansi_dim()
         reset = self._ansi_reset()
         print()
-        print(f"{accent}◆{reset} {provider}  {dim}{cwd}{reset}")
-        print(f"  {dim}{self._provider_tagline(provider)}  ·  runs: {len(session.run_history)}{reset}")
+        model_suffix = f"  {model}" if model else ""
+        print(f"  {dim}v{forge_version}{reset}  {accent}◆ {provider}{reset}{dim}{model_suffix}  {cwd}{reset}")
         if recent_runs:
             print()
-            for index, run in enumerate(recent_runs, start=1):
-                print(f"  {dim}{index}. {run.status_emoji} {run.mode} [{run.provider_summary or 'mixed'}]  {run.duration_text}{reset}")
+            for run in recent_runs[:5]:
+                preview = " ".join((run.prompt or "").split())[:60]
+                print(f"  {dim}{run.status_emoji} {run.duration_text:<6}  {preview}{reset}")
         print()
-        print(f"{dim}  /help  /plan <task>  /orchestrate <task>  /provider <name>  /runs  /remote-control{reset}")
+        print(f"  {dim}↑ history  Tab commands  Ctrl+C cancel  /help · /plan · /orchestrate{reset}")
         print()
 
     def build_prompt(self, provider: str, remote_status, queued: int = 0) -> str:
@@ -816,77 +867,152 @@ class CliUi:
         print(f"  {dim}{short}{reset}")
         print()
 
+    # ── stream event label helpers ────────────────────────────────────────────
+
+    @staticmethod
+    def _strip_emoji_prefix(line: str) -> str:
+        """Remove leading emoji + optional 'Использую: ' prefix."""
+        # Strip up to two chars of emoji + optional space
+        for prefix in (
+            "🔧 Использую: ", "🔧 ", "✏️ ", "📂 ", "👁️ ",
+            "🐚 ", "⚙️ ", "💬 ", "🧠 ", "🏁 ",
+        ):
+            if line.startswith(prefix):
+                return line[len(prefix):].strip()
+        return line.strip()
+
+    @staticmethod
+    def _tool_label(line: str) -> str:
+        """Extract a short tool/file label for the ● indicator."""
+        raw = CliUi._strip_emoji_prefix(line)
+        # "Using: <tool>(<args>)" or "Read(path/to/file.py)" → keep as-is
+        return (raw[:60] + "…") if len(raw) > 60 else raw
+
     def print_stream_event(self, line: str, provider: str = "", thinking_mode: str = "compact"):
         """Print a single real-time stream event inline."""
         style = self._provider_style(provider) if provider else "cyan"
+
+        # ── plain-text fallback ───────────────────────────────────────────────
         if not self.console:
             if line.startswith("💬 "):
-                print("  " + line[2:].strip())
+                print(line[len("💬 "):].strip())
             elif line.startswith("🧠 ") and thinking_mode != "off":
                 rendered = render_thinking_text(extract_thinking_chunk(line), thinking_mode, rich=False)
                 if rendered:
                     print(rendered)
-            elif line.startswith(("🔧", "⚙️", "📂", "✏️", "👁️", "🐚", "🏁")):
-                print("  " + line)
+            elif line.startswith(("🔧", "⚙️", "📂", "✏️", "👁️", "🐚")):
+                label = self._tool_label(line)
+                print(f"  ● {label}")
+            elif line.startswith("🐚 "):
+                print(f"  $ {self._strip_emoji_prefix(line)}")
             return
 
+        # ── Rich path ─────────────────────────────────────────────────────────
+
         if line.startswith("💬 "):
-            self.console.print("  " + line[2:].strip())
+            # AI text output — render inline with basic markdown
+            text = line[len("💬 "):].strip()
+            self.console.print(_render_md_inline(text), markup=True)
+
         elif line.startswith("🧠 "):
             rendered = render_thinking_text(extract_thinking_chunk(line), thinking_mode, rich=True)
             if rendered:
                 self.console.print(rendered)
-        elif line.startswith("🔧 Использую: ") or line.startswith("🔧 "):
-            tool = line.split(": ", 1)[-1].strip() if ": " in line else line[2:].strip()
-            self.console.print(f"  [{style}]✦[/] [bright_black]{tool}[/bright_black]")
-        elif line.startswith("✏️ "):
-            self.console.print(f"  [{style}]✦[/] [bright_black]{line[2:].strip()}[/bright_black]")
-        elif line.startswith("📂 "):
-            self.console.print(f"  [{style}]✦[/] [bright_black]{line[2:].strip()}[/bright_black]")
+
+        # write / create
+        elif line.startswith(("✏️ ", "📂 ")):
+            label = self._tool_label(line)
+            self.console.print(f"  [{style}]◆[/] [bright_black]{label}[/bright_black]")
+
+        # read / view
         elif line.startswith("👁️ "):
-            self.console.print(f"  [bright_black]{line[2:].strip()}[/bright_black]")
+            label = self._tool_label(line)
+            self.console.print(f"  [bright_black]○ {label}[/bright_black]")
+
+        # shell command
         elif line.startswith("🐚 "):
-            self.console.print(f"  [{style}]$[/] [bright_black]{line[2:].strip()}[/bright_black]")
+            cmd = self._strip_emoji_prefix(line)
+            # strip Russian/English "Running: " prefix
+            for pfx in ("Запускаю: ", "Запускаю:", "Running: "):
+                if cmd.startswith(pfx):
+                    cmd = cmd[len(pfx):]
+                    break
+            self.console.print(f"  [{style}]$[/] [bright_black]{cmd}[/bright_black]")
+
+        # tool use (generic)
+        elif line.startswith("🔧 "):
+            label = self._tool_label(line)
+            self.console.print(f"  [bright_black]● {label}[/bright_black]")
+
+        # init / misc
         elif line.startswith("⚙️ "):
-            self.console.print(f"  [bright_black]{line[2:].strip()}[/bright_black]")
+            text = self._strip_emoji_prefix(line)
+            self.console.print(f"  [bright_black]{text}[/bright_black]")
+
+        # completion marker — suppress, footer handles it
         elif line.startswith("🏁 "):
-            pass  # completion marker — suppress, shown via print_task_result_inline
+            pass
+
         elif line.startswith(("❌ ", "✅ ")):
-            self.console.print(f"  [bright_black]{line}[/bright_black]")
+            self.console.print(f"  [bright_black]{line.strip()}[/bright_black]")
 
     def print_task_result_inline(self, result):
-        """Print task result inline without panels."""
+        """
+        Print task result footer after inline streaming.
+
+        Text output was already shown in real-time via print_stream_event;
+        we only add: error text, file diffs, and a one-line summary footer.
+        """
         style = self._provider_style(result.provider)
+        ok = result.exit_code == 0
+
+        # Build footer parts: ✓ provider · Xs · N tokens · M files changed
+        tok_total = (getattr(result, "total_input_tokens", 0) or 0) + (
+            getattr(result, "total_output_tokens", 0) or 0
+        )
+        files_n = len(result.new_files) + len(result.changed_files)
+        duration = getattr(result, "duration_text", "") or ""
+        footer_parts: list[str] = []
+        if duration:
+            footer_parts.append(duration)
+        if tok_total:
+            footer_parts.append(
+                f"{tok_total:,} tok" if tok_total < 10_000 else f"{tok_total / 1_000:.1f}k tok"
+            )
+        if files_n:
+            noun = "file" if files_n == 1 else "files"
+            footer_parts.append(f"{files_n} {noun} changed")
+
         if self.console:
-            self.console.print()
+            # file diffs
             for f in result.new_files:
                 self.print_file_diff(f, is_new=True, provider=result.provider)
             for f in result.changed_files:
                 self.print_file_diff(f, is_new=False, provider=result.provider)
             if result.error_text:
-                self.console.print(f"  [red]✗[/red] {result.error_text[:200]}")
-            if result.answer_text.strip():
                 self.console.print()
-                self.console.print(result.answer_text.strip()[:4000])
+                self.console.print(f"  [red]✗[/red] [red]{result.error_text[:300]}[/red]")
+            # footer
             self.console.print()
-            status_icon = f"[{style}]✓[/]" if result.exit_code == 0 else "[red]✗[/red]"
-            duration = getattr(result, "duration_text", "")
-            self.console.print(f"  {status_icon} [{style}]{result.provider}[/]  [bright_black]{duration}[/bright_black]")
+            status_icon = f"[{style}]✓[/]" if ok else "[red]✗[/red]"
+            provider_str = f"[{style}]{result.provider}[/]"
+            meta = f"  [bright_black]{('  ·  '.join(footer_parts))}[/bright_black]" if footer_parts else ""
+            self.console.print(f"  {status_icon} {provider_str}{meta}")
             return
+
+        # plain fallback
         accent = self._ansi_provider_color(result.provider)
         reset = self._ansi_reset()
         dim = self._ansi_dim()
-        print()
         for f in result.new_files:
             self.print_file_diff(f, is_new=True, provider=result.provider)
         for f in result.changed_files:
             self.print_file_diff(f, is_new=False, provider=result.provider)
-        if result.answer_text.strip():
-            print()
-            print(result.answer_text.strip()[:4000])
-        print()
-        icon = "✓" if result.exit_code == 0 else "✗"
-        print(f"  {accent}{icon} {result.provider}{reset}  {dim}{getattr(result, 'duration_text', '')}{reset}")
+        if result.error_text:
+            print(f"\n  ✗ {result.error_text[:300]}")
+        icon = "✓" if ok else "✗"
+        meta = ("  " + "  ·  ".join(footer_parts)) if footer_parts else ""
+        print(f"\n  {accent}{icon} {result.provider}{reset}{dim}{meta}{reset}")
 
     def print_orchestration_step_header(
         self, index: int, total: int, title: str, provider: str, cwd: str

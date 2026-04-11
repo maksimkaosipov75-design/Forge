@@ -3,7 +3,8 @@ import re as _re
 import shlex
 from pathlib import Path
 
-from cli.command_catalog import grouped_help_lines
+import cli.readline_helper as _rl
+from cli.command_catalog import all_command_names, grouped_help_lines
 from cli.remote_control import RemoteControlManager
 from cli.session_actions import (
     build_commit_message,
@@ -31,26 +32,28 @@ def _strip_html(text: str) -> str:
 
 
 def _action_from_event(line: str) -> str | None:
-    """Map a stream event line to a human-readable action label."""
-    if line.startswith("🔧 Использую: ") or line.startswith("🔧 "):
-        tool = line.split(": ", 1)[-1].strip() if ": " in line else line[2:].strip()
-        return (tool[:40] + "…") if len(tool) > 40 else tool + "…"
+    """Map a stream event line to a short status-bar action label."""
+    if line.startswith("🔧 "):
+        raw = line[len("🔧 "):]
+        if raw.startswith("Использую: "):
+            raw = raw[len("Использую: "):]
+        short = (raw[:40] + "…") if len(raw) > 40 else raw
+        return f"● {short}"
     if line.startswith(("✏️ ", "📂 ")):
-        parts = line[2:].strip().split()
+        parts = line[3:].strip().split()
         name = Path(parts[-1]).name if parts else "file"
-        return f"Writing {name}…"
+        return f"◆ Write {name}"
     if line.startswith("👁️ "):
-        parts = line[2:].strip().split()
+        parts = line[4:].strip().split()
         name = Path(parts[-1]).name if parts else "file"
-        return f"Reading {name}…"
+        return f"○ Read {name}"
     if line.startswith("🐚 "):
-        cmd = line[2:].strip()
-        # strip Russian prefix "Запускаю: " if present
-        for prefix in ("Запускаю: ", "Запускаю:", "Running: "):
-            if cmd.startswith(prefix):
-                cmd = cmd[len(prefix):]
+        cmd = line[3:].strip()
+        for pfx in ("Запускаю: ", "Запускаю:", "Running: "):
+            if cmd.startswith(pfx):
+                cmd = cmd[len(pfx):]
                 break
-        short = (cmd[:40] + "…") if len(cmd) > 40 else cmd
+        short = (cmd[:38] + "…") if len(cmd) > 38 else cmd
         return f"$ {short}"
     if line.startswith("⚙️ "):
         return "Initializing…"
@@ -67,6 +70,8 @@ class BridgeShell:
         self.remote = RemoteControlManager()
         self.running = True
         self.home_visible = False
+        # Task currently running (set during run_single_task / orchestrate)
+        self._current_task: asyncio.Task | None = None
 
     def _flush_thinking_buffer(self, provider_name: str, session, thinking_state: dict[str, str]) -> None:
         rendered = render_thinking_text(
@@ -82,35 +87,62 @@ class BridgeShell:
                 print(rendered)
 
     async def run(self):
+        # Wire up readline (history + tab completion) once at startup.
+        _rl.setup(all_command_names())
+
         self.show_home()
+        _ctrl_c_count = 0  # two fast Ctrl+C presses in a row → exit
 
         while self.running:
+            # ── read input ────────────────────────────────────────────────
             try:
                 session = self.container.get_session(self.chat_id)
                 remote_status = self.remote.load_status()
-                self.ui.print_input_bar(session.current_provider, remote_status)
-                raw = input(
+                raw = _rl.read_input(
                     self.ui.build_prompt(
                         provider=session.current_provider,
                         remote_status=remote_status,
                         queued=len(session.pending_tasks),
                     )
                 ).strip()
+                _ctrl_c_count = 0
             except EOFError:
                 self.ui.print_line()
                 break
             except KeyboardInterrupt:
+                # First Ctrl+C at the prompt → hint. Second → exit.
+                _ctrl_c_count += 1
+                if _ctrl_c_count >= 2:
+                    self.ui.print_line()
+                    break
                 self.ui.print_line()
-                break
+                self.ui.print_notice(
+                    "Press Ctrl+C again to exit, or type /quit.",
+                    kind="info",
+                )
+                continue
 
             if not raw:
                 continue
+
+            _ctrl_c_count = 0
 
             if raw.startswith("/"):
                 await self.handle_slash_command(raw)
                 continue
 
-            await self.run_single_task(raw)
+            # ── run task (Ctrl+C cancels task, not shell) ─────────────────
+            try:
+                self._current_task = asyncio.current_task()
+                await self.run_single_task(raw)
+            except asyncio.CancelledError:
+                self.ui.print_line()
+                self.ui.print_notice("Task cancelled.", kind="warning")
+            except KeyboardInterrupt:
+                self.ui.print_line()
+                self.ui.print_notice("Interrupted.", kind="warning")
+            finally:
+                self._current_task = None
 
     async def handle_slash_command(self, raw: str):
         parts = shlex.split(raw)
@@ -504,6 +536,9 @@ class BridgeShell:
 
     async def run_single_task(self, prompt: str):
         self.leave_home_if_needed()
+        # Persist multiline prompts as a single history entry.
+        if "\n" in prompt:
+            _rl.add_to_history(prompt)
         session = self.container.get_session(self.chat_id)
         provider_name = normalize_provider_name(session.current_provider)
         runtime = await self.container.ensure_runtime_started(session, provider_name)

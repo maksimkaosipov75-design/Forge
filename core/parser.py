@@ -289,12 +289,26 @@ class LogParser:
         """Returns full qwen output. Priority: final result > buffer."""
         if self.final_result:
             return self.final_result
-        # Фоллбэк: собираем все 💬 строки из буфера
+        # Fallback: collect all 💬 text lines from the buffer.
         text_lines = []
         for line in self.full_buffer:
             if line.startswith("💬 "):
-                text_lines.append(line[2:])  # Убираем эмодзи
-        return "\n".join(text_lines) if text_lines else "\n".join(self.full_buffer)
+                text_lines.append(line[2:])
+        if text_lines:
+            return "\n".join(text_lines)
+        # Last-resort fallback: raw buffer, but skip protocol/metadata lines
+        # (FORGE_EVENT, 🧠 thinking, 🏁 done, 🔢 usage) so they never leak
+        # into the displayed answer.
+        plain = [
+            line for line in self.full_buffer
+            if line
+            and not line.startswith("FORGE_EVENT ")
+            and not line.startswith("🧠 ")
+            and not line.startswith("🏁 ")
+            and not line.startswith("🔢 ")
+            and not line.startswith("__READY__")
+        ]
+        return "\n".join(plain)
 
     def set_final_result(self, text: str):
         """Sets the final full answer from a result event."""

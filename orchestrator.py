@@ -183,6 +183,7 @@ class AIOrchestrator:
         "qwen": "Python, scripting, data processing, general coding",
         "codex": "Rust, backend, systems programming, API design, refactoring",
         "claude": "UI, GTK, CSS, writing, code review, documentation",
+        "openrouter": "general purpose, fast reasoning, broad model catalogue",
     }
     # Shared plan cache across all instances (per-process lifetime)
     _cache: PlanCache = PlanCache()

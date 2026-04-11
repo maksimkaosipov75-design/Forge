@@ -1,5 +1,4 @@
 import asyncio
-import getpass
 import re as _re
 import shlex
 from pathlib import Path
@@ -391,8 +390,10 @@ class BridgeShell:
             self.ui.print_notice("Only OpenRouter API credentials are currently supported.", kind="warning")
             return
 
-        self.ui.print_notice("Paste your OpenRouter API key. Input is hidden.", provider=provider_name, kind="info")
-        api_key = getpass.getpass("OpenRouter API key: ").strip()
+        api_key = self.ui.prompt_secret(
+            label=f"Auth · {provider_name}",
+            hint="Paste your OpenRouter API key. Input is hidden.",
+        ).strip()
         if not api_key:
             self.ui.print_notice("No API key entered.", kind="warning")
             return
@@ -536,6 +537,20 @@ class BridgeShell:
             self.ui.print_stream_event(line, provider_name, thinking_mode=get_thinking_mode(session))
             self.ui.refresh_status_bar(live, start_time, state, provider_name)
 
+        async def interaction_callback(kind: str, text: str) -> str | None:
+            """Called when the CLI model asks a question or needs confirmation."""
+            self.ui.pause_status_bar(live)
+            self.ui.print_line()
+            try:
+                if kind == "approval":
+                    answer = self.ui.prompt_confirm(text, default=False)
+                    return "y\n" if answer else "n\n"
+                else:
+                    answer = self.ui.prompt_question(text, hint="Press Enter to skip")
+                    return (answer + "\n") if answer else "\n"
+            finally:
+                self.ui.resume_status_bar(live, start_time, state, provider_name)
+
         try:
             result = await self.container.execution_service.execute_provider_task(
                 session=session,
@@ -543,6 +558,7 @@ class BridgeShell:
                 provider_name=provider_name,
                 prompt=prompt,
                 stream_event_callback=stream_event_callback,
+                interaction_callback=interaction_callback,
             )
         finally:
             if thinking_state["buffer"]:

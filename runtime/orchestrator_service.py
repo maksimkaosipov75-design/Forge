@@ -96,6 +96,41 @@ class OrchestratorService:
         self.execution_service = execution_service
 
     # ------------------------------------------------------------------ #
+    # Plan building (AI-driven with rule-based fallback)                    #
+    # ------------------------------------------------------------------ #
+
+    async def build_plan(
+        self,
+        session,
+        prompt: str,
+        stream_event_callback=None,
+    ) -> "OrchestrationPlan":
+        """Build an orchestration plan.
+
+        Tries AI-driven planning first (if a planning provider is ready),
+        then falls back to the rule-based planner.  The result is cached
+        inside AIOrchestrator for 1 h so repeated calls for the same prompt
+        are instant.
+        """
+        planning_provider = self.container.pick_planning_provider(session)
+        if planning_provider:
+            try:
+                ai_planner = self.container.build_ai_planner(session)
+                await self.container.ensure_runtime_started(session, planning_provider)
+                planning_runtime = self.container.get_runtime(session, planning_provider)
+                plan = await ai_planner.build_plan(
+                    prompt,
+                    self.execution_service,
+                    session,
+                    planning_runtime,
+                    stream_event_callback=stream_event_callback,
+                )
+                return plan
+            except Exception as exc:
+                log.warning("AI planning failed (%s), falling back to rule-based", exc)
+        return self.container.build_planner(session).build_plan(prompt)
+
+    # ------------------------------------------------------------------ #
     # ETA estimation                                                        #
     # ------------------------------------------------------------------ #
 
@@ -530,6 +565,7 @@ class OrchestratorService:
         status_callback: StatusCallback | None,
         status_prefix: str,
         stream_event_callback,
+        interaction_callback=None,
     ) -> TaskResult:
         await self.container.ensure_runtime_started(session, provider_name)
         runtime = self.container.get_runtime(session, provider_name)
@@ -542,6 +578,7 @@ class OrchestratorService:
             status_callback=status_callback,
             status_prefix=status_prefix,
             stream_event_callback=stream_event_callback,
+            interaction_callback=interaction_callback,
         )
 
     async def _execute_subtask_timed(
@@ -554,6 +591,7 @@ class OrchestratorService:
         status_callback: StatusCallback | None,
         status_prefix: str,
         stream_event_callback,
+        interaction_callback=None,
     ) -> TaskResult:
         """Like _execute_subtask but enforces _SUBTASK_TIMEOUT_SECONDS."""
         try:
@@ -561,6 +599,7 @@ class OrchestratorService:
                 self._execute_subtask(
                     session, plan, subtask, provider_name, prompt,
                     status_callback, status_prefix, stream_event_callback,
+                    interaction_callback=interaction_callback,
                 ),
                 timeout=_SUBTASK_TIMEOUT_SECONDS,
             )
@@ -584,6 +623,7 @@ class OrchestratorService:
         resume_from: int = 0,
         prior_subtasks: list[SubtaskRun] | None = None,
         stream_event_callback=None,
+        interaction_callback=None,
     ) -> tuple[TaskRun, TaskResult]:
         started_at = monotonic()
         subtask_results: list[TaskResult] = []

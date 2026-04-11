@@ -993,6 +993,108 @@ class CliUi:
         if live is not None:
             live.stop()
 
+    def pause_status_bar(self, live):
+        """Temporarily stop the live display (before an interactive prompt)."""
+        if live is not None:
+            live.stop()
+
+    def resume_status_bar(self, live, start: float, state: dict, provider: str):
+        """Restart a previously paused live display."""
+        if live is not None:
+            live.start()
+            self.refresh_status_bar(live, start, state, provider)
+
+    # ── interactive prompts ───────────────────────────────────────────────────
+
+    def prompt_secret(self, label: str, hint: str = "") -> str:
+        """
+        Draw a styled password-entry UI and return the typed secret.
+
+        Modelled after Claude CLI / Gemini CLI:
+          ◆ <label>
+            <hint>
+            Secret › ****
+        """
+        from cli.prompt import read_masked  # local import to avoid circular
+
+        if self.console and Panel and Text:
+            hint_line = f"\n  [bright_black]{hint}[/bright_black]" if hint else ""
+            self.console.print(
+                Panel(
+                    f"[bright_black]{hint or 'Input is hidden.'}[/bright_black]",
+                    title=f"[bold]{label}[/bold]",
+                    border_style="green",
+                    padding=(0, 2),
+                )
+            )
+            display_prompt = "  › "
+        else:
+            accent = self._ansi_provider_color("openrouter")
+            reset = self._ansi_reset()
+            dim = self._ansi_dim()
+            if hint:
+                print(f"{dim}  {hint}{reset}")
+            display_prompt = f"{accent}  {label} ›{reset} "
+
+        return read_masked(display_prompt)
+
+    def prompt_confirm(self, question: str, default: bool = False) -> bool:
+        """
+        Draw a styled yes/no confirmation and return the boolean answer.
+        """
+        from cli.prompt import read_confirm
+
+        yn_hint = "[Y/n]" if default else "[y/N]"
+
+        if self.console and Panel:
+            self.console.print(
+                Panel(
+                    f"{question}",
+                    title="[bold yellow]Confirmation[/bold yellow]",
+                    border_style="yellow",
+                    padding=(0, 2),
+                )
+            )
+            display_prompt = f"  {yn_hint} › "
+        else:
+            accent = "\033[33m"
+            reset = self._ansi_reset()
+            dim = self._ansi_dim()
+            print(f"{accent}  {question}{reset}")
+            display_prompt = f"  {yn_hint} › "
+
+        return read_confirm(display_prompt, default=default)
+
+    def prompt_question(self, question: str, hint: str = "") -> str | None:
+        """
+        Draw a styled free-text question panel (used for model interaction).
+        Returns the typed answer, or None if the user pressed Enter/Ctrl-C.
+        """
+        from cli.prompt import read_text
+
+        if self.console and Panel:
+            body = question
+            if hint:
+                body += f"\n[bright_black]{hint}[/bright_black]"
+            self.console.print(
+                Panel(
+                    body,
+                    title="[bold cyan]❓ Model asks[/bold cyan]",
+                    border_style="cyan",
+                    padding=(0, 2),
+                )
+            )
+            display_prompt = "  › "
+        else:
+            dim = self._ansi_dim()
+            reset = self._ansi_reset()
+            print(f"\n  ❓ {question}")
+            if hint:
+                print(f"{dim}  {hint}{reset}")
+            display_prompt = "  › "
+
+        return read_text(display_prompt)
+
     # ── file diff / preview ───────────────────────────────────────────────────
 
     def print_file_diff(self, file_path: str, is_new: bool, provider: str = ""):

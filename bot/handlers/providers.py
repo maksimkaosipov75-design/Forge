@@ -74,11 +74,11 @@ async def handle_provider_panel(
         for n in list_supported_provider_names()
     )
     await message.answer(
-        f"🤖 Провайдер по умолчанию: <b>{escape(session.current_provider)}</b>\n"
-        f"▶️ Активный: <b>{escape(session.active_provider or session.current_provider)}</b>\n"
-        f"🕘 В очереди: {queue_info}\n\n"
-        f"<b>Модели</b>\n{model_lines}\n\n"
-        f"Переключить: {provider_cmds}.",
+        f"🤖 Default provider: <b>{escape(session.current_provider)}</b>\n"
+        f"▶️ Active: <b>{escape(session.active_provider or session.current_provider)}</b>\n"
+        f"🕘 Queued: {queue_info}\n\n"
+        f"<b>Models</b>\n{model_lines}\n\n"
+        f"Switch: {provider_cmds}.",
         reply_markup=core.provider_keyboard(session),
     )
 
@@ -88,12 +88,12 @@ async def handle_set_provider(
 ) -> None:
     if not is_supported_provider(name):
         providers = ", ".join(f"<code>{n}</code>" for n in list_supported_provider_names())
-        await message.answer(f"❌ Доступные провайдеры: {providers}.")
+        await message.answer(f"❌ Available providers: {providers}.")
         return
     session.current_provider = normalize_provider_name(name)
     core.session_store.save(session)
     await message.answer(
-        f"✅ Провайдер по умолчанию переключён на <b>{escape(name)}</b>.",
+        f"✅ Default provider switched to <b>{escape(name)}</b>.",
         reply_markup=core.provider_keyboard(session),
     )
 
@@ -104,7 +104,7 @@ async def handle_reset_provider(
     session.current_provider = core.default_provider
     core.session_store.save(session)
     await message.answer(
-        f"↩️ Провайдер сброшен на <b>{escape(core.default_provider)}</b>.",
+        f"↩️ Provider reset to <b>{escape(core.default_provider)}</b>.",
         reply_markup=core.provider_keyboard(session),
     )
 
@@ -116,7 +116,7 @@ async def handle_model_overview(
     target_provider: str | None = None,
 ) -> None:
     providers = [target_provider] if target_provider else list_supported_provider_names()
-    sections = ["<b>🧠 Модели провайдеров</b>"]
+    sections = ["<b>🧠 Provider models</b>"]
     for name in providers:
         rt = session.runtimes.get(name)
         current = _model_label(session, name, rt)
@@ -130,7 +130,7 @@ async def handle_model_overview(
                 )
             )
     sections.append(
-        "Использование: <code>/model qwen qwen-coder-plus</code> или "
+        "Usage: <code>/model qwen qwen-coder-plus</code> or "
         "<code>/model codex default</code>."
     )
     await core.send_structured(message, sections)
@@ -153,6 +153,6 @@ async def handle_model_set(
     core.session_store.save(session)
     label = new_model or "default"
     await message.answer(
-        f"🧠 Для <b>{escape(target_provider)}</b> выбрана модель "
-        f"<code>{escape(label)}</code>. Следующий запуск возьмёт её автоматически."
+        f"🧠 Model for <b>{escape(target_provider)}</b> set to "
+        f"<code>{escape(label)}</code>. Next run will use it automatically."
     )

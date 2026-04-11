@@ -24,20 +24,20 @@ if TYPE_CHECKING:
 
 
 def _history_lines(session: ChatSession, limit: int = 5) -> list[str]:
-    lines = ["<b>🕘 Последние задачи</b>"]
+    lines = ["<b>🕘 Recent tasks</b>"]
     items = session.run_history or [TaskRun.from_task_result(i) for i in session.history]
     for idx, item in enumerate(reversed(items[-limit:]), start=1):
         ts = escape(item.finished_or_started_at.replace("T", " ")[:19])
         preview = escape(item.prompt[:120] + ("…" if len(item.prompt) > 120 else ""))
         lines.append(
             f"{idx}. {item.status_emoji} <code>{preview}</code>\n"
-            f"   <i>{ts}</i> • {item.duration_text} • subtasks: {len(item.subtasks)} • файлов: {len(item.touched_files)}"
+            f"   <i>{ts}</i> • {item.duration_text} • subtasks: {len(item.subtasks)} • files: {len(item.touched_files)}"
         )
     return lines
 
 
 def _runs_lines(session: ChatSession, limit: int = 10) -> list[str]:
-    lines = ["<b>🏃 Последние run-ы</b>"]
+    lines = ["<b>🏃 Recent runs</b>"]
     for idx, item in enumerate(reversed(session.run_history[-limit:]), start=1):
         ts = escape(item.finished_or_started_at.replace("T", " ")[:19])
         lines.append(
@@ -51,10 +51,10 @@ async def handle_history_list(
     core: "BotCore", message: "Message", session: ChatSession
 ) -> None:
     if not session.run_history and not session.history:
-        await message.answer("🕘 История задач пока пуста.")
+        await message.answer("🕘 Task history is empty.")
         return
     lines = _history_lines(session)
-    lines.append("\n<i>Чтобы открыть запись: /history 1</i>")
+    lines.append("\n<i>To view a record: /history 1</i>")
     await message.answer("\n".join(lines))
 
 
@@ -64,11 +64,11 @@ async def handle_history_detail(
     source = session.run_history or [TaskRun.from_task_result(i) for i in session.history]
     recent = list(reversed(source))
     if index < 1 or index > len(recent):
-        await message.answer("❌ Нет записи истории с таким номером.")
+        await message.answer("❌ No history record with that number.")
         return
     item = recent[index - 1]
     sections = [
-        f"<b>🕘 Задача #{index}</b>",
+        f"<b>🕘 Task #{index}</b>",
         f"<code>{escape(item.prompt)}</code>",
         (
             f"<i>{escape(item.finished_or_started_at.replace('T', ' ')[:19])}</i> • "
@@ -103,7 +103,7 @@ async def handle_history_detail(
         changed_files=item.changed_files or None,
     ))
     if item.error_text:
-        sections.append(f"<b>❌ Ошибка</b>\n<pre>{escape(item.error_text[:3000])}</pre>")
+        sections.append(f"<b>❌ Error</b>\n<pre>{escape(item.error_text[:3000])}</pre>")
     if item.review_answer:
         sections.append(f"<b>🔍 Review</b>\n<pre>{escape(item.review_answer[:3000])}</pre>")
     await core.send_structured(message, sections)
@@ -112,7 +112,7 @@ async def handle_history_detail(
     escape_fn = core.get_runtime(session, prov).parser._escape_html
     await send_answer_chunks(
         core.bot, message, item.answer_text, escape_fn,
-        title="<b>📋 Ответ из истории</b>",
+        title="<b>📋 Response from history</b>",
     )
 
 
@@ -120,10 +120,10 @@ async def handle_runs(
     core: "BotCore", message: "Message", session: ChatSession
 ) -> None:
     if not session.run_history:
-        await message.answer("🏃 Run-ов пока нет.")
+        await message.answer("🏃 No runs yet.")
         return
     lines = _runs_lines(session)
-    lines.append("\n<i>Чтобы открыть артефакт: /artifacts 1</i>")
+    lines.append("\n<i>To view an artifact: /artifacts 1</i>")
     await message.answer("\n".join(lines))
 
 
@@ -132,12 +132,12 @@ async def handle_artifact(
 ) -> None:
     recent = list(reversed(session.run_history))
     if index < 1 or index > len(recent):
-        await message.answer("❌ Нет run-а с таким номером.")
+        await message.answer("❌ No run with that number.")
         return
     run = recent[index - 1]
     artifact_path = Path(run.artifact_file) if run.artifact_file else None
     if not artifact_path or not artifact_path.exists():
-        await message.answer("⚠️ Для этого run-а артефакт не найден.")
+        await message.answer("⚠️ No artifact found for this run.")
         return
     content = artifact_path.read_text(encoding="utf-8", errors="replace")
     active = session.active_provider or session.current_provider
@@ -152,7 +152,7 @@ async def handle_diff(
     work_dir = session.file_mgr.get_working_dir()
     rc, _, _ = await core.run_git(work_dir, "rev-parse", "--is-inside-work-tree")
     if rc != 0:
-        await message.answer("⚠️ Текущая директория не является git-репозиторием.")
+        await message.answer("⚠️ Current directory is not a git repository.")
         return
 
     diff_files = session.last_task_result.touched_files if mode == "last" else []
@@ -169,10 +169,10 @@ async def handle_diff(
         return
 
     if not diff_out.strip():
-        await message.answer("🟢 Изменений для показа нет.")
+        await message.answer("🟢 No changes to show.")
         return
 
-    sections = ["<b>🧾 Diff последних изменений</b>"]
+    sections = ["<b>🧾 Diff of recent changes</b>"]
     if session.last_task_result.prompt:
         sections.append(f"<code>{escape(session.last_task_result.prompt[:160])}</code>")
     if stat_out.strip():
@@ -186,5 +186,5 @@ async def handle_diff(
     escape_fn = core.get_runtime(session, prov).parser._escape_html
     diff_chunks = chunk_code_sections(diff_out, escape_fn, language="diff", max_len=2800)
     for idx, chunk in enumerate(diff_chunks):
-        title = "<b>🧾 Patch</b>" if idx == 0 else "<b>🧾 Patch</b> <i>(продолжение)</i>"
+        title = "<b>🧾 Patch</b>" if idx == 0 else "<b>🧾 Patch</b> <i>(continued)</i>"
         await message.answer(f"{title}\n\n{chunk}")

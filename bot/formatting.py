@@ -163,13 +163,13 @@ def format_task_result_sections(
     new_files: list[str] | None = None,
     changed_files: list[str] | None = None,
 ) -> list[str]:
-    parts: list[str] = ["<b>✅ Задача выполнена</b>"]
+    parts: list[str] = ["<b>✅ Task complete</b>"]
     if new_files:
-        parts.append("<b>📂 Созданы файлы</b>")
+        parts.append("<b>📂 New files</b>")
         for fp in new_files:
             parts.append(f"• <code>{escape(rel_display(fp, working_dir))}</code>")
     if changed_files:
-        parts.append("<b>✏️ Изменены файлы</b>")
+        parts.append("<b>✏️ Changed files</b>")
         for fp in changed_files:
             parts.append(f"• <code>{escape(rel_display(fp, working_dir))}</code>")
     return parts
@@ -177,8 +177,8 @@ def format_task_result_sections(
 
 def format_status_message(progress_html: str) -> str:
     if progress_html:
-        return f"⏳ <b>Выполняю</b>\n\n{progress_html}"
-    return "⏳ <b>Выполняю</b>\n\nПодготавливаю задачу…"
+        return f"⏳ <b>Running</b>\n\n{progress_html}"
+    return "⏳ <b>Running</b>\n\nPreparing task…"
 
 
 # ── inline keyboards ──────────────────────────────────────────────────────────
@@ -201,22 +201,22 @@ def build_task_buttons(
                 callback_data=f"view_file:{_reg_file(fp)}",
             )
         ])
-    action_row = [InlineKeyboardButton(text="🔄 Повторить", callback_data="repeat_task")]
+    action_row = [InlineKeyboardButton(text="🔄 Repeat", callback_data="repeat_task")]
     if can_retry_failed:
         action_row.append(
             InlineKeyboardButton(text="♻️ Retry Failed", callback_data="retry_failed_subtask")
         )
     rows.append(action_row)
-    rows.append([InlineKeyboardButton(text="ℹ️ Подробнее", callback_data="show_details")])
+    rows.append([InlineKeyboardButton(text="ℹ️ Details", callback_data="show_details")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def build_plan_preview_buttons(can_run: bool = True) -> InlineKeyboardMarkup:
     row = []
     if can_run:
-        row.append(InlineKeyboardButton(text="▶️ Запустить план", callback_data="plan_run"))
-    row.append(InlineKeyboardButton(text="✏️ Редактировать", callback_data="plan_edit"))
-    row.append(InlineKeyboardButton(text="❌ Отменить", callback_data="plan_cancel"))
+        row.append(InlineKeyboardButton(text="▶️ Run plan", callback_data="plan_run"))
+    row.append(InlineKeyboardButton(text="✏️ Edit", callback_data="plan_edit"))
+    row.append(InlineKeyboardButton(text="❌ Cancel", callback_data="plan_cancel"))
     return InlineKeyboardMarkup(inline_keyboard=[row])
 
 
@@ -224,12 +224,12 @@ def build_interaction_buttons(kind: str) -> InlineKeyboardMarkup:
     """Inline keyboard for model interaction prompts (questions / approvals)."""
     if kind == "approval":
         return InlineKeyboardMarkup(inline_keyboard=[[
-            InlineKeyboardButton(text="✅ Да", callback_data="interaction:yes"),
-            InlineKeyboardButton(text="❌ Нет", callback_data="interaction:no"),
+            InlineKeyboardButton(text="✅ Yes", callback_data="interaction:yes"),
+            InlineKeyboardButton(text="❌ No", callback_data="interaction:no"),
         ]])
     # free-text question — only a skip button; user types their answer
     return InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="⏭ Пропустить", callback_data="interaction:skip"),
+        InlineKeyboardButton(text="⏭ Skip", callback_data="interaction:skip"),
     ]])
 
 
@@ -254,7 +254,7 @@ async def send_answer_chunks(
     anchor_message: Message,
     answer_text: str,
     escape_fn,
-    title: str = "<b>📋 Ответ агента</b>",
+    title: str = "<b>📋 Agent response</b>",
     skip_first_chunk: bool = False,
 ):
     if not answer_text or not answer_text.strip():
@@ -262,11 +262,11 @@ async def send_answer_chunks(
     chunks = chunk_code_sections(answer_text, escape_fn)
     start = 1 if skip_first_chunk else 0
     for idx, chunk in enumerate(chunks[start:], start=start):
-        prefix = title if idx == 0 else f"{title} <i>(продолжение)</i>"
+        prefix = title if idx == 0 else f"{title} <i>(continued)</i>"
         try:
             await send_html(bot, anchor_message.chat.id, f"{prefix}\n\n{chunk}")
         except Exception as exc:
-            log.exception("Не удалось отправить chunk ответа: %s", exc)
+            log.exception("Failed to send answer chunk: %s", exc)
             for plain in split_plain_text(escape_fn(answer_text), max_len=3500):
                 await send_html(bot, anchor_message.chat.id, f"{prefix}\n\n<pre>{plain}</pre>")
             return
@@ -289,7 +289,7 @@ async def send_or_edit_structured(
         try:
             await send_html(bot, anchor.chat.id, chunk)
         except Exception as exc:
-            log.exception("Не удалось отправить structured chunk: %s", exc)
+            log.exception("Failed to send structured chunk: %s", exc)
             for plain in split_plain_text(escape(chunk), max_len=3500):
                 await send_html(bot, anchor.chat.id, f"<pre>{plain}</pre>")
 
@@ -304,6 +304,6 @@ def build_file_preview_messages(
     chunks = split_plain_text(content, max_len=3200)
     messages = []
     for idx, chunk in enumerate(chunks):
-        title = header if idx == 0 else f"{header} <i>(продолжение)</i>"
+        title = header if idx == 0 else f"{header} <i>(continued)</i>"
         messages.append(f"{title}\n\n{code_block(chunk, escape, language)}")
     return messages

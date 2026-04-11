@@ -722,6 +722,8 @@ def create_textual_app(container, chat_id: int = 0):
             self.initial_query = initial_query
             self.filtered: list[tuple[str, str, str, tuple[str, ...]]] = []
             self.selected = 0
+            self._page_size = 18
+            self._scroll_offset = 0
 
         CSS = """
         ModelPickerModal {
@@ -730,10 +732,10 @@ def create_textual_app(container, chat_id: int = 0):
         #model-dialog {
             width: 96;
             height: auto;
-            max-height: 28;
             border: round #555;
             background: #1e1e1e;
             padding: 1 2;
+            overflow: hidden hidden;
         }
         #model-title {
             text-align: center;
@@ -751,9 +753,9 @@ def create_textual_app(container, chat_id: int = 0):
             border: round #58c777;
         }
         #model-list {
-            height: auto;
-            max-height: 18;
+            height: 22;
             color: #d4d4d4;
+            overflow: hidden hidden;
         }
         #model-hint {
             text-align: center;
@@ -788,32 +790,44 @@ def create_textual_app(container, chat_id: int = 0):
             items.append(("__custom__", "Custom model…", "Enter any exact model id manually", ()))
             self.filtered = items
             self.selected = min(self.selected, max(0, len(items) - 1))
+            self._scroll_offset = 0
             self._render_list()
 
+        def _clamp_scroll(self) -> None:
+            """Keep selected item within the visible page window."""
+            if self.selected < self._scroll_offset:
+                self._scroll_offset = self.selected
+            elif self.selected >= self._scroll_offset + self._page_size:
+                self._scroll_offset = self.selected - self._page_size + 1
+
         def _render_list(self):
+            self._clamp_scroll()
+            total = len(self.filtered)
+            start = self._scroll_offset
+            end = min(start + self._page_size, total)
+            visible = self.filtered[start:end]
+
             lines: list[str] = []
             lines.append(f"[dim]Current:[/dim] {self.current_model or self.default_model or 'default'}")
             lines.append(f"[dim]Default:[/dim] {self.default_model or 'none'}")
+            if total > self._page_size:
+                lines.append(f"[dim]{start + 1}–{end} of {total}[/dim]")
             lines.append("")
-            for index, (name, label, description, aliases) in enumerate(self.filtered[:12]):
+            for i, (name, label, description, aliases) in enumerate(visible):
+                index = start + i
                 is_selected = index == self.selected
                 marker = "▶" if is_selected else " "
                 style = "bold reverse" if is_selected else "dim"
-                model_line = label if name == "__custom__" else f"{label}  [dim]{name}[/dim]"
                 tags = []
                 if name != "__custom__" and name == self.current_model:
-                    tags.append("[green](current)[/green]")
+                    tags.append("[green]✓[/green]")
                 if name != "__custom__" and name == self.default_model:
-                    tags.append("[cyan](default)[/cyan]")
-                tag_text = f"  {' '.join(tags)}" if tags else ""
-                lines.append(f"[{style}] {marker} {model_line}{tag_text}[/{style}]")
-                if description:
-                    lines.append(f"   [dim]{description}[/dim]")
-                if aliases and name != "__custom__":
-                    alias_items = list(dict.fromkeys(item for item in aliases if item))
-                    alias_preview = ", ".join(alias_items[:4])
-                    if alias_preview:
-                        lines.append(f"   [dim]aliases: {alias_preview}[/dim]")
+                    tags.append("[cyan]★[/cyan]")
+                tag_text = f" {''.join(tags)}" if tags else ""
+                if name == "__custom__":
+                    lines.append(f"[{style}] {marker} {label}{tag_text}[/{style}]")
+                else:
+                    lines.append(f"[{style}] {marker} {label}  [dim]{name}[/dim]{tag_text}[/{style}]")
             self.query_one("#model-list", Static).update("\n".join(lines))
 
         def on_input_changed(self, event: Input.Changed) -> None:
@@ -831,12 +845,36 @@ def create_textual_app(container, chat_id: int = 0):
                 self._render_list()
                 event.prevent_default()
                 return
+            if event.key == "pagedown" and self.filtered:
+                self.selected = min(self.selected + self._page_size, len(self.filtered) - 1)
+                self._render_list()
+                event.prevent_default()
+                return
+            if event.key == "pageup" and self.filtered:
+                self.selected = max(self.selected - self._page_size, 0)
+                self._render_list()
+                event.prevent_default()
+                return
             if event.key in {"enter", "return"} and self.filtered:
                 self.dismiss(self.filtered[self.selected][0])
                 event.prevent_default()
                 return
             if event.key == "escape":
                 self.dismiss(None)
+
+        def on_mouse_scroll_down(self, event) -> None:
+            if self.filtered:
+                self.selected = min(self.selected + 3, len(self.filtered) - 1)
+                self._render_list()
+                event.prevent_default()
+                event.stop()
+
+        def on_mouse_scroll_up(self, event) -> None:
+            if self.filtered:
+                self.selected = max(self.selected - 3, 0)
+                self._render_list()
+                event.prevent_default()
+                event.stop()
 
     class BridgeTextualApp(App):
         CSS = """
@@ -3055,6 +3093,27 @@ def create_textual_app(container, chat_id: int = 0):
                     self._push_output(logs or "No remote-control logs yet.")
                     return
                 self._push_output("Usage: /remote-control [status|stop|logs]")
+                return
+
+            # ── /! pass-through: send text verbatim to the active agent CLI ──
+            if command == "/!":
+                passthrough = arg  # arg = everything after "/!"
+                if not passthrough:
+                    self._push_output(
+                        "[bold]/! pass-through[/bold]\n\n"
+                        "Sends text verbatim to the active agent, bypassing Forge routing.\n\n"
+                        "[yellow]Note:[/yellow] Agent-native slash commands (e.g. [bold]/review[/bold] inside Qwen)\n"
+                        "require interactive REPL mode and won't work here.\n"
+                        "Only plain text prompts are supported.\n\n"
+                        "[dim]Example: /! what are your capabilities?[/dim]"
+                    )
+                    return
+                if self._active_task is not None and not self._active_task.done():
+                    self._append_stream(
+                        "  [dim]⏳ Task running — press [bold]Esc[/bold] to cancel first[/dim]"
+                    )
+                    return
+                self._active_task = asyncio.create_task(self._run_prompt(passthrough))
                 return
 
             self._push_output(f"Unknown command: {raw}")

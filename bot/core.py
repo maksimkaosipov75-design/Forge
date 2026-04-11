@@ -158,7 +158,7 @@ class BotCore:
             raise
 
     async def send_structured(self, message: Message, sections: list[str]) -> None:
-        status = await message.answer("⏳ <b>Подготавливаю ответ…</b>")
+        status = await message.answer("⏳ <b>Preparing response…</b>")
         await send_or_edit_structured(self.bot, message, status, sections)
 
     # ── git ───────────────────────────────────────────────────────────────────
@@ -181,7 +181,7 @@ class BotCore:
 
     async def check_access(self, message: Message) -> bool:
         if str(message.from_user.id) not in [str(uid) for uid in settings.ALLOWED_USER_IDS]:
-            await message.answer("⛔ Доступ запрещён.")
+            await message.answer("⛔ Access denied.")
             return False
         return True
 
@@ -189,16 +189,16 @@ class BotCore:
         validation = validate_prompt(prompt, max_length=settings.MAX_PROMPT_LENGTH)
         if not validation.allowed:
             await message.answer(
-                "⛔ <b>Запрос отклонён политикой безопасности.</b>\n"
-                f"Причина: {escape(validation.reason)}"
+                "⛔ <b>Request blocked by safety policy.</b>\n"
+                f"Reason: {escape(validation.reason)}"
             )
             return False
         user_id = str(message.from_user.id) if message.from_user else str(message.chat.id)
         ok, retry_after = self.rate_limiter.check(user_id)
         if not ok:
             await message.answer(
-                "⏱️ <b>Слишком много запросов.</b>\n"
-                f"Попробуйте снова примерно через <code>{retry_after}s</code>."
+                "⏱️ <b>Too many requests.</b>\n"
+                f"Try again in about <code>{retry_after}s</code>."
             )
             return False
         return True
@@ -217,7 +217,7 @@ class BotCore:
         Run a single provider task with live streaming into status_msg.
         This is the core improvement over the old bot: we now attach a
         TelegramStreamRenderer so the user sees tool calls and thinking
-        as they happen, not just a static "Выполняю…" message.
+        as they happen, not just a static "Running…" message.
         """
         runtime = self.get_runtime(session, provider_name)
         renderer = TelegramStreamRenderer(self, status_msg, provider_name, session)
@@ -268,11 +268,11 @@ class BotCore:
 
     def _queued_status_text(self, provider: str, pos: int) -> str:
         if pos <= 1:
-            return f"⏳ <b>Запускаю {self.provider_label(provider)}…</b>"
+            return f"⏳ <b>Starting {self.provider_label(provider)}…</b>"
         return (
-            "⏳ <b>Задача поставлена в очередь.</b>\n"
-            f"Провайдер: <b>{escape(provider)}</b>\n"
-            f"Позиция: {pos}"
+            "⏳ <b>Task queued.</b>\n"
+            f"Provider: <b>{escape(provider)}</b>\n"
+            f"Position: {pos}"
         )
 
     def _task_provider_keyboard(self, provider_name: str):
@@ -315,23 +315,23 @@ class BotCore:
                 async with session.task_lock:
                     task.started = True
                     if task.mode == "orchestrated" and task.plan is not None:
-                        await self.safe_edit(task.status_message, "⏳ <b>Запускаю orchestrator…</b>")
+                        await self.safe_edit(task.status_message, "⏳ <b>Starting orchestrator…</b>")
                         await run_orchestrated_task(self, session, task.plan, task.anchor_message, task.status_message, task.resume_from, task.prior_subtasks)
                     else:
                         await self.safe_edit(
                             task.status_message,
-                            f"⏳ <b>Запускаю {self.provider_label(task.provider)}…</b>",
+                            f"⏳ <b>Starting {self.provider_label(task.provider)}…</b>",
                             reply_markup=self._task_provider_keyboard(task.provider),
                         )
                         await run_task(self, session, task.provider, task.prompt, task.anchor_message, task.status_message)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                log.error("Ошибка воркера сессии %s: %s", session.chat_id, exc, exc_info=True)
+                log.error("Session worker error %s: %s", session.chat_id, exc, exc_info=True)
                 try:
                     await self.safe_edit(
                         task.status_message,
-                        f"❌ <b>Ошибка обработки задачи:</b> {escape(str(exc))}"
+                        f"❌ <b>Task processing error:</b> {escape(str(exc))}"
                     )
                 except Exception:
                     pass
@@ -354,7 +354,7 @@ class BotCore:
             )
             self._status_server.start()
         except OSError as exc:
-            log.warning("Не удалось запустить status HTTP server: %s", exc)
+            log.warning("Failed to start status HTTP server: %s", exc)
 
     def _render_health(self) -> str:
         lines = ["provider health"]

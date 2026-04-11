@@ -30,17 +30,17 @@ log = logging.getLogger(__name__)
 async def handle_plan(
     core: "BotCore", message: "Message", session: ChatSession, prompt: str
 ) -> None:
-    status_msg = await message.answer("⏳ <b>Строю план…</b>")
+    status_msg = await message.answer("⏳ <b>Building plan…</b>")
     plan = await core.orchestrator.build_plan(session, prompt)
     session.last_plan = plan
     core.session_store.save(session)
 
     sections = [
-        "<b>🧭 План оркестрации</b>",
+        "<b>🧭 Orchestration plan</b>",
         f"<code>{escape(plan.prompt)}</code>",
         (
-            f"<b>Сложность:</b> <code>{escape(plan.complexity)}</code>\n"
-            f"<b>Стратегия:</b> {escape(plan.strategy)}"
+            f"<b>Complexity:</b> <code>{escape(plan.complexity)}</code>\n"
+            f"<b>Strategy:</b> {escape(plan.strategy)}"
             + (f"\n<i>{escape(plan.ai_rationale)}</i>" if plan.ai_rationale else "")
         ),
     ]
@@ -48,18 +48,18 @@ async def handle_plan(
         deps = ", ".join(st.depends_on) if st.depends_on else "none"
         sections.append(
             f"<b>{i}. {escape(st.title)}</b>\n"
-            f"<b>Тип:</b> <code>{escape(st.task_kind)}</code>\n"
-            f"<b>Агент:</b> <code>{escape(st.suggested_provider)}</code>\n"
+            f"<b>Type:</b> <code>{escape(st.task_kind)}</code>\n"
+            f"<b>Agent:</b> <code>{escape(st.suggested_provider)}</code>\n"
             f"<b>Depends on:</b> <code>{escape(deps)}</code>\n"
             f"{escape(st.description)}\n"
             f"<i>{escape(st.reason)}</i>"
         )
     eta = core.orchestrator.estimate_plan_eta(plan, session)
     sections.append(
-        "Подтвердите кнопкой или отредактируйте командой "
-        "<code>/plan &lt;обновлённая задача&gt;</code>."
+        "Confirm with the button or refine with "
+        "<code>/plan &lt;updated task&gt;</code>."
     )
-    sections.append(f"<b>Оценка времени:</b> <code>{escape(eta)}</code>")
+    sections.append(f"<b>ETA:</b> <code>{escape(eta)}</code>")
 
     await send_or_edit_structured(
         core.bot, message, status_msg, sections,
@@ -78,7 +78,7 @@ async def handle_orchestrate(
     first_provider = plan.subtasks[0].suggested_provider if plan.subtasks else session.current_provider
     await core.enqueue_task(
         session, first_provider, prompt, message,
-        "⏳ <b>Запускаю orchestrator…</b>",
+        "⏳ <b>Starting orchestrator…</b>",
         mode="orchestrated", plan=plan,
     )
 
@@ -90,11 +90,11 @@ async def handle_retry_failed(
 ) -> None:
     last_run = session.last_task_run
     if not last_run or last_run.mode != "orchestrated":
-        await message.answer("⚠️ Последняя задача не была orchestration-run.")
+        await message.answer("⚠️ Last task was not an orchestration run.")
         return
     retry_index = core.orchestrator.find_retry_start_index(last_run)
     if retry_index is None:
-        await message.answer("🟢 В последнем orchestration-run нет упавшей подзадачи.")
+        await message.answer("🟢 No failed subtask in the last orchestration run.")
         return
     plan = session.last_plan or await core.orchestrator.build_plan(session, last_run.prompt)
     session.last_plan = plan
@@ -106,7 +106,7 @@ async def handle_retry_failed(
     )
     await core.enqueue_task(
         session, provider, last_run.prompt, message,
-        f"⏳ <b>Возобновляю orchestrator с шага {retry_index + 1}…</b>",
+        f"⏳ <b>Resuming orchestrator from step {retry_index + 1}…</b>",
         mode="orchestrated", plan=plan,
         resume_from=retry_index, prior_subtasks=last_run.subtasks,
     )
@@ -155,7 +155,7 @@ async def handle_review(
 ) -> None:
     last = session.last_task_result
     if not last.answer_text.strip() and not last.touched_files:
-        await message.answer("⚠️ Нечего отправлять на review: нет последнего результата.")
+        await message.answer("⚠️ Nothing to review: no previous result found.")
         return
 
     source = last.provider or session.current_provider
@@ -165,8 +165,8 @@ async def handle_review(
 
     prompt = _build_review_request(last.prompt, last.answer_text, last.touched_files, focus)
     status_msg = await message.answer(
-        "⏳ <b>Запускаю code review…</b>\n\n"
-        f"<b>Источник:</b> <code>{escape(source)}</code>\n"
+        "⏳ <b>Starting code review…</b>\n\n"
+        f"<b>Source:</b> <code>{escape(source)}</code>\n"
         f"<b>Reviewer:</b> <code>{escape(reviewer)}</code>"
     )
 
@@ -177,7 +177,7 @@ async def handle_review(
         result = await core.execute_task(
             session, reviewer, prompt, status_msg,
             status_prefix=(
-                "⏳ <b>Выполняю review…</b>\n\n"
+                "⏳ <b>Running review…</b>\n\n"
                 f"<b>Reviewer:</b> <code>{escape(reviewer)}</code>"
             ),
         )
@@ -188,7 +188,7 @@ async def handle_review(
     if result.exit_code != 0:
         await send_or_edit_structured(
             core.bot, message, status_msg,
-            [f"⚠️ <b>Review завершился с ошибкой</b>",
+            [f"⚠️ <b>Review failed</b>",
              f"<pre>{escape((result.error_text or 'Unknown error')[:3000])}</pre>"],
         )
         return
@@ -205,12 +205,12 @@ async def handle_review(
 
     await send_or_edit_structured(
         core.bot, message, status_msg,
-        ["<b>🔍 Review готов</b>",
-         f"<b>Источник:</b> <code>{escape(source)}</code>\n<b>Reviewer:</b> <code>{escape(reviewer)}</code>"],
+        ["<b>🔍 Review ready</b>",
+         f"<b>Source:</b> <code>{escape(source)}</code>\n<b>Reviewer:</b> <code>{escape(reviewer)}</code>"],
     )
     await send_answer_chunks(
         core.bot, message, result.answer_text,
-        runtime.parser._escape_html, title="<b>🔍 Ответ reviewer-а</b>",
+        runtime.parser._escape_html, title="<b>🔍 Review response</b>",
     )
 
 
@@ -222,37 +222,37 @@ async def handle_commit(
     work_dir = session.file_mgr.get_working_dir()
     rc, _, _ = await core.run_git(work_dir, "rev-parse", "--is-inside-work-tree")
     if rc != 0:
-        await message.answer("⚠️ Текущая директория не является git-репозиторием.")
+        await message.answer("⚠️ Current directory is not a git repository.")
         return
 
     rc, status_out, status_err = await core.run_git(work_dir, "status", "--short")
     if rc != 0:
-        await message.answer(f"❌ Не удалось получить git status:\n<pre>{escape(status_err[:3000])}</pre>")
+        await message.answer(f"❌ Failed to get git status:\n<pre>{escape(status_err[:3000])}</pre>")
         return
     if not status_out.strip():
-        await message.answer("🟢 Нет изменений для коммита.")
+        await message.answer("🟢 Nothing to commit.")
         return
 
     derived = commit_msg.strip() or session.last_task_result.prompt.strip() or "AI: update project"
     safe_msg = " ".join(derived.split())[:120] or "AI: update project"
-    status_msg = await message.answer(f"⏳ <b>Создаю git commit…</b>\n\n<code>{escape(safe_msg)}</code>")
+    status_msg = await message.answer(f"⏳ <b>Creating git commit…</b>\n\n<code>{escape(safe_msg)}</code>")
 
     rc, _, add_err = await core.run_git(work_dir, "add", "-A")
     if rc != 0:
         await send_or_edit_structured(core.bot, message, status_msg,
-            [f"❌ <b>git add -A завершился с ошибкой</b>\n<pre>{escape(add_err[:3000])}</pre>"])
+            [f"❌ <b>git add -A failed</b>\n<pre>{escape(add_err[:3000])}</pre>"])
         return
 
     rc, commit_out, commit_err = await core.run_git(work_dir, "commit", "-m", safe_msg)
     if rc != 0:
         combined = (commit_err or commit_out or "Unknown git commit error")[:3000]
         await send_or_edit_structured(core.bot, message, status_msg,
-            [f"❌ <b>git commit завершился с ошибкой</b>\n<pre>{escape(combined)}</pre>"])
+            [f"❌ <b>git commit failed</b>\n<pre>{escape(combined)}</pre>"])
         return
 
     rc, rev_out, _ = await core.run_git(work_dir, "rev-parse", "--short", "HEAD")
     hash_ = rev_out.strip() if rc == 0 else "unknown"
-    sections = ["<b>✅ Commit создан</b>",
+    sections = ["<b>✅ Commit created</b>",
                 f"<b>Hash:</b> <code>{escape(hash_)}</code>",
                 f"<b>Message:</b> <code>{escape(safe_msg)}</code>"]
     if commit_out.strip():
@@ -274,9 +274,9 @@ async def handle_recover(
     checkpoint = core.session_store.load_checkpoint(session)
     if checkpoint is None:
         await message.answer(
-            "🟢 Нет сохранённого чекпоинта.\n\n"
-            "Чекпоинт создаётся после каждого успешного шага оркестрации "
-            "и очищается при успешном завершении."
+            "🟢 No saved checkpoint.\n\n"
+            "A checkpoint is created after each successful orchestration step "
+            "and cleared on successful completion."
         )
         return
 
@@ -296,14 +296,74 @@ async def handle_recover(
         else session.current_provider
     )
 
-    failed_info = f", упал: {escape(failed[-1].title)}" if failed else ""
+    failed_info = f", failed: {escape(failed[-1].title)}" if failed else ""
     await core.enqueue_task(
         session, provider, checkpoint.prompt, message,
-        f"⏳ <b>Восстанавливаю с шага {resume_from + 1}"
+        f"⏳ <b>Recovering from step {resume_from + 1}"
         f"/{len(plan.subtasks)}{failed_info}…</b>",
         mode="orchestrated", plan=plan,
         resume_from=resume_from, prior_subtasks=checkpoint.subtasks,
     )
+
+
+# ── /! (pass-through) ────────────────────────────────────────────────────────
+
+async def handle_passthrough(
+    core: "BotCore", message: "Message", session: ChatSession, raw_cmd: str
+) -> None:
+    """
+    Send a raw command string directly to the active agent CLI, bypassing
+    Forge's command routing.  Useful for native slash commands like /review,
+    /loop, /qc-helper, etc. that live inside the underlying agent.
+
+    Usage:  /! /review --focus security
+            /! /compact
+    """
+    if session.task_lock.locked() or not session.task_queue.empty():
+        await message.answer("⏳ A task is already active. Wait for it to finish first.")
+        return
+    if not raw_cmd.strip():
+        await message.answer(
+            "📝 Usage: <code>/! &lt;text&gt;</code>\n\n"
+            "Sends text verbatim to the active agent, bypassing Forge routing.\n\n"
+            "<b>Note:</b> Agent-native slash commands (e.g. <code>/review</code> inside Qwen) "
+            "require interactive REPL mode and won't work — only plain text prompts.\n\n"
+            "Example: <code>/! what are your capabilities?</code>"
+        )
+        return
+
+    provider = session.current_provider
+    runtime = core.get_runtime(session, provider)
+    await core.ensure_runtime_started(session, provider)
+
+    status_msg = await message.answer(
+        f"⏭ <b>Pass-through → {escape(provider)}</b>\n"
+        f"<code>{escape(raw_cmd)}</code>"
+    )
+    try:
+        async with session.task_lock:
+            session.active_provider = provider
+            runtime.parser.clear_full_buffer()
+            runtime.parser.set_final_result("")
+            runtime.manager.set_final_result_callback(lambda t: runtime.parser.set_final_result(t))
+            await runtime.manager.send_command(raw_cmd, cwd=session.file_mgr.get_working_dir())
+            response = runtime.parser.final_result or runtime.parser.get_full_response()
+        if response and response.strip():
+            sections = [
+                f"<b>⏭ Agent response ({escape(provider)})</b>",
+                *chunk_code_sections(response, runtime.parser._escape_html),
+            ]
+            await send_or_edit_structured(core.bot, message, status_msg, sections)
+        else:
+            await core.safe_edit(status_msg, f"⏭ <b>Command sent.</b> No text response.")
+    except Exception as exc:
+        log.error("/! passthrough error: %s", exc, exc_info=True)
+        runtime.manager.mark_failure(str(exc))
+        await core.safe_edit(status_msg, f"❌ <b>Error:</b> {escape(str(exc))}")
+    finally:
+        session.active_provider = ""
+        runtime.manager.set_final_result_callback(None)
+        runtime.parser.clear_full_buffer()
 
 
 # ── /btw ──────────────────────────────────────────────────────────────────────
@@ -312,12 +372,12 @@ async def handle_btw(
     core: "BotCore", message: "Message", session: ChatSession, question: str
 ) -> None:
     if session.task_lock.locked() or not session.task_queue.empty():
-        await message.answer("⏳ В этом чате уже есть активная или ожидающая задача.")
+        await message.answer("⏳ A task is already active or queued in this chat.")
         return
     provider = session.current_provider
     runtime = core.get_runtime(session, provider)
     await core.ensure_runtime_started(session, provider)
-    status_msg = await message.answer(f"❓ Спрашиваю: <i>{escape(question)}</i>")
+    status_msg = await message.answer(f"❓ Asking: <i>{escape(question)}</i>")
     try:
         async with session.task_lock:
             session.active_provider = provider
@@ -328,16 +388,16 @@ async def handle_btw(
             response = runtime.parser.final_result or runtime.parser.get_full_response()
         if response and response.strip():
             sections = [
-                f"<b>💬 Ответ ({escape(provider)})</b>",
+                f"<b>💬 Response ({escape(provider)})</b>",
                 *chunk_code_sections(response, runtime.parser._escape_html),
             ]
             await send_or_edit_structured(core.bot, message, status_msg, sections)
         else:
-            await core.safe_edit(status_msg, "⚠️ <b>Не удалось получить ответ.</b>")
+            await core.safe_edit(status_msg, "⚠️ <b>No response received.</b>")
     except Exception as exc:
-        log.error("Ошибка /btw: %s", exc, exc_info=True)
+        log.error("/btw error: %s", exc, exc_info=True)
         runtime.manager.mark_failure(str(exc))
-        await core.safe_edit(status_msg, f"❌ <b>Ошибка:</b> {escape(str(exc))}")
+        await core.safe_edit(status_msg, f"❌ <b>Error:</b> {escape(str(exc))}")
     finally:
         session.active_provider = ""
         runtime.manager.set_final_result_callback(None)

@@ -51,6 +51,7 @@ COMMAND_SPECS: tuple[CommandSpec, ...] = (
     CommandSpec("/replan", "Orchestration", "Retry or continue a failed orchestration"),
     CommandSpec("/recover", "Orchestration", "Resume from a crash checkpoint"),
     CommandSpec("/remote-control", "Remote", "Start or manage Telegram remote access"),
+    CommandSpec("/!", "Shell", "Send text verbatim to the agent (bypasses Forge routing; agent slash cmds won't work in batch mode)"),
 )
 
 

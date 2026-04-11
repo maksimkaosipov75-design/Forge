@@ -33,8 +33,8 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-_EDIT_INTERVAL = 1.5        # seconds between Telegram edits
-_MAX_VISIBLE_LINES = 6      # recent event lines shown in status
+_EDIT_INTERVAL = 1.0        # seconds between Telegram edits
+_MAX_VISIBLE_LINES = 8      # recent event lines shown in status
 _MAX_THINKING_CHARS = 1000  # max chars in collapsed thinking blockquote
 _THINKING_SNIPPET_LEN = 90  # max chars of rolling snippet during thinking
 
@@ -51,36 +51,39 @@ def _fmt_tokens(n: int) -> str:
     return f"↑ {n / 1000:.1f}k" if n >= 1000 else f"↑ {n}"
 
 
-def _event_to_line(raw: str) -> str | None:
-    """Convert a raw stream event into a Telegram HTML line, or None to skip."""
+def _event_to_line(raw: str) -> tuple[str, bool] | None:
+    """
+    Convert a raw stream event into a (html_line, is_action) tuple, or None to skip.
+    is_action=True marks lines that represent the "current operation" (tool/file/shell).
+    """
     if raw.startswith(("💬 ", "🧠 ", "🔢 ", "🏁 ")):
         return None  # handled separately or suppressed
     if raw.startswith("🔧 "):
         tool = raw[2:].strip()
-        if "Использую: " in tool:
-            tool = tool.split("Использую: ", 1)[1]
-        short = (tool[:42] + "…") if len(tool) > 44 else tool
-        return f"🔧 <code>{escape(short)}</code>"
+        if "Using: " in tool:
+            tool = tool.split("Using: ", 1)[1]
+        short = (tool[:52] + "…") if len(tool) > 54 else tool
+        return f"🔧 <code>{escape(short)}</code>", True
     if raw.startswith(("✏️ ", "📂 ")):
-        parts = raw[2:].strip().split()
-        name = Path(parts[-1]).name if parts else "file"
+        body = raw[2:].strip()
+        # Try to get the full path for display; fall back to name only
+        name = Path(body.split()[-1]).name if body.split() else "file"
         icon = "✏️" if raw.startswith("✏️") else "📂"
-        return f"{icon} <code>{escape(name)}</code>"
+        return f"{icon} <code>{escape(name)}</code>", True
     if raw.startswith("👁️ "):
-        parts = raw[3:].strip().split()
-        name = Path(parts[-1]).name if parts else "file"
-        return f"👁 <code>{escape(name)}</code>"
+        body = raw[3:].strip()
+        name = Path(body.split()[-1]).name if body.split() else "file"
+        return f"👁 <code>{escape(name)}</code>", True
     if raw.startswith("🐚 "):
         cmd = raw[2:].strip()
-        for prefix in ("Запускаю: ", "Running: "):
-            if cmd.startswith(prefix):
-                cmd = cmd[len(prefix):]
-        short = (cmd[:42] + "…") if len(cmd) > 44 else cmd
-        return f"🐚 <code>{escape(short)}</code>"
+        if cmd.startswith("Running: "):
+            cmd = cmd[len("Running: "):]
+        short = (cmd[:52] + "…") if len(cmd) > 54 else cmd
+        return f"🐚 <code>{escape(short)}</code>", True
     if raw.startswith("❌ "):
-        return f"❌ {escape(raw[2:].strip()[:200])}"
+        return f"❌ {escape(raw[2:].strip()[:200])}", False
     if raw.startswith("⚙️ "):
-        return f"⚙️ <i>{escape(raw[2:].strip()[:80])}</i>"
+        return f"⚙️ <i>{escape(raw[2:].strip()[:80])}</i>", False
     return None
 
 
@@ -109,9 +112,11 @@ class TelegramStreamRenderer:
         self._loop: asyncio.AbstractEventLoop = asyncio.get_event_loop()
 
         self._event_lines: list[str] = []
+        self._current_action: str = ""   # most recent tool/file/shell line
         self._thinking_buf: list[str] = []
         self._thinking_done: bool = False
         self._token_count: int = 0
+        self._file_count: int = 0        # number of files written/created
         self._start: float = time.monotonic()
         self._last_edit: float = 0.0
         self._dirty: bool = False
@@ -156,8 +161,14 @@ class TelegramStreamRenderer:
             return
 
         # ── other visible events ─────────────────────────────────────────────
-        line = _event_to_line(raw)
-        if line:
+        result = _event_to_line(raw)
+        if result:
+            line, is_action = result
+            if is_action:
+                self._current_action = line
+                # Count file writes
+                if raw.startswith(("✏️ ", "📂 ")):
+                    self._file_count += 1
             self._event_lines.append(line)
             if len(self._event_lines) > _MAX_VISIBLE_LINES * 2:
                 self._event_lines = self._event_lines[-_MAX_VISIBLE_LINES:]
@@ -175,9 +186,9 @@ class TelegramStreamRenderer:
         self._interaction_future = self._loop.create_future()
 
         question_html = (
-            f"❓ <b>Модель спрашивает</b>\n\n{escape(text.strip())}"
+            f"❓ <b>Model asks</b>\n\n{escape(text.strip())}"
             if kind != "approval"
-            else f"✅ <b>Подтверждение</b>\n\n{escape(text.strip())}"
+            else f"✅ <b>Confirm action</b>\n\n{escape(text.strip())}"
         )
         try:
             msg = await send_html(
@@ -258,7 +269,6 @@ class TelegramStreamRenderer:
     def _build_status_text(self) -> str:
         elapsed = _fmt_elapsed(time.monotonic() - self._start)
         tokens = _fmt_tokens(self._token_count) if self._token_count else ""
-        meta = f"  <i>{elapsed}" + (f" · {tokens}" if tokens else "") + "</i>"
 
         # Prefer session.active_provider so the label stays correct during
         # orchestration when different subtasks run on different providers.
@@ -267,28 +277,44 @@ class TelegramStreamRenderer:
             if getattr(self._session, "active_provider", "")
             else self._provider
         )
-        parts: list[str] = [f"⏳ <b>{escape(current_provider)}</b>{meta}"]
 
+        # ── header: provider · elapsed · tokens · files ──────────────────────
+        meta_parts = [elapsed]
+        if tokens:
+            meta_parts.append(tokens)
+        if self._file_count:
+            meta_parts.append(f"{self._file_count} file{'s' if self._file_count != 1 else ''}")
+        meta = " · ".join(meta_parts)
+        parts: list[str] = [f"⏳ <b>{escape(current_provider)}</b>  <i>{meta}</i>"]
+
+        # ── current action: most recent tool/file/shell call ─────────────────
+        if self._current_action:
+            parts.append(f"<b>▸</b> {self._current_action}")
+
+        # ── thinking ──────────────────────────────────────────────────────────
         if self._thinking_buf:
             thinking_text = " ".join(self._thinking_buf).strip()
             if self._thinking_done:
-                # ── thinking complete: collapsed expandable blockquote ────────
+                # collapsed expandable blockquote once thinking is done
                 if len(thinking_text) > _MAX_THINKING_CHARS:
                     thinking_text = "…" + thinking_text[-_MAX_THINKING_CHARS:]
                 parts.append(
                     f"💭 <blockquote expandable>{escape(thinking_text)}</blockquote>"
                 )
             else:
-                # ── thinking in progress: rolling compact snippet ─────────────
+                # rolling snippet while thinking
                 snippet = thinking_text
                 if len(snippet) > _THINKING_SNIPPET_LEN:
                     snippet = "…" + snippet[-_THINKING_SNIPPET_LEN:]
                 parts.append(f"💭 <i>{escape(snippet)}</i>")
 
-        # Recent tool/file/shell event lines
-        visible = self._event_lines[-_MAX_VISIBLE_LINES:]
+        # ── recent event history (last N lines, excluding current action) ─────
+        # Show the last few lines as context, skipping the last one if it's
+        # already shown as "current action"
+        history = self._event_lines[:-1] if self._current_action and self._event_lines else self._event_lines
+        visible = history[-(_MAX_VISIBLE_LINES - 1):]
         if visible:
-            parts.append("\n".join(visible))
+            parts.append("<i>" + "\n".join(visible) + "</i>")
 
         return "\n\n".join(parts)
 

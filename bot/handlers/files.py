@@ -42,7 +42,7 @@ async def handle_cat(
         return
     if not target.exists():
         from html import escape
-        await message.answer(f"❌ Файл не найден: <code>{escape(target.name)}</code>")
+        await message.answer(f"❌ File not found: <code>{escape(target.name)}</code>")
         return
     if target.stat().st_size > 50_000:
         await message.answer_document(FSInputFile(target, filename=target.name))

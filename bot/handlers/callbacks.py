@@ -39,11 +39,11 @@ async def dispatch_callback(core: "BotCore", callback: CallbackQuery) -> None:
         answer_key = data.split(":", 1)[1]
         renderer = core.get_active_renderer(session.chat_id)
         if renderer is None:
-            await callback.answer("Вопрос уже устарел", show_alert=True)
+            await callback.answer("Prompt already expired", show_alert=True)
             return
         answer_map = {"yes": "y", "no": "n", "skip": ""}
         renderer.resolve_interaction(answer_map.get(answer_key, ""))
-        await callback.answer("Ответ принят")
+        await callback.answer("Response received")
         try:
             await callback.message.edit_reply_markup(reply_markup=None)
         except Exception:
@@ -56,7 +56,7 @@ async def dispatch_callback(core: "BotCore", callback: CallbackQuery) -> None:
         resolved = _resolve_file(fid)
         fp = Path(resolved) if resolved else None
         if fp is None or not fp.exists() or not fp.is_file():
-            await callback.answer("Файл не найден", show_alert=True)
+            await callback.answer("File not found", show_alert=True)
             return
         if fp.stat().st_size > 50_000:
             await callback.message.answer_document(FSInputFile(fp, filename=fp.name))
@@ -70,32 +70,32 @@ async def dispatch_callback(core: "BotCore", callback: CallbackQuery) -> None:
                     await callback.message.answer(preview)
                 await callback.answer()
             except Exception as exc:
-                await callback.answer(f"Ошибка: {exc}", show_alert=True)
+                await callback.answer(f"Error: {exc}", show_alert=True)
         return
 
     # ── task provider switch (before start) ─────────────────────────────────
     if data.startswith("task_provider:"):
         provider = data.split(":", 1)[1].strip().lower()
         if not is_supported_provider(provider):
-            await callback.answer("Неизвестный провайдер", show_alert=True)
+            await callback.answer("Unknown provider", show_alert=True)
             return
         task = session.pending_tasks.get(callback.message.message_id)
         if task is None:
-            await callback.answer("Эта задача уже завершена", show_alert=True)
+            await callback.answer("This task has already completed", show_alert=True)
             return
         if task.mode == "orchestrated":
-            await callback.answer("Для orchestrator-задачи провайдеры задаются планом", show_alert=True)
+            await callback.answer("Orchestrated tasks use providers defined by the plan", show_alert=True)
             return
         if task.started:
-            await callback.answer("Задача уже запущена", show_alert=True)
+            await callback.answer("Task already started", show_alert=True)
             return
         task.provider = provider
-        await callback.answer(f"Для задачи выбран {provider}")
+        await callback.answer(f"Provider set to {provider}")
         pos = core.queue_position(session, task)
         status = (
-            f"⏳ <b>Запускаю {core.provider_label(provider)}…</b>"
+            f"⏳ <b>Starting {core.provider_label(provider)}…</b>"
             if pos <= 1
-            else f"⏳ <b>Задача в очереди.</b>\nПровайдер: <b>{escape(provider)}</b>\nПозиция: {pos}"
+            else f"⏳ <b>Task queued.</b>\nProvider: <b>{escape(provider)}</b>\nPosition: {pos}"
         )
         await core.safe_edit(
             callback.message, status,
@@ -108,20 +108,20 @@ async def dispatch_callback(core: "BotCore", callback: CallbackQuery) -> None:
     if data.startswith("set_provider:"):
         provider = data.split(":", 1)[1].strip().lower()
         if not is_supported_provider(provider):
-            await callback.answer("Неизвестный провайдер", show_alert=True)
+            await callback.answer("Unknown provider", show_alert=True)
             return
         session.current_provider = normalize_provider_name(provider)
         core.session_store.save(session)
-        await callback.answer(f"Провайдер переключён на {provider}")
+        await callback.answer(f"Provider switched to {provider}")
         from core.providers import list_supported_provider_names
         provider_cmds = ", ".join(f"<code>/provider {n}</code>" for n in list_supported_provider_names())
         await core.safe_edit(
             callback.message,
             (
-                f"🤖 Провайдер по умолчанию: <b>{escape(session.current_provider)}</b>\n"
-                f"▶️ Активный: <b>{escape(session.active_provider or session.current_provider)}</b>\n"
-                f"🕘 В очереди: {core.queued_count(session)}\n\n"
-                f"Переключить: {provider_cmds}."
+                f"🤖 Default provider: <b>{escape(session.current_provider)}</b>\n"
+                f"▶️ Active: <b>{escape(session.active_provider or session.current_provider)}</b>\n"
+                f"🕘 Queued: {core.queued_count(session)}\n\n"
+                f"Switch: {provider_cmds}."
             ),
             reply_markup=core.provider_keyboard(session),
             parse_mode=ParseMode.HTML,
@@ -134,24 +134,24 @@ async def dispatch_callback(core: "BotCore", callback: CallbackQuery) -> None:
             plan = await core.orchestrator.build_plan(session, session.last_task_run.prompt)
             session.last_plan = plan
             core.session_store.save(session)
-            await callback.answer("План повторно добавлен в очередь")
+            await callback.answer("Plan re-queued")
             first = plan.subtasks[0].suggested_provider if plan.subtasks else session.current_provider
             await core.enqueue_task(
                 session, first, session.last_task_run.prompt,
-                callback.message, "⏳ <b>Повторяю orchestration plan…</b>",
+                callback.message, "⏳ <b>Repeating orchestration plan…</b>",
                 mode="orchestrated", plan=plan,
             )
             return
         if not session.last_task_result.prompt:
-            await callback.answer("Нет предыдущей задачи", show_alert=True)
+            await callback.answer("No previous task", show_alert=True)
             return
-        await callback.answer("Задача добавлена в очередь")
+        await callback.answer("Task queued")
         await core.enqueue_task(
             session,
             session.last_task_result.provider or session.current_provider,
             session.last_task_result.prompt,
             callback.message,
-            "⏳ <b>Повторяю последнюю задачу…</b>",
+            "⏳ <b>Repeating last task…</b>",
         )
         return
 
@@ -159,11 +159,11 @@ async def dispatch_callback(core: "BotCore", callback: CallbackQuery) -> None:
     if data == "retry_failed_subtask":
         last_run = session.last_task_run
         if not last_run or last_run.mode != "orchestrated":
-            await callback.answer("Нет orchestration-задачи для retry", show_alert=True)
+            await callback.answer("No orchestration task to retry", show_alert=True)
             return
         retry_index = core.orchestrator.find_retry_start_index(last_run)
         if retry_index is None:
-            await callback.answer("Упавших подзадач нет", show_alert=True)
+            await callback.answer("No failed subtasks", show_alert=True)
             return
         plan = session.last_plan or await core.orchestrator.build_plan(session, last_run.prompt)
         session.last_plan = plan
@@ -173,10 +173,10 @@ async def dispatch_callback(core: "BotCore", callback: CallbackQuery) -> None:
             if retry_index < len(plan.subtasks)
             else (last_run.synthesis_provider or session.current_provider)
         )
-        await callback.answer(f"Retry с шага {retry_index + 1}")
+        await callback.answer(f"Retrying from step {retry_index + 1}")
         await core.enqueue_task(
             session, provider, last_run.prompt, callback.message,
-            f"⏳ <b>Возобновляю orchestrator с шага {retry_index + 1}…</b>",
+            f"⏳ <b>Resuming orchestrator from step {retry_index + 1}…</b>",
             mode="orchestrated", plan=plan,
             resume_from=retry_index, prior_subtasks=last_run.subtasks,
         )
@@ -185,13 +185,13 @@ async def dispatch_callback(core: "BotCore", callback: CallbackQuery) -> None:
     # ── show details ─────────────────────────────────────────────────────────
     if data == "show_details":
         if not session.last_task_result.has_details:
-            await callback.answer("Подробностей пока нет", show_alert=True)
+            await callback.answer("No details available yet", show_alert=True)
             return
         await callback.answer()
         last_run = session.last_task_run or TaskRun.from_task_result(session.last_task_result)
         sections = [
-            f"<b>📝 Последняя задача</b>\n<code>{escape(session.last_task_result.prompt)}</code>",
-            f"<b>🤖 Провайдер:</b> <code>{escape(session.last_task_result.provider)}</code>",
+            f"<b>📝 Last task</b>\n<code>{escape(session.last_task_result.prompt)}</code>",
+            f"<b>🤖 Provider:</b> <code>{escape(session.last_task_result.provider)}</code>",
         ]
         if last_run.strategy:
             sections.append(f"<b>Strategy:</b> {escape(last_run.strategy)}")
@@ -221,7 +221,7 @@ async def dispatch_callback(core: "BotCore", callback: CallbackQuery) -> None:
         ))
         if session.last_task_result.touched_files:
             sections.append(
-                "<b>📁 Последние файлы</b>\n"
+                "<b>📁 Touched files</b>\n"
                 + "\n".join(
                     f"• <code>{escape(Path(p).name)}</code>"
                     for p in session.last_task_result.touched_files[:10]
@@ -240,34 +240,34 @@ async def dispatch_callback(core: "BotCore", callback: CallbackQuery) -> None:
     if data == "plan_run":
         plan = session.last_plan
         if plan is None or not plan.prompt.strip():
-            await callback.answer("План не найден", show_alert=True)
+            await callback.answer("Plan not found", show_alert=True)
             return
-        await callback.answer("План добавлен в очередь")
+        await callback.answer("Plan queued")
         first = plan.subtasks[0].suggested_provider if plan.subtasks else session.current_provider
         await core.enqueue_task(
             session, first, plan.prompt, callback.message,
-            "⏳ <b>Запускаю orchestrator…</b>",
+            "⏳ <b>Starting orchestrator…</b>",
             mode="orchestrated", plan=plan,
         )
         return
 
     if data == "plan_edit":
         plan = session.last_plan
-        plan_prompt = escape(plan.prompt) if plan else "новая задача"
+        plan_prompt = escape(plan.prompt) if plan else "new task"
         await callback.answer()
         await callback.message.answer(
-            "✏️ Чтобы изменить план, отправьте:\n"
+            "✏️ To refine the plan, send:\n"
             f"<code>/plan {plan_prompt}</code>"
         )
         return
 
     if data == "plan_cancel":
-        await callback.answer("План отменён")
+        await callback.answer("Plan cancelled")
         await core.safe_edit(
             callback.message,
-            "🛑 <b>Запуск плана отменён.</b>\n\n"
-            "Можно отправить <code>/plan &lt;задача&gt;</code> или "
-            "<code>/orchestrate &lt;задача&gt;</code>.",
+            "🛑 <b>Plan cancelled.</b>\n\n"
+            "You can send <code>/plan &lt;task&gt;</code> or "
+            "<code>/orchestrate &lt;task&gt;</code>.",
             parse_mode=ParseMode.HTML,
         )
         return

@@ -60,6 +60,7 @@ from bot.handlers.workflow import (
     handle_btw,
     handle_commit,
     handle_orchestrate,
+    handle_passthrough,
     handle_plan,
     handle_recover,
     handle_retry_failed,
@@ -176,7 +177,7 @@ def create_bot_and_setup(manager=None, parser=None, file_mgr=None):
                 session.current_provider = normalize_provider_name(pname)
                 core.session_store.save(session)
                 await message.answer(
-                    f"✅ Провайдер по умолчанию переключён на <b>{escape(pname)}</b>.",
+                    f"✅ Default provider switched to <b>{escape(pname)}</b>.",
                     reply_markup=core.provider_keyboard(session),
                 )
                 return
@@ -187,7 +188,7 @@ def create_bot_and_setup(manager=None, parser=None, file_mgr=None):
                 label = core.provider_label(pname)
                 await core.enqueue_task(
                     session, pname, prompt, message,
-                    f"⏳ <b>Запускаю {escape(label)}…</b>",
+                    f"⏳ <b>Starting {escape(label)}…</b>",
                 )
                 return
 
@@ -199,7 +200,7 @@ def create_bot_and_setup(manager=None, parser=None, file_mgr=None):
         if text.startswith("/history "):
             arg = text[9:].strip()
             if not arg.isdigit():
-                await message.answer("📝 Использование: <code>/history</code> или <code>/history 1</code>")
+                await message.answer("📝 Usage: <code>/history</code> or <code>/history 1</code>")
             else:
                 await handle_history_detail(core, message, session, int(arg))
             return
@@ -209,13 +210,13 @@ def create_bot_and_setup(manager=None, parser=None, file_mgr=None):
             return
 
         if text == "/artifacts":
-            await message.answer("📝 Использование: <code>/artifacts 1</code>")
+            await message.answer("📝 Usage: <code>/artifacts 1</code>")
             return
 
         if text.startswith("/artifacts "):
             arg = text.split(None, 1)[1].strip()
             if not arg.isdigit():
-                await message.answer("📝 Использование: <code>/artifacts 1</code>")
+                await message.answer("📝 Usage: <code>/artifacts 1</code>")
             else:
                 await handle_artifact(core, message, session, int(arg))
             return
@@ -257,7 +258,7 @@ def create_bot_and_setup(manager=None, parser=None, file_mgr=None):
         if text.startswith("/project "):
             parts = text.split(None, 2)
             if len(parts) < 3:
-                await message.answer("📝 Использование: <code>/project &lt;имя&gt; &lt;путь&gt;</code>")
+                await message.answer("📝 Usage: <code>/project &lt;name&gt; &lt;path&gt;</code>")
             else:
                 await handle_project_set(core, message, session, parts[1], parts[2])
             return
@@ -272,7 +273,7 @@ def create_bot_and_setup(manager=None, parser=None, file_mgr=None):
 
         # ── workflow commands ─────────────────────────────────────────────────
         if text == "/plan":
-            await message.answer("📝 Использование: <code>/plan &lt;задача&gt;</code>")
+            await message.answer("📝 Usage: <code>/plan &lt;task&gt;</code>")
             return
 
         if text.startswith("/plan "):
@@ -283,7 +284,7 @@ def create_bot_and_setup(manager=None, parser=None, file_mgr=None):
             return
 
         if text == "/orchestrate":
-            await message.answer("📝 Использование: <code>/orchestrate &lt;задача&gt;</code>")
+            await message.answer("📝 Usage: <code>/orchestrate &lt;task&gt;</code>")
             return
 
         if text.startswith("/orchestrate "):
@@ -325,13 +326,19 @@ def create_bot_and_setup(manager=None, parser=None, file_mgr=None):
             return
 
         if text == "/btw":
-            await message.answer("📝 Использование: <code>/btw Ваш вопрос</code>")
+            await message.answer("📝 Usage: <code>/btw your question</code>")
+            return
+
+        # ── /! pass-through: send raw text directly to the agent CLI ──────────
+        if text.startswith("/! ") or text == "/!":
+            raw = text[3:].strip() if text.startswith("/! ") else ""
+            await handle_passthrough(core, message, session, raw)
             return
 
         # ── unknown slash command ─────────────────────────────────────────────
         if text.startswith("/"):
             await message.answer(
-                "❓ Неизвестная команда. Используйте /help для списка команд."
+                "❓ Unknown command. Use /help for a list of commands."
             )
             return
 
@@ -341,7 +348,7 @@ def create_bot_and_setup(manager=None, parser=None, file_mgr=None):
         provider = session.current_provider
         await core.enqueue_task(
             session, provider, text, message,
-            f"⏳ <b>Запускаю {escape(core.provider_label(provider))}…</b>",
+            f"⏳ <b>Starting {escape(core.provider_label(provider))}…</b>",
         )
 
     # ── callback handler ──────────────────────────────────────────────────────

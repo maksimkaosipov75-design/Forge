@@ -145,6 +145,35 @@ class BridgeShell:
                 self._current_task = None
 
     async def handle_slash_command(self, raw: str):
+        # ── /! pass-through: send text verbatim to the underlying agent CLI ──
+        # Syntax:  /! /review --focus security
+        #          /! /compact
+        #          /! what can you do?
+        if raw.startswith("/! ") or raw == "/!":
+            passthrough = raw[3:].strip() if raw.startswith("/! ") else ""
+            if not passthrough:
+                self.ui.print_notice(
+                    "Usage: /! <text>  — sends text verbatim to the active agent, bypassing Forge routing.\n"
+                    "Note: agent-native slash commands (e.g. /help, /review inside Qwen) require\n"
+                    "      interactive REPL mode and won't work here — only plain text prompts work.\n"
+                    "Example: /! what are your capabilities?",
+                    kind="info",
+                )
+                return
+            self.leave_home_if_needed()
+            try:
+                self._current_task = asyncio.current_task()
+                await self.run_single_task(passthrough)
+            except asyncio.CancelledError:
+                self.ui.print_line()
+                self.ui.print_notice("Task cancelled.", kind="warning")
+            except KeyboardInterrupt:
+                self.ui.print_line()
+                self.ui.print_notice("Interrupted.", kind="warning")
+            finally:
+                self._current_task = None
+            return
+
         parts = shlex.split(raw)
         command = parts[0].lower()
         args = parts[1:]

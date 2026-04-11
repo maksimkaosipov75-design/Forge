@@ -49,7 +49,7 @@ async def run_task(
             changed_files=result.changed_files or None,
         )
         if answer_chunks:
-            sections.extend(["<b>📋 Ответ агента</b>", answer_chunks[0]])
+            sections.extend(["<b>📋 Agent response</b>", answer_chunks[0]])
         core.remember_task_result(session, result)
         keyboard = build_task_buttons(
             session.file_mgr.get_working_dir(),
@@ -59,7 +59,7 @@ async def run_task(
         if sections:
             await send_or_edit_structured(core.bot, message, status_msg, sections, reply_markup=keyboard)
         else:
-            await core.safe_edit(status_msg, "✅ <b>Задача выполнена.</b>", reply_markup=keyboard)
+            await core.safe_edit(status_msg, "✅ <b>Task complete.</b>", reply_markup=keyboard)
         await send_answer_chunks(
             core.bot, message, result.answer_text,
             runtime.parser._escape_html, skip_first_chunk=bool(answer_chunks),
@@ -67,12 +67,12 @@ async def run_task(
         return
 
     failure = runtime.manager.health.last_failure
-    lines = [f"⚠️ <b>{core.provider_label(provider_name)} завершился с кодом {result.exit_code}</b>"]
+    lines = [f"⚠️ <b>{core.provider_label(provider_name)} exited with code {result.exit_code}</b>"]
     if failure:
-        lines.append(f"<b>Причина:</b> <code>{escape(failure.short_label)}</code>")
+        lines.append(f"<b>Reason:</b> <code>{escape(failure.short_label)}</code>")
         lines.append(escape(failure.message))
         if failure.retry_at:
-            lines.append(f"<b>Доступность:</b> примерно после <code>{escape(failure.retry_at)}</code>")
+            lines.append(f"<b>Available after:</b> approx. <code>{escape(failure.retry_at)}</code>")
     core.remember_task_result(session, result)
     await send_or_edit_structured(core.bot, message, status_msg, lines)
 
@@ -106,17 +106,17 @@ async def run_orchestrated_task(
         await renderer.finalize()
 
     status_line = (
-        "<b>🧭 Оркестрация завершена</b>"
+        "<b>🧭 Orchestration complete</b>"
         if task_run.status == "success"
-        else "<b>⚠️ Оркестрация завершена с ошибками</b>"
+        else "<b>⚠️ Orchestration finished with errors</b>"
     )
     sections = [
         status_line,
         f"<code>{escape(plan.prompt)}</code>",
         (
-            f"<b>Сложность:</b> <code>{escape(plan.complexity)}</code>\n"
-            f"<b>Стратегия:</b> {escape(plan.strategy)}\n"
-            f"<b>Статус:</b> <code>{escape(task_run.status)}</code>\n"
+            f"<b>Complexity:</b> <code>{escape(plan.complexity)}</code>\n"
+            f"<b>Strategy:</b> {escape(plan.strategy)}\n"
+            f"<b>Status:</b> <code>{escape(task_run.status)}</code>\n"
             f"<b>Synthesis:</b> <code>{escape(task_run.synthesis_provider or '-')}</code>\n"
             f"<b>Review:</b> <code>{escape(task_run.review_provider or '-')}</code>"
         ),
@@ -142,7 +142,7 @@ async def run_orchestrated_task(
         )
     )
     if task_run.error_text:
-        sections.append(f"<b>❌ Ошибка</b>\n<pre>{escape(task_run.error_text[:3000])}</pre>")
+        sections.append(f"<b>❌ Error</b>\n<pre>{escape(task_run.error_text[:3000])}</pre>")
     if task_run.review_answer:
         sections.append(f"<b>🔍 Review</b>\n<pre>{escape(task_run.review_answer[:3000])}</pre>")
 

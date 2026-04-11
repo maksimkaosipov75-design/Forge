@@ -152,15 +152,15 @@ def format_task_result_sections(
     new_files: list[str] | None = None,
     changed_files: list[str] | None = None,
 ) -> list[str]:
-    parts: list[str] = ["<b>✅ Задача выполнена</b>"]
+    parts: list[str] = ["<b>✅ Task complete</b>"]
 
     if new_files:
-        parts.append("<b>📂 Созданы файлы</b>")
+        parts.append("<b>📂 New files</b>")
         for file_path in new_files:
             parts.append(f"• <code>{escape(rel_display(file_path, working_dir))}</code>")
 
     if changed_files:
-        parts.append("<b>✏️ Изменены файлы</b>")
+        parts.append("<b>✏️ Changed files</b>")
         for file_path in changed_files:
             parts.append(f"• <code>{escape(rel_display(file_path, working_dir))}</code>")
 
@@ -169,8 +169,8 @@ def format_task_result_sections(
 
 def format_status_message(progress_html: str) -> str:
     if progress_html:
-        return f"⏳ <b>Выполняю</b>\n\n{progress_html}"
-    return "⏳ <b>Выполняю</b>\n\nПодготавливаю задачу…"
+        return f"⏳ <b>Running</b>\n\n{progress_html}"
+    return "⏳ <b>Running</b>\n\nPreparing task…"
 
 
 def build_task_buttons(
@@ -194,12 +194,12 @@ def build_task_buttons(
             )
         ])
 
-    action_row = [InlineKeyboardButton(text="🔄 Повторить", callback_data="repeat_task")]
+    action_row = [InlineKeyboardButton(text="🔄 Repeat", callback_data="repeat_task")]
     if can_retry_failed:
         action_row.append(InlineKeyboardButton(text="♻️ Retry Failed", callback_data="retry_failed_subtask"))
     keyboard_rows.append(action_row)
     keyboard_rows.append([
-        InlineKeyboardButton(text="ℹ️ Подробнее", callback_data="show_details"),
+        InlineKeyboardButton(text="ℹ️ Details", callback_data="show_details"),
     ])
 
     return InlineKeyboardMarkup(inline_keyboard=keyboard_rows)
@@ -208,9 +208,9 @@ def build_task_buttons(
 def build_plan_preview_buttons(can_run: bool = True) -> InlineKeyboardMarkup:
     action_row = []
     if can_run:
-        action_row.append(InlineKeyboardButton(text="▶️ Запустить план", callback_data="plan_run"))
-    action_row.append(InlineKeyboardButton(text="✏️ Редактировать", callback_data="plan_edit"))
-    action_row.append(InlineKeyboardButton(text="❌ Отменить", callback_data="plan_cancel"))
+        action_row.append(InlineKeyboardButton(text="▶️ Run plan", callback_data="plan_run"))
+    action_row.append(InlineKeyboardButton(text="✏️ Edit", callback_data="plan_edit"))
+    action_row.append(InlineKeyboardButton(text="❌ Cancel", callback_data="plan_cancel"))
     return InlineKeyboardMarkup(inline_keyboard=[action_row])
 
 
@@ -233,7 +233,7 @@ async def send_answer_chunks(
     anchor_message: Message,
     answer_text: str,
     escape_html,
-    title: str = "<b>📋 Ответ агента</b>",
+    title: str = "<b>📋 Agent response</b>",
     skip_first_chunk: bool = False,
 ):
     if not answer_text or not answer_text.strip():
@@ -242,11 +242,11 @@ async def send_answer_chunks(
     chunks = chunk_code_sections(answer_text, escape_html)
     start_index = 1 if skip_first_chunk else 0
     for idx, chunk in enumerate(chunks[start_index:], start=start_index):
-        prefix = title if idx == 0 else "<b>📋 Ответ агента</b> <i>(продолжение)</i>"
+        prefix = title if idx == 0 else "<b>📋 Agent response</b> <i>(continued)</i>"
         try:
             await send_html_message(bot, anchor_message.chat.id, f"{prefix}\n\n{chunk}")
         except Exception as exc:
-            log.exception("Не удалось отправить chunk ответа в Telegram: %s", exc)
+            log.exception("Failed to send answer chunk: %s", exc)
             escaped_text = escape_html(answer_text)
             for plain_chunk in split_plain_text(escaped_text, max_len=3500):
                 await send_html_message(bot, anchor_message.chat.id, f"{prefix}\n\n<pre>{plain_chunk}</pre>")
@@ -266,14 +266,14 @@ async def send_or_edit_structured_message(
     try:
         await target_message.edit_text(first_chunk, reply_markup=reply_markup)
     except Exception as exc:
-        log.exception("Не удалось отредактировать итоговое сообщение: %s", exc)
+        log.exception("Failed to edit result message: %s", exc)
         await send_html_message(bot, anchor_message.chat.id, first_chunk, reply_markup=reply_markup)
 
     for chunk in tail:
         try:
             await send_html_message(bot, anchor_message.chat.id, chunk)
         except Exception as exc:
-            log.exception("Не удалось отправить структурированный chunk: %s", exc)
+            log.exception("Failed to send structured chunk: %s", exc)
             fallback = escape(chunk)
             for plain_chunk in split_plain_text(fallback, max_len=3500):
                 await send_html_message(bot, anchor_message.chat.id, f"<pre>{plain_chunk}</pre>")
@@ -285,6 +285,6 @@ def build_file_preview_messages(file_path: Path, content: str, escape_html) -> l
     chunks = split_plain_text(content, max_len=3200)
     messages: list[str] = []
     for idx, chunk in enumerate(chunks):
-        title = header if idx == 0 else f"{header} <i>(продолжение)</i>"
+        title = header if idx == 0 else f"{header} <i>(continued)</i>"
         messages.append(f"{title}\n\n{code_block(chunk, escape_html, language)}")
     return messages

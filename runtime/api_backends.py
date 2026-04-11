@@ -201,6 +201,20 @@ class OpenRouterExecutionBackend(BaseApiBackend):
             content = delta.get("content")
             if isinstance(content, str) and content:
                 text_delta += content
+            elif isinstance(content, list):
+                # Extended delta format used by Claude (thinking blocks, text blocks).
+                for block in content:
+                    if not isinstance(block, dict):
+                        continue
+                    btype = block.get("type", "")
+                    if btype == "thinking":
+                        thinking_text = block.get("thinking", "").strip()
+                        if thinking_text:
+                            events.append(encode_forge_event("thinking", text=thinking_text))
+                    elif btype in ("text", ""):
+                        part = block.get("text", "")
+                        if part:
+                            text_delta += part
 
         if text_delta:
             events.append(f"💬 {text_delta}")
@@ -227,23 +241,40 @@ class OpenRouterExecutionBackend(BaseApiBackend):
         req.add_header("X-Title", self.app_name)
         return req
 
-    def _send_request_sync(self, prompt: str, model_name: str) -> tuple[list[str], str]:
+    def _stream_sync(
+        self,
+        prompt: str,
+        model_name: str,
+        loop: asyncio.AbstractEventLoop,
+    ) -> str:
+        """
+        Runs in a thread-pool executor.
+
+        Emits SSE events in real-time via *loop.call_soon_threadsafe* so the
+        UI status-bar and thinking-buffer update while the HTTP response is
+        still streaming — identical to how CLI providers work.
+
+        Returns the aggregated plain-text answer for the final-result callback.
+        """
         if not self.api_key.strip():
             raise RuntimeError("OPENROUTER_API_KEY is not configured")
 
         req = self._build_request(prompt, model_name)
-        aggregated_parts: list[str] = []
-        emitted_events: list[str] = []
+        aggregated: list[str] = []
 
         with request.urlopen(req, timeout=self.timeout) as response:
             for raw_line in response:
                 line = raw_line.decode("utf-8", errors="replace")
                 events, text_delta = self.parse_sse_line(line)
-                emitted_events.extend(events)
+                for event in events:
+                    # Schedule _notify on the event-loop thread so that the
+                    # stream_event_callback (which updates Rich Live) runs
+                    # in the correct asyncio context.
+                    loop.call_soon_threadsafe(self._notify, event)
                 if text_delta:
-                    aggregated_parts.append(text_delta)
+                    aggregated.append(text_delta)
 
-        return emitted_events, "".join(aggregated_parts).strip()
+        return "".join(aggregated).strip()
 
     async def send_command(self, text: str, cwd: Path = None):
         if not self._running:
@@ -253,11 +284,11 @@ class OpenRouterExecutionBackend(BaseApiBackend):
         if not model_name:
             raise RuntimeError("OpenRouter model is not configured")
 
+        loop = asyncio.get_running_loop()
         try:
-            loop = asyncio.get_running_loop()
-            events, final_text = await loop.run_in_executor(None, self._send_request_sync, text, model_name)
-            for event in events:
-                self._notify(event)
+            final_text = await loop.run_in_executor(
+                None, self._stream_sync, text, model_name, loop
+            )
             if final_text and self._final_result_callback:
                 self._final_result_callback(final_text)
             self._notify("🏁 Завершено (success): 0ms")

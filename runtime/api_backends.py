@@ -163,6 +163,7 @@ class OpenRouterExecutionBackend(BaseApiBackend):
         # Set by the executor before each send_command call.
         self.thinking_enabled: bool = False
         self.conversation_history: list[dict] = []
+        self.project_context: str = ""  # injected by executor before each call
 
     @staticmethod
     def parse_sse_line(raw: str) -> tuple[list[str], str]:
@@ -242,8 +243,10 @@ class OpenRouterExecutionBackend(BaseApiBackend):
         return events, text_delta
 
     def _build_messages(self, prompt: str) -> list[dict]:
-        """Build the messages array from conversation history + current prompt."""
+        """Build the messages array: optional system context + history + current prompt."""
         messages: list[dict] = []
+        if self.project_context.strip():
+            messages.append({"role": "system", "content": self.project_context})
         for entry in self.conversation_history:
             if entry.get("role") and entry.get("content"):
                 messages.append({"role": entry["role"], "content": entry["content"]})

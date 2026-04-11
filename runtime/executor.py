@@ -17,8 +17,50 @@ StatusFormatter = Callable[[str], str]
 _HISTORY_WINDOW = 6  # past turn pairs to send to API providers
 
 
+_MAX_TREE_CHARS = 4000   # keep system prompt small enough to leave room for reasoning
+_MAX_FILE_CHARS = 3000   # per-file content cap for key files
+
+
+def _build_project_context(session) -> str:
+    """Build a system prompt describing the current project for API providers."""
+    try:
+        file_mgr = session.file_mgr
+        cwd = file_mgr.get_working_dir()
+        lines = [
+            "You are a software engineering assistant with read access to the following project.",
+            "You CANNOT execute code, run shell commands, or write files directly.",
+            "When asked to implement something, write the full code in your response.",
+            "",
+            f"Working directory: {cwd}",
+        ]
+        # File tree (depth 3, truncated)
+        try:
+            tree = file_mgr.tree(max_depth=3)
+            if len(tree) > _MAX_TREE_CHARS:
+                tree = tree[:_MAX_TREE_CHARS] + "\n... (truncated)"
+            lines += ["", "Project structure:", "```", tree, "```"]
+        except Exception:
+            pass
+        # Try to read a README or main entry file for extra context
+        for candidate in ("README.md", "README.rst", "README.txt", "pyproject.toml", "Cargo.toml", "package.json"):
+            candidate_path = cwd / candidate
+            try:
+                if candidate_path.exists() and candidate_path.is_file():
+                    content = candidate_path.read_text(errors="replace")
+                    if content.strip():
+                        if len(content) > _MAX_FILE_CHARS:
+                            content = content[:_MAX_FILE_CHARS] + "\n... (truncated)"
+                        lines += ["", f"{candidate}:", "```", content, "```"]
+                    break
+            except Exception:
+                pass
+        return "\n".join(lines)
+    except Exception:
+        return ""
+
+
 def _configure_api_manager(manager, session, current_prompt: str) -> None:
-    """Populate thinking_enabled and conversation_history on an API backend before use."""
+    """Populate thinking_enabled, conversation_history, and project_context on an API backend."""
     thinking_mode = (session.ui_preferences or {}).get("thinking_mode", "compact").strip().lower()
     manager.thinking_enabled = thinking_mode in ("compact", "full")
 
@@ -31,6 +73,7 @@ def _configure_api_manager(manager, session, current_prompt: str) -> None:
         if assistant_text:
             messages.append({"role": "assistant", "content": assistant_text})
     manager.conversation_history = messages
+    manager.project_context = _build_project_context(session)
 
 
 # Directories whose contents are never authored by the user / AI agents.

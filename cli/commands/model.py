@@ -1,4 +1,4 @@
-from providers import (
+from core.providers import (
     is_supported_provider,
     normalize_provider_name,
     provider_default_model,

@@ -1,6 +1,6 @@
 import unittest
 
-from orchestrator import RuleBasedOrchestrator
+from core.orchestrator import RuleBasedOrchestrator
 
 
 class RuleBasedOrchestratorTests(unittest.TestCase):

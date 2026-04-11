@@ -1,7 +1,7 @@
 import unittest
 
-from event_protocol import encode_forge_event
-from parser import LogParser
+from core.event_protocol import encode_forge_event
+from core.parser import LogParser
 
 
 class LogParserTests(unittest.TestCase):

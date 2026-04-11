@@ -2,8 +2,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from config import Settings
-from credential_store import CredentialStore
+from core.config import Settings
+from core.credential_store import CredentialStore
 from runtime import RuntimeContainer
 from runtime.api_backends import OpenRouterExecutionBackend
 

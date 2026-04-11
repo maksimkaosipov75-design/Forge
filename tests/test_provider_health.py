@@ -2,7 +2,7 @@
 import time
 import unittest
 
-from provider_status import (
+from core.provider_status import (
     FailureReason,
     ProviderHealth,
     classify_failure_text,

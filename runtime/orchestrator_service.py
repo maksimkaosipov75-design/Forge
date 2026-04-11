@@ -6,9 +6,9 @@ from pathlib import Path
 from time import monotonic
 from typing import Awaitable, Callable
 
-from orchestrator import OrchestrationPlan
-from providers import is_api_provider
-from task_models import SubtaskRun, TaskResult, TaskRun, utc_now_iso
+from core.orchestrator import OrchestrationPlan
+from core.providers import is_api_provider
+from core.task_models import SubtaskRun, TaskResult, TaskRun, utc_now_iso
 
 
 log = logging.getLogger(__name__)
@@ -476,7 +476,7 @@ class OrchestratorService:
 
         Returns a list of new PlannedSubtask objects, or None if replanning fails.
         """
-        from orchestrator import AIOrchestrator, RuleBasedOrchestrator
+        from core.orchestrator import AIOrchestrator, RuleBasedOrchestrator
 
         completed = [s for s in task_run.subtasks if s.status in {"success", "reused"}]
         failed = [s for s in task_run.subtasks if s.status == "failed"]
@@ -605,7 +605,7 @@ class OrchestratorService:
             )
         except asyncio.TimeoutError:
             log.warning("Subtask %s timed out after %ds", subtask.subtask_id, _SUBTASK_TIMEOUT_SECONDS)
-            from task_models import TaskResult, utc_now_iso
+            from core.task_models import TaskResult, utc_now_iso
             return TaskResult(
                 provider=provider_name,
                 prompt=prompt,

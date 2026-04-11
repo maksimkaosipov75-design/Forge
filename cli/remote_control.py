@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from config import settings
+from core.config import settings
 
 
 def utc_now_iso() -> str:

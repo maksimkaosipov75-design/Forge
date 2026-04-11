@@ -19,27 +19,27 @@ from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import Message
 
-from config import settings
-from orchestrator import OrchestrationPlan
-from providers import (
+from core.config import settings
+from core.orchestrator import OrchestrationPlan
+from core.providers import (
     get_provider_definition,
     is_supported_provider,
     list_supported_provider_names,
     normalize_provider_name,
 )
-from provider_status_http import StatusHttpServer
-from rate_limiter import RateLimiter
+from core.provider_status_http import StatusHttpServer
+from core.rate_limiter import RateLimiter
 from runtime import RuntimeContainer
-from security_audit import validate_prompt
-from task_models import ChatSession, ProviderRuntime, QueuedTask, SubtaskRun, TaskResult, TaskRun
+from core.security_audit import validate_prompt
+from core.task_models import ChatSession, ProviderRuntime, QueuedTask, SubtaskRun, TaskResult, TaskRun
 
 from bot.formatting import send_or_edit_structured
 from bot.streaming import TelegramStreamRenderer
 
 if TYPE_CHECKING:
-    from process_manager import ClaudeProcessManager, CodexProcessManager, QwenProcessManager
-    from parser import LogParser
-    from file_manager import FileManager
+    from core.process_manager import ClaudeProcessManager, CodexProcessManager, QwenProcessManager
+    from core.parser import LogParser
+    from core.file_manager import FileManager
 
 log = logging.getLogger(__name__)
 

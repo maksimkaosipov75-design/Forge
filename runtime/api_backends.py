@@ -5,8 +5,8 @@ from pathlib import Path
 from typing import Callable, Optional
 from urllib import error, request
 
-from event_protocol import encode_forge_event, extract_forge_event
-from provider_status import FailureReason, ProviderHealth, classify_failure_text
+from core.event_protocol import encode_forge_event, extract_forge_event
+from core.provider_status import FailureReason, ProviderHealth, classify_failure_text
 
 
 log = logging.getLogger(__name__)

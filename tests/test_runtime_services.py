@@ -3,10 +3,10 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from file_manager import FileManager
-from orchestrator import OrchestrationPlan, PlannedSubtask
+from core.file_manager import FileManager
+from core.orchestrator import OrchestrationPlan, PlannedSubtask
 from runtime.orchestrator_service import OrchestratorService
-from task_models import ChatSession, SubtaskRun, TaskRun
+from core.task_models import ChatSession, SubtaskRun, TaskRun
 
 
 class OrchestratorServiceTests(unittest.TestCase):

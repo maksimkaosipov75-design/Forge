@@ -3,10 +3,10 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from file_manager import FileManager
-from orchestrator import OrchestrationPlan, PlannedSubtask
-from session_store import SessionStore
-from task_models import ChatSession, SubtaskRun, TaskResult, TaskRun
+from core.file_manager import FileManager
+from core.orchestrator import OrchestrationPlan, PlannedSubtask
+from core.session_store import SessionStore
+from core.task_models import ChatSession, SubtaskRun, TaskResult, TaskRun
 
 
 class SessionStoreTests(unittest.TestCase):

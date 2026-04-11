@@ -11,8 +11,8 @@ from typing import TYPE_CHECKING
 from aiogram.enums import ParseMode
 from aiogram.types import CallbackQuery, FSInputFile
 
-from providers import is_supported_provider, normalize_provider_name
-from task_models import ChatSession, TaskRun
+from core.providers import is_supported_provider, normalize_provider_name
+from core.task_models import ChatSession, TaskRun
 
 from bot.file_registry import resolve as _resolve_file
 
@@ -113,7 +113,7 @@ async def dispatch_callback(core: "BotCore", callback: CallbackQuery) -> None:
         session.current_provider = normalize_provider_name(provider)
         core.session_store.save(session)
         await callback.answer(f"Провайдер переключён на {provider}")
-        from providers import list_supported_provider_names
+        from core.providers import list_supported_provider_names
         provider_cmds = ", ".join(f"<code>/provider {n}</code>" for n in list_supported_provider_names())
         await core.safe_edit(
             callback.message,

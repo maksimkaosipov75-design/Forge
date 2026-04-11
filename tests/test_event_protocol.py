@@ -1,6 +1,6 @@
 import unittest
 
-from event_protocol import decode_forge_event, encode_forge_event, extract_forge_event
+from core.event_protocol import decode_forge_event, encode_forge_event, extract_forge_event
 
 
 class EventProtocolTests(unittest.TestCase):

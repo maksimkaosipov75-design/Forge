@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from credential_store import CredentialStore
+from core.credential_store import CredentialStore
 from runtime import RuntimeContainer
 from cli.commands import auth, smoke
 

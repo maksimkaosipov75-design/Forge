@@ -1,6 +1,6 @@
 import unittest
 
-from providers import (
+from core.providers import (
     get_provider_definition,
     is_api_provider,
     is_cli_provider,

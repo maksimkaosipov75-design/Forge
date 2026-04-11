@@ -1,6 +1,6 @@
 import getpass
 
-from providers import normalize_provider_name
+from core.providers import normalize_provider_name
 
 
 def register(subparsers):

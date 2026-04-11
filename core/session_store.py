@@ -5,9 +5,9 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
-from orchestrator import OrchestrationPlan, PlannedSubtask
-from provider_status import ProviderHealth
-from task_models import ChatSession, ProviderStats, SubtaskRun, TaskResult, TaskRun
+from core.orchestrator import OrchestrationPlan, PlannedSubtask
+from core.provider_status import ProviderHealth
+from core.task_models import ChatSession, ProviderStats, SubtaskRun, TaskResult, TaskRun
 
 
 log = logging.getLogger(__name__)

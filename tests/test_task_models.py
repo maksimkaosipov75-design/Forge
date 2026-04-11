@@ -1,6 +1,6 @@
 import unittest
 
-from task_models import TaskResult, TaskRun
+from core.task_models import TaskResult, TaskRun
 
 
 class TaskResultTests(unittest.TestCase):

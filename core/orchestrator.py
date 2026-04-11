@@ -5,7 +5,7 @@ import re as _re
 import time
 from dataclasses import dataclass, field
 
-from providers import normalize_provider_name
+from core.providers import normalize_provider_name
 
 
 @dataclass

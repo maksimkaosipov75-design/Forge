@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING
 
 from aiogram.types import CallbackQuery, Message
 
-from providers import is_supported_provider, list_supported_provider_names, normalize_provider_name
+from core.providers import is_supported_provider, list_supported_provider_names, normalize_provider_name
 
 from bot.core import BotCore
 from bot.handlers.callbacks import dispatch_callback

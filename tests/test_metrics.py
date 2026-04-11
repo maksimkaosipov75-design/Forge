@@ -1,6 +1,6 @@
 import unittest
 
-from metrics import MetricsCollector
+from core.metrics import MetricsCollector
 
 
 class MetricsCollectorTests(unittest.TestCase):

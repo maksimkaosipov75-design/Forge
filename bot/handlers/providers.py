@@ -8,12 +8,12 @@ from __future__ import annotations
 from html import escape
 from typing import TYPE_CHECKING
 
-from providers import (
+from core.providers import (
     is_supported_provider,
     list_supported_provider_names,
     normalize_provider_name,
 )
-from task_models import ChatSession
+from core.task_models import ChatSession
 
 if TYPE_CHECKING:
     from aiogram.types import Message

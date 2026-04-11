@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Callable
 from urllib import error, request
 
-from providers import ModelDefinition
+from core.providers import ModelDefinition
 
 
 def _normalize_text(value: str) -> str:

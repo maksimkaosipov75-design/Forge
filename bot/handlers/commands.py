@@ -9,8 +9,8 @@ from __future__ import annotations
 from html import escape
 from typing import TYPE_CHECKING
 
-from providers import list_supported_provider_names, supported_provider_commands_text
-from task_models import ChatSession, TaskResult, TaskRun
+from core.providers import list_supported_provider_names, supported_provider_commands_text
+from core.task_models import ChatSession, TaskResult, TaskRun
 
 from bot.formatting import chunk_code_sections, send_or_edit_structured
 

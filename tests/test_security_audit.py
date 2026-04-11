@@ -1,6 +1,6 @@
 import unittest
 
-from security_audit import validate_prompt
+from core.security_audit import validate_prompt
 
 
 class SecurityAuditTests(unittest.TestCase):

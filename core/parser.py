@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from typing import List, Optional
 from enum import Enum
 
-from event_protocol import decode_forge_event
+from core.event_protocol import decode_forge_event
 
 
 class ActionCategory(Enum):

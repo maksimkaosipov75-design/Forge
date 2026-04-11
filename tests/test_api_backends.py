@@ -2,7 +2,7 @@ import unittest
 import json
 from urllib import error
 
-from event_protocol import decode_forge_event
+from core.event_protocol import decode_forge_event
 from runtime.api_backends import OpenRouterExecutionBackend
 
 

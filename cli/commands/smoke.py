@@ -1,4 +1,4 @@
-from providers import is_supported_provider, normalize_provider_name
+from core.providers import is_supported_provider, normalize_provider_name
 
 
 SMOKE_PROMPT = (

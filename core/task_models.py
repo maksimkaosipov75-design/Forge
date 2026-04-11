@@ -3,9 +3,9 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
-from file_manager import FileManager
-from parser import LogParser
-from provider_status import ProviderHealth
+from core.file_manager import FileManager
+from core.parser import LogParser
+from core.provider_status import ProviderHealth
 
 
 def utc_now_iso() -> str:

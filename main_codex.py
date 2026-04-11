@@ -2,9 +2,9 @@ import asyncio
 import logging
 
 from bot import create_bot_and_setup
-from process_manager import CodexProcessManager
-from parser import LogParser
-from file_manager import FileManager
+from core.process_manager import CodexProcessManager
+from core.parser import LogParser
+from core.file_manager import FileManager
 
 
 logging.basicConfig(

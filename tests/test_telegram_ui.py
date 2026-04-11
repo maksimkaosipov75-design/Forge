@@ -1,7 +1,7 @@
 import unittest
 from pathlib import Path
 
-from telegram_ui import (
+from bot.ui import (
     build_task_buttons,
     build_plan_preview_buttons,
     build_file_preview_messages,

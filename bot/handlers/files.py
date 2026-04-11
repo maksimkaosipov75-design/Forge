@@ -14,7 +14,7 @@ from bot.formatting import build_file_preview_messages
 if TYPE_CHECKING:
     from aiogram.types import Message
     from bot.core import BotCore
-    from task_models import ChatSession
+    from core.task_models import ChatSession
 
 
 async def handle_ls(

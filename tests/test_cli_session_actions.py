@@ -3,8 +3,8 @@ import unittest
 from pathlib import Path
 
 from cli.session_actions import build_commit_message, compact_session, get_thinking_mode, render_todos_lines, set_thinking_mode
-from file_manager import FileManager
-from task_models import ChatSession, TaskResult, TaskRun
+from core.file_manager import FileManager
+from core.task_models import ChatSession, TaskResult, TaskRun
 
 
 class CliSessionActionsTests(unittest.TestCase):

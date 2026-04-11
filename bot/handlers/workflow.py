@@ -9,7 +9,7 @@ import logging
 from html import escape
 from typing import TYPE_CHECKING
 
-from task_models import ChatSession
+from core.task_models import ChatSession
 
 from bot.formatting import (
     build_plan_preview_buttons,

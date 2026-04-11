@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import subprocess
 
-from providers import provider_default_model
+from core.providers import provider_default_model
 
 
 def extract_todos(answer_text: str) -> list[str]:

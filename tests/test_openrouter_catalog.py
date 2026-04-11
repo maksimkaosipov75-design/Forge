@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from openrouter_catalog import OpenRouterModelCatalog
+from core.openrouter_catalog import OpenRouterModelCatalog
 
 
 class OpenRouterCatalogTests(unittest.TestCase):

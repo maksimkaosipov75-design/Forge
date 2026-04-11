@@ -8,7 +8,7 @@ from html import escape
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from task_models import ChatSession, TaskRun
+from core.task_models import ChatSession, TaskRun
 
 from bot.formatting import (
     build_file_preview_messages,

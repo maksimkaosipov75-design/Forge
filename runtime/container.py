@@ -2,26 +2,26 @@ import asyncio
 import os as _os
 from pathlib import Path
 
-from config import Settings, settings as default_settings
-from credential_store import CredentialStore
-from file_manager import FileManager
-from metrics import MetricsCollector
-from openrouter_catalog import ModelResolveResult, OpenRouterModelCatalog
-from orchestrator import AIOrchestrator, RuleBasedOrchestrator
-from parser import LogParser
-from process_manager import (
+from core.config import Settings, settings as default_settings
+from core.credential_store import CredentialStore
+from core.file_manager import FileManager
+from core.metrics import MetricsCollector
+from core.openrouter_catalog import ModelResolveResult, OpenRouterModelCatalog
+from core.orchestrator import AIOrchestrator, RuleBasedOrchestrator
+from core.parser import LogParser
+from core.process_manager import (
     ClaudeProcessManager,
     CodexProcessManager,
     QwenProcessManager,
     create_process_manager,
 )
-from providers import get_provider_definition, is_api_provider, normalize_provider_name, provider_default_model
+from core.providers import get_provider_definition, is_api_provider, normalize_provider_name, provider_default_model
 from runtime.api_backends import OpenRouterExecutionBackend
 from runtime.executor import ExecutionService
 from runtime.orchestrator_service import OrchestratorService
-from session_store import SessionStore
-from task_models import ChatSession, ProviderRuntime, ProviderStats, TaskResult, TaskRun
-from providers import list_provider_models
+from core.session_store import SessionStore
+from core.task_models import ChatSession, ProviderRuntime, ProviderStats, TaskResult, TaskRun
+from core.providers import list_provider_models
 
 
 class RuntimeContainer:

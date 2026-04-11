@@ -5,9 +5,9 @@ import tempfile
 from pathlib import Path
 from typing import Optional, Callable
 
-from event_protocol import encode_forge_event, extract_forge_event
-from provider_status import FailureReason, ProviderHealth, classify_failure_text
-from providers import normalize_provider_name
+from core.event_protocol import encode_forge_event, extract_forge_event
+from core.provider_status import FailureReason, ProviderHealth, classify_failure_text
+from core.providers import normalize_provider_name
 
 log = logging.getLogger(__name__)
 

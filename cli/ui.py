@@ -5,7 +5,7 @@ from pathlib import Path
 
 from cli.thinking import extract_thinking_chunk, render_thinking_text
 
-from providers import provider_default_model
+from core.providers import provider_default_model
 
 try:
     from rich.align import Align

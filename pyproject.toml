@@ -20,4 +20,4 @@ forge = "cli.app:textual_main"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["cli*", "runtime*"]
+include = ["bot*", "cli*", "core*", "runtime*"]

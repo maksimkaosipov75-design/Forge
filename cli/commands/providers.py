@@ -1,4 +1,4 @@
-from providers import get_provider_definition, list_provider_models, provider_default_model
+from core.providers import get_provider_definition, list_provider_models, provider_default_model
 
 
 def register(subparsers):

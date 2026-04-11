@@ -8,8 +8,8 @@ from html import escape
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from task_models import ChatSession, SubtaskRun, TaskRun
-from orchestrator import OrchestrationPlan
+from core.task_models import ChatSession, SubtaskRun, TaskRun
+from core.orchestrator import OrchestrationPlan
 
 from bot.formatting import (
     build_task_buttons,

@@ -4,8 +4,8 @@ from pathlib import Path
 from time import monotonic
 from typing import Awaitable, Callable
 
-from providers import is_api_provider, provider_transport
-from task_models import ProviderRuntime, TaskResult, utc_now_iso
+from core.providers import is_api_provider, provider_transport
+from core.task_models import ProviderRuntime, TaskResult, utc_now_iso
 
 
 log = logging.getLogger(__name__)
@@ -97,7 +97,7 @@ class ExecutionService:
                 # Check for interaction
                 if interaction_callback and ("❓" in actionable or "✅" in actionable):
                     # We found a question or approval. Parser state should be updated.
-                    from parser import ActionCategory
+                    from core.parser import ActionCategory
                     recent = runtime.parser.state.events[-1] if runtime.parser.state.events else None
                     if recent and recent.category in (ActionCategory.QUESTION, ActionCategory.APPROVAL):
                         # Trigger interaction in a background task so we don't block the stream reader

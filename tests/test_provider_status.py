@@ -1,6 +1,6 @@
 import unittest
 
-from provider_status import ProviderHealth, classify_failure_text
+from core.provider_status import ProviderHealth, classify_failure_text
 
 
 class ProviderStatusTests(unittest.TestCase):

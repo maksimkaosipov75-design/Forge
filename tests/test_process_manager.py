@@ -1,7 +1,7 @@
 import unittest
 
-from event_protocol import decode_forge_event
-from process_manager import ClaudeProcessManager, CodexProcessManager, QwenProcessManager
+from core.event_protocol import decode_forge_event
+from core.process_manager import ClaudeProcessManager, CodexProcessManager, QwenProcessManager
 
 
 class ProcessManagerPayloadParsingTests(unittest.TestCase):

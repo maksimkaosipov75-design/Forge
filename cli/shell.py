@@ -17,7 +17,7 @@ from cli.session_actions import (
     set_thinking_mode,
 )
 from cli.thinking import append_thinking_chunk, render_thinking_text
-from providers import (
+from core.providers import (
     get_provider_definition,
     is_supported_provider,
     normalize_provider_name,

@@ -9,7 +9,7 @@ import subprocess as _subprocess
 import time as _time
 from pathlib import Path
 
-from providers import (
+from core.providers import (
     get_provider_definition,
     is_supported_provider,
     list_provider_models,

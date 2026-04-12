@@ -86,7 +86,7 @@ class OpenRouterExecutionBackendTests(unittest.TestCase):
 
         backend._running = True
 
-        def raise_http_error(_prompt: str, _model_name: str, _loop):
+        def raise_http_error(_messages, _model_name, _loop):
             raise error.HTTPError(
                 "https://openrouter.ai/api/v1/chat/completions",
                 429,
@@ -95,7 +95,7 @@ class OpenRouterExecutionBackendTests(unittest.TestCase):
                 fp=None,
             )
 
-        backend._stream_sync = raise_http_error  # type: ignore[method-assign]
+        backend._stream_iteration_sync = raise_http_error  # type: ignore[method-assign]
 
         async def run():
             return await backend.send_command("hello")

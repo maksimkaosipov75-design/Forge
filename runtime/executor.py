@@ -27,9 +27,9 @@ def _build_project_context(session) -> str:
         file_mgr = session.file_mgr
         cwd = file_mgr.get_working_dir()
         lines = [
-            "You are a software engineering assistant with read access to the following project.",
-            "You CANNOT execute code, run shell commands, or write files directly.",
-            "When asked to implement something, write the full code in your response.",
+            "You are an expert software engineering assistant with full tool access.",
+            "You can and should execute bash commands, read files, write files, and edit files to complete tasks.",
+            "Always verify your changes by running tests or checking output.",
             "",
             f"Working directory: {cwd}",
         ]
@@ -129,9 +129,11 @@ class ExecutionService:
     ) -> TaskResult:
         work_dir = session.file_mgr.get_working_dir()
         session.last_task_result = TaskResult(provider=provider_name, prompt=prompt)
-        # API providers (OpenRouter, …) work entirely over HTTP and never write
-        # to the local filesystem, so there's nothing to snapshot.
-        _track_files = not is_api_provider(provider_name)
+        # API providers that have tools_enabled can write local files too.
+        _track_files = (
+            not is_api_provider(provider_name)
+            or getattr(runtime.manager, "tools_enabled", False)
+        )
         if _track_files:
             runtime.last_file_state = await self.scan_dir(work_dir)
         _, _, prev_total_in, prev_total_out = runtime.parser.get_token_usage()
@@ -211,6 +213,7 @@ class ExecutionService:
 
         if is_api_provider(provider_name):
             _configure_api_manager(runtime.manager, session, prompt)
+            runtime.manager._cwd = work_dir  # pass cwd to ToolExecutor inside the backend
 
         async def run_agent():
             started_at = monotonic()

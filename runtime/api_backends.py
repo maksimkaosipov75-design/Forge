@@ -162,6 +162,8 @@ class OpenRouterExecutionBackend(BaseApiBackend):
         self.app_name = app_name
         # Set by the executor before each send_command call.
         self.thinking_enabled: bool = False
+        self.tools_enabled: bool = True
+        self._cwd: Path | None = None  # injected by executor; used by ToolExecutor
         self.conversation_history: list[dict] = []
         self.project_context: str = ""  # injected by executor before each call
 
@@ -253,8 +255,10 @@ class OpenRouterExecutionBackend(BaseApiBackend):
         messages.append({"role": "user", "content": prompt})
         return messages
 
-    def _build_request(self, prompt: str, model_name: str) -> request.Request:
-        messages = self._build_messages(prompt)
+    def _build_request(self, messages: "list[dict] | str", model_name: str) -> request.Request:
+        """Build an HTTP request. Accepts a messages list or a raw prompt string."""
+        if isinstance(messages, str):
+            messages = self._build_messages(messages)
         payload: dict = {
             "model": model_name,
             "stream": True,
@@ -265,6 +269,10 @@ class OpenRouterExecutionBackend(BaseApiBackend):
             # OpenRouter standard reasoning parameter — works for all
             # reasoning-capable models (Qwen3, DeepSeek-R1, Claude, etc.)
             payload["reasoning"] = {"effort": "high"}
+        if self.tools_enabled:
+            from runtime.tool_executor import TOOL_DEFINITIONS
+            payload["tools"] = TOOL_DEFINITIONS
+            payload["tool_choice"] = "auto"
         body = json.dumps(payload).encode("utf-8")
         req = request.Request(
             f"{self.base_url}/chat/completions",
@@ -277,27 +285,32 @@ class OpenRouterExecutionBackend(BaseApiBackend):
         req.add_header("X-Title", self.app_name)
         return req
 
-    def _stream_sync(
+    def _stream_iteration_sync(
         self,
-        prompt: str,
+        messages: list[dict],
         model_name: str,
         loop: asyncio.AbstractEventLoop,
-    ) -> str:
+    ) -> "tuple[str, list[dict], str]":
         """
         Runs in a thread-pool executor.
 
-        Emits SSE events in real-time via *loop.call_soon_threadsafe* so the
-        UI status-bar and thinking-buffer update while the HTTP response is
-        still streaming — identical to how CLI providers work.
+        Streams one HTTP request. Accumulates text content, tool_call deltas,
+        and finish_reason from the SSE stream.
 
-        Returns the aggregated plain-text answer for the final-result callback.
+        Returns:
+            (text, tool_calls, finish_reason)
+            - text: aggregated assistant text (may be empty if only tool calls)
+            - tool_calls: list of completed tool call dicts
+            - finish_reason: "stop" | "tool_calls" | "length" | ""
         """
         if not self.api_key.strip():
             raise RuntimeError("OPENROUTER_API_KEY is not configured")
 
         self._cancel_event.clear()
-        req = self._build_request(prompt, model_name)
+        req = self._build_request(messages, model_name)
         aggregated: list[str] = []
+        tool_call_chunks: dict[int, dict] = {}
+        finish_reason = ""
 
         with request.urlopen(req, timeout=self.timeout) as response:
             self._active_response = response
@@ -306,18 +319,62 @@ class OpenRouterExecutionBackend(BaseApiBackend):
                     if self._cancel_event.is_set():
                         break
                     line = raw_line.decode("utf-8", errors="replace")
+
+                    # Emit SSE events (text, thinking, errors, usage) via existing parser.
                     events, text_delta = self.parse_sse_line(line)
                     for event in events:
-                        # Schedule _notify on the event-loop thread so that the
-                        # stream_event_callback (which updates Rich Live) runs
-                        # in the correct asyncio context.
                         loop.call_soon_threadsafe(self._notify, event)
                     if text_delta:
                         aggregated.append(text_delta)
+
+                    # Also parse tool_calls deltas and finish_reason.
+                    stripped = line.strip()
+                    if not stripped.startswith("data:"):
+                        continue
+                    payload_text = stripped[5:].strip()
+                    if not payload_text or payload_text == "[DONE]":
+                        continue
+                    try:
+                        payload = json.loads(payload_text)
+                    except json.JSONDecodeError:
+                        continue
+
+                    choices = payload.get("choices") or []
+                    for choice in choices:
+                        if not isinstance(choice, dict):
+                            continue
+                        fr = choice.get("finish_reason")
+                        if fr:
+                            finish_reason = fr
+                        delta = choice.get("delta") or {}
+                        tc_deltas = delta.get("tool_calls")
+                        if not isinstance(tc_deltas, list):
+                            continue
+                        for tc_delta in tc_deltas:
+                            if not isinstance(tc_delta, dict):
+                                continue
+                            idx = tc_delta.get("index", 0)
+                            if idx not in tool_call_chunks:
+                                tool_call_chunks[idx] = {
+                                    "id": "",
+                                    "type": "function",
+                                    "function": {"name": "", "arguments": ""},
+                                }
+                            chunk = tool_call_chunks[idx]
+                            if tc_delta.get("id"):
+                                chunk["id"] = tc_delta["id"]
+                            if tc_delta.get("type"):
+                                chunk["type"] = tc_delta["type"]
+                            fn = tc_delta.get("function") or {}
+                            if fn.get("name"):
+                                chunk["function"]["name"] += fn["name"]
+                            if fn.get("arguments"):
+                                chunk["function"]["arguments"] += fn["arguments"]
             finally:
                 self._active_response = None
 
-        return "".join(aggregated).strip()
+        tool_calls = [tool_call_chunks[k] for k in sorted(tool_call_chunks.keys())]
+        return "".join(aggregated).strip(), tool_calls, finish_reason
 
     async def send_command(self, text: str, cwd: Path = None):
         if not self._running:
@@ -327,16 +384,78 @@ class OpenRouterExecutionBackend(BaseApiBackend):
         if not model_name:
             raise RuntimeError("OpenRouter model is not configured")
 
+        from runtime.tool_executor import MAX_OUTPUT_CHARS, ToolExecutor
+
         loop = asyncio.get_running_loop()
+        messages = self._build_messages(text)
+        work_dir = Path(cwd or self._cwd or Path.cwd()).resolve()
+        tool_executor = ToolExecutor(cwd=work_dir, notify=self._notify)
+
+        MAX_ITERATIONS = 20
+        aggregated_text = ""
+
         try:
-            final_text = await loop.run_in_executor(
-                None, self._stream_sync, text, model_name, loop
-            )
-            if final_text and self._final_result_callback:
-                self._final_result_callback(final_text)
+            for _iteration in range(MAX_ITERATIONS):
+                text_chunk, tool_calls, finish_reason = await loop.run_in_executor(
+                    None, self._stream_iteration_sync, messages, model_name, loop
+                )
+
+                if text_chunk:
+                    aggregated_text = text_chunk
+
+                if tool_calls:
+                    # Emit notification so the UI shows which tools are running.
+                    names = ", ".join(tc["function"]["name"] for tc in tool_calls)
+                    self._notify(encode_forge_event("tool", text=f"⚙️ Calling: {names}"))
+
+                    # Build assistant message that includes the tool calls.
+                    assistant_msg: dict = {
+                        "role": "assistant",
+                        "content": text_chunk or None,
+                        "tool_calls": tool_calls,
+                    }
+                    messages.append(assistant_msg)
+
+                    # Execute all tool calls concurrently.
+                    results = await asyncio.gather(
+                        *[
+                            tool_executor.execute(
+                                tc["function"]["name"],
+                                json.loads(tc["function"].get("arguments") or "{}"),
+                            )
+                            for tc in tool_calls
+                        ],
+                        return_exceptions=True,
+                    )
+
+                    # Append one tool result message per call.
+                    for tc, result in zip(tool_calls, results):
+                        content = (
+                            str(result) if not isinstance(result, Exception)
+                            else f"Error: {result}"
+                        )
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": tc["id"],
+                            "content": content[:MAX_OUTPUT_CHARS],
+                        })
+                else:
+                    # No tool calls — model is done (or returning text only).
+                    if text_chunk:
+                        messages.append({"role": "assistant", "content": text_chunk})
+                    break
+
+                if finish_reason in ("stop", "length"):
+                    break
+            else:
+                self._notify("⚠️ Agent loop hit maximum iterations (20)")
+
+            if aggregated_text and self._final_result_callback:
+                self._final_result_callback(aggregated_text)
             self._notify("🏁 Done (success): 0ms")
             self.mark_success()
             return 0
+
         except error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
             message = self._friendly_http_error_message(
@@ -358,3 +477,6 @@ class OpenRouterExecutionBackend(BaseApiBackend):
             self._notify(f"❌ {message[:300]}")
             self.mark_failure(message)
             return -1
+
+    async def write_stdin(self, text: str) -> None:
+        """No-op: HTTP backends don't have stdin."""

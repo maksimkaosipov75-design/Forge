@@ -80,6 +80,10 @@ def _event_to_line(raw: str) -> tuple[str, bool] | None:
             cmd = cmd[len("Running: "):]
         short = (cmd[:52] + "…") if len(cmd) > 54 else cmd
         return f"🐚 <code>{escape(short)}</code>", True
+    if raw.startswith("🔍 "):
+        body = raw[2:].strip()
+        short = (body[:52] + "…") if len(body) > 54 else body
+        return f"🔍 <code>{escape(short)}</code>", True
     if raw.startswith("❌ "):
         return f"❌ {escape(raw[2:].strip()[:200])}", False
     if raw.startswith("⚙️ "):

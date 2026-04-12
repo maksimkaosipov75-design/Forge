@@ -384,17 +384,20 @@ class OpenRouterExecutionBackend(BaseApiBackend):
         if not model_name:
             raise RuntimeError("OpenRouter model is not configured")
 
-        from runtime.tool_executor import MAX_OUTPUT_CHARS, ToolExecutor
+        from runtime.tool_executor import MAX_OUTPUT_CHARS, PersistentShell, ToolExecutor
 
         loop = asyncio.get_running_loop()
         messages = self._build_messages(text)
         work_dir = Path(cwd or self._cwd or Path.cwd()).resolve()
-        tool_executor = ToolExecutor(cwd=work_dir, notify=self._notify)
 
         MAX_ITERATIONS = 20
         aggregated_text = ""
 
+        shell = PersistentShell(cwd=work_dir)
+        await shell.start()
         try:
+            tool_executor = ToolExecutor(cwd=work_dir, notify=self._notify, shell=shell)
+
             for _iteration in range(MAX_ITERATIONS):
                 text_chunk, tool_calls, finish_reason = await loop.run_in_executor(
                     None, self._stream_iteration_sync, messages, model_name, loop
@@ -404,9 +407,10 @@ class OpenRouterExecutionBackend(BaseApiBackend):
                     aggregated_text = text_chunk
 
                 if tool_calls:
-                    # Emit notification so the UI shows which tools are running.
+                    # 🔧-prefixed line: parser increments tool_use_count,
+                    # Telegram renderer shows current tool call.
                     names = ", ".join(tc["function"]["name"] for tc in tool_calls)
-                    self._notify(encode_forge_event("tool", text=f"⚙️ Calling: {names}"))
+                    self._notify(f"🔧 {names}")
 
                     # Build assistant message that includes the tool calls.
                     assistant_msg: dict = {
@@ -477,6 +481,8 @@ class OpenRouterExecutionBackend(BaseApiBackend):
             self._notify(f"❌ {message[:300]}")
             self.mark_failure(message)
             return -1
+        finally:
+            await shell.stop()
 
     async def write_stdin(self, text: str) -> None:
         """No-op: HTTP backends don't have stdin."""

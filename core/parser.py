@@ -212,6 +212,21 @@ class LogParser:
                 return StreamEvent(category=ActionCategory.PROMPT, text=text, payload=forge_event)
             if event_type == "result":
                 return StreamEvent(category=ActionCategory.DONE, text=text, payload=forge_event)
+            if event_type == "tool":
+                # Forge-encoded tool events from API backends (belt+suspenders:
+                # ToolExecutor now emits raw emoji strings, but keep this for safety).
+                file_path = None
+                if text.startswith(("✏️", "👁️", "📂")):
+                    parts = text.split(None, 1)
+                    file_path = parts[1].strip() if len(parts) > 1 else None
+                tool_name = text.lstrip("🐚✏️👁️📂🔍⚙️🔧 ").strip()
+                return StreamEvent(
+                    category=ActionCategory.TOOL,
+                    text=text,
+                    tool_name=tool_name[:60],
+                    file_path=file_path,
+                    payload=forge_event,
+                )
         if line.startswith("🧠 "):
             return StreamEvent(category=ActionCategory.THINKING, text=line[2:].strip())
         elif line.startswith("💬 "):
@@ -363,8 +378,10 @@ class LogParser:
                 return f"💭 {summary}"
             if event_type == "result":
                 return f"🏁 {text}" if text else "🏁 result"
+            if event_type == "tool":
+                return f"🔧 {text}" if text else "🔧 tool"
         # Stream-json уже имеет чистые события с эмодзи
-        if line.startswith(("⚙️", "🧠", "💬", "🔧", "🏁", "🔢", "✏️", "📂", "👁️", "🐚", "❌", "✅")):
+        if line.startswith(("⚙️", "🧠", "💬", "🔧", "🏁", "🔢", "✏️", "📂", "👁️", "🐚", "❌", "✅", "🔍")):
             return line
         if line.startswith("__READY__"):
             return None

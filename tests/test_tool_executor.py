@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from runtime.tool_executor import ToolExecutor, MAX_OUTPUT_CHARS
+from runtime.tool_executor import MAX_OUTPUT_CHARS, PersistentShell, ToolExecutor
 
 
 def run(coro):
@@ -21,16 +21,19 @@ class ToolExecutorTests(unittest.TestCase):
         self.tmp.cleanup()
 
     # ------------------------------------------------------------------
-    # bash
+    # bash (no persistent shell — fallback mode)
     # ------------------------------------------------------------------
 
     def test_bash_returns_output(self):
         result = run(self.executor.execute("bash", {"command": "echo hello"}))
         self.assertEqual(result.strip(), "hello")
 
-    def test_bash_emits_tool_event(self):
+    def test_bash_emits_raw_emoji_event(self):
+        """Notification must be a raw '🐚 …' string, NOT a forge-encoded event."""
         run(self.executor.execute("bash", {"command": "echo hi"}))
-        self.assertTrue(any("🐚" in e for e in self.events))
+        self.assertTrue(any(e.startswith("🐚") for e in self.events))
+        # Must NOT be a forge-encoded wrapper
+        self.assertFalse(any(e.startswith("FORGE_EVENT") for e in self.events))
 
     def test_bash_timeout_returns_timeout_message(self):
         result = run(self.executor.execute("bash", {"command": "sleep 10", "timeout": 1}))
@@ -57,10 +60,11 @@ class ToolExecutorTests(unittest.TestCase):
         self.assertIn("truncated", result)
         self.assertLessEqual(len(result), MAX_OUTPUT_CHARS + 50)
 
-    def test_read_file_emits_event(self):
+    def test_read_file_emits_raw_emoji_event(self):
         (self.cwd / "f.txt").write_text("a")
         run(self.executor.execute("read_file", {"path": "f.txt"}))
-        self.assertTrue(any("👁️" in e for e in self.events))
+        self.assertTrue(any(e.startswith("👁️") for e in self.events))
+        self.assertFalse(any(e.startswith("FORGE_EVENT") for e in self.events))
 
     # ------------------------------------------------------------------
     # write_file
@@ -73,6 +77,10 @@ class ToolExecutorTests(unittest.TestCase):
     def test_write_file_creates_parent_dirs(self):
         run(self.executor.execute("write_file", {"path": "sub/dir/f.txt", "content": "x"}))
         self.assertTrue((self.cwd / "sub" / "dir" / "f.txt").exists())
+
+    def test_write_file_emits_raw_emoji_event(self):
+        run(self.executor.execute("write_file", {"path": "w.txt", "content": "x"}))
+        self.assertTrue(any(e.startswith("✏️") for e in self.events))
 
     # ------------------------------------------------------------------
     # edit_file
@@ -126,6 +134,52 @@ class ToolExecutorTests(unittest.TestCase):
         result = run(self.executor.execute("glob_files", {"pattern": "*.rs"}))
         self.assertIn("no matches", result)
 
+    def test_glob_files_emits_raw_emoji_event(self):
+        run(self.executor.execute("glob_files", {"pattern": "*.py"}))
+        self.assertTrue(any(e.startswith("🔍") for e in self.events))
+
+    # ------------------------------------------------------------------
+    # search_in_files
+    # ------------------------------------------------------------------
+
+    def test_search_finds_pattern(self):
+        (self.cwd / "a.py").write_text("def hello():\n    pass\n")
+        (self.cwd / "b.py").write_text("x = 1\n")
+        result = run(self.executor.execute("search_in_files", {"pattern": "def hello"}))
+        self.assertIn("hello", result)
+        self.assertIn("a.py", result)
+
+    def test_search_no_match(self):
+        (self.cwd / "a.py").write_text("x = 1\n")
+        result = run(self.executor.execute("search_in_files", {"pattern": "NONEXISTENT_XYZ"}))
+        self.assertIn("no matches", result)
+
+    def test_search_case_insensitive_by_default(self):
+        (self.cwd / "a.py").write_text("HELLO = 1\n")
+        result = run(self.executor.execute("search_in_files", {"pattern": "hello"}))
+        self.assertIn("HELLO", result)
+
+    def test_search_case_sensitive(self):
+        (self.cwd / "a.py").write_text("HELLO = 1\nhello = 2\n")
+        result = run(self.executor.execute("search_in_files", {
+            "pattern": "hello", "case_sensitive": True
+        }))
+        # Should find lowercase "hello" but not "HELLO"
+        self.assertIn("hello = 2", result)
+
+    def test_search_with_file_pattern(self):
+        (self.cwd / "a.py").write_text("needle\n")
+        (self.cwd / "b.txt").write_text("needle\n")
+        result = run(self.executor.execute("search_in_files", {
+            "pattern": "needle", "file_pattern": "*.py"
+        }))
+        self.assertIn("a.py", result)
+        self.assertNotIn("b.txt", result)
+
+    def test_search_emits_raw_emoji_event(self):
+        run(self.executor.execute("search_in_files", {"pattern": "anything"}))
+        self.assertTrue(any(e.startswith("🔍") for e in self.events))
+
     # ------------------------------------------------------------------
     # unknown tool
     # ------------------------------------------------------------------
@@ -134,6 +188,71 @@ class ToolExecutorTests(unittest.TestCase):
         result = run(self.executor.execute("nonexistent", {}))
         self.assertIn("Error", result)
         self.assertIn("unknown tool", result)
+
+
+class PersistentShellTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.cwd = Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_basic_command(self):
+        async def _run():
+            async with PersistentShell(self.cwd) as sh:
+                return await sh.run("echo persistent")
+        result = run(_run())
+        self.assertIn("persistent", result)
+
+    def test_state_persists_across_calls(self):
+        """cd in first call should persist for the second call."""
+        async def _run():
+            sub = self.cwd / "sub"
+            sub.mkdir()
+            async with PersistentShell(self.cwd) as sh:
+                await sh.run(f"cd {sub}")
+                return await sh.run("pwd")
+        result = run(_run())
+        self.assertIn("sub", result)
+
+    def test_env_variable_persists(self):
+        async def _run():
+            async with PersistentShell(self.cwd) as sh:
+                await sh.run("export MY_VAR=hello123")
+                return await sh.run("echo $MY_VAR")
+        result = run(_run())
+        self.assertIn("hello123", result)
+
+    def test_timeout_returns_message(self):
+        async def _run():
+            async with PersistentShell(self.cwd) as sh:
+                return await sh.run("sleep 10", timeout=1)
+        result = run(_run())
+        self.assertIn("timeout", result)
+
+    def test_failed_command_still_returns_output(self):
+        """The sentinel must appear even after a failing command."""
+        async def _run():
+            async with PersistentShell(self.cwd) as sh:
+                return await sh.run("echo before_fail && false && echo after_fail")
+        result = run(_run())
+        self.assertIn("before_fail", result)
+
+    def test_executor_uses_persistent_shell(self):
+        """ToolExecutor with PersistentShell should preserve cd across bash calls."""
+        events: list[str] = []
+
+        async def _run():
+            sub = self.cwd / "subdir"
+            sub.mkdir()
+            async with PersistentShell(self.cwd) as sh:
+                ex = ToolExecutor(cwd=self.cwd, notify=events.append, shell=sh)
+                await ex.execute("bash", {"command": f"cd {sub}"})
+                return await ex.execute("bash", {"command": "pwd"})
+
+        result = run(_run())
+        self.assertIn("subdir", result)
 
 
 if __name__ == "__main__":

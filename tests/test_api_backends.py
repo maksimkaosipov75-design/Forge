@@ -117,6 +117,44 @@ class OpenRouterExecutionBackendTests(unittest.TestCase):
         self.assertEqual(decoded["title"], "Shell access")
         self.assertEqual(text_delta, "")
 
+    def test_prune_messages_no_op_within_budget(self):
+        msgs = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "hi", "tool_calls": []},
+            {"role": "tool", "tool_call_id": "1", "content": "result"},
+        ]
+        pruned = OpenRouterExecutionBackend._prune_messages(msgs, budget=100_000)
+        self.assertEqual(len(pruned), 4)
+
+    def test_prune_messages_truncates_old_tool_results(self):
+        big = "x" * 10_000
+        msgs = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "task"},
+            {"role": "assistant", "content": None, "tool_calls": [{"id": "1"}]},
+            {"role": "tool", "tool_call_id": "1", "content": big},
+            {"role": "assistant", "content": None, "tool_calls": [{"id": "2"}]},
+            {"role": "tool", "tool_call_id": "2", "content": big},
+        ]
+        pruned = OpenRouterExecutionBackend._prune_messages(msgs, budget=5_000)
+        # All messages preserved but tool results truncated
+        tool_msgs = [m for m in pruned if m.get("role") == "tool"]
+        self.assertTrue(all(len(m["content"]) <= 500 for m in tool_msgs))
+
+    def test_prune_messages_preserves_system_and_user(self):
+        big = "x" * 50_000
+        msgs = [
+            {"role": "system", "content": "system prompt"},
+            {"role": "user", "content": "original task"},
+            {"role": "assistant", "content": None, "tool_calls": []},
+            {"role": "tool", "tool_call_id": "1", "content": big},
+        ]
+        pruned = OpenRouterExecutionBackend._prune_messages(msgs, budget=1_000)
+        roles = [m["role"] for m in pruned]
+        self.assertIn("system", roles)
+        self.assertIn("user", roles)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -166,6 +166,18 @@ class OpenRouterExecutionBackend(BaseApiBackend):
         self._cwd: Path | None = None  # injected by executor; used by ToolExecutor
         self.conversation_history: list[dict] = []
         self.project_context: str = ""  # injected by executor before each call
+        self._active_shell: "PersistentShell | None" = None  # for stop() to cancel
+
+    async def stop(self):
+        """Cancel the in-flight HTTP request AND the running bash shell."""
+        await super().stop()
+        shell = self._active_shell
+        if shell is not None:
+            self._active_shell = None
+            try:
+                await shell.stop()
+            except Exception:
+                pass
 
     @staticmethod
     def parse_sse_line(raw: str) -> tuple[list[str], str]:
@@ -244,6 +256,14 @@ class OpenRouterExecutionBackend(BaseApiBackend):
             events.append(f"💬 {text_delta}")
         return events, text_delta
 
+    # Soft limit for the total characters across all messages in the agent loop.
+    # Tool results can be up to MAX_OUTPUT_CHARS (8000) each; 20 iterations ×
+    # several tool calls per iteration easily exceeds typical context windows.
+    # When the budget is exceeded, old tool result messages are evicted first
+    # (keeping the system prompt, the original user message, and the most recent
+    # assistant/tool pairs so the model always knows what it's doing).
+    _CONTEXT_CHAR_BUDGET = 80_000
+
     def _build_messages(self, prompt: str) -> list[dict]:
         """Build the messages array: optional system context + history + current prompt."""
         messages: list[dict] = []
@@ -254,6 +274,76 @@ class OpenRouterExecutionBackend(BaseApiBackend):
                 messages.append({"role": entry["role"], "content": entry["content"]})
         messages.append({"role": "user", "content": prompt})
         return messages
+
+    @staticmethod
+    def _prune_messages(messages: list[dict], budget: int) -> list[dict]:
+        """
+        Evict old tool-result messages when the total character count exceeds
+        *budget*, keeping:
+          - index 0: system prompt (if present)
+          - last user message (the original task)
+          - the most recent assistant+tool pairs (most relevant context)
+
+        Tool result messages are truncated to 400 chars before eviction so the
+        model still sees *something* from prior steps rather than a gap.
+        """
+        def _char_count(msgs: list[dict]) -> int:
+            total = 0
+            for m in msgs:
+                c = m.get("content") or ""
+                if isinstance(c, str):
+                    total += len(c)
+                elif isinstance(c, list):
+                    total += sum(len(str(b)) for b in c)
+                # also count tool_calls JSON size roughly
+                if m.get("tool_calls"):
+                    total += len(str(m["tool_calls"]))
+            return total
+
+        if _char_count(messages) <= budget:
+            return messages
+
+        # Identify which messages are eviction candidates (tool results mid-loop)
+        # Keep: system (idx 0 if role==system), first user message, recent pairs.
+        result = list(messages)
+        has_system = result and result[0].get("role") == "system"
+        protect_start = 1 if has_system else 0  # system is always protected
+
+        # Find the original user prompt (first user message after system)
+        first_user_idx = None
+        for i, m in enumerate(result[protect_start:], protect_start):
+            if m.get("role") == "user":
+                first_user_idx = i
+                break
+
+        # Evict tool messages from oldest to newest, skipping protected indices.
+        evict_candidates = [
+            i for i, m in enumerate(result)
+            if m.get("role") == "tool" and i != first_user_idx
+        ]
+
+        for idx in evict_candidates:
+            if _char_count(result) <= budget:
+                break
+            original = result[idx].get("content", "")
+            if isinstance(original, str) and len(original) > 400:
+                result[idx] = {**result[idx], "content": original[:400] + "\n... (truncated for context budget)"}
+
+        # If still over budget, evict oldest non-system/non-first-user messages.
+        evict_full = [
+            i for i, m in enumerate(result)
+            if i >= protect_start and i != first_user_idx
+            and m.get("role") in ("tool", "assistant")
+        ]
+        i = 0
+        while _char_count(result) > budget and i < len(evict_full):
+            idx = evict_full[i]
+            result.pop(idx)
+            # Adjust remaining indices
+            evict_full = [j - 1 if j > idx else j for j in evict_full]
+            i += 1
+
+        return result
 
     def _build_request(self, messages: "list[dict] | str", model_name: str) -> request.Request:
         """Build an HTTP request. Accepts a messages list or a raw prompt string."""
@@ -395,10 +485,14 @@ class OpenRouterExecutionBackend(BaseApiBackend):
 
         shell = PersistentShell(cwd=work_dir)
         await shell.start()
+        self._active_shell = shell
         try:
             tool_executor = ToolExecutor(cwd=work_dir, notify=self._notify, shell=shell)
 
             for _iteration in range(MAX_ITERATIONS):
+                # Prune old tool results before sending to avoid context overflow.
+                messages = self._prune_messages(messages, self._CONTEXT_CHAR_BUDGET)
+
                 text_chunk, tool_calls, finish_reason = await loop.run_in_executor(
                     None, self._stream_iteration_sync, messages, model_name, loop
                 )
@@ -482,6 +576,7 @@ class OpenRouterExecutionBackend(BaseApiBackend):
             self.mark_failure(message)
             return -1
         finally:
+            self._active_shell = None
             await shell.stop()
 
     async def write_stdin(self, text: str) -> None:

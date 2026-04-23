@@ -146,6 +146,66 @@ class ExecutionService:
         returncode_holder = [0]
         loop = asyncio.get_running_loop()
 
+        _is_cli = not is_api_provider(provider_name)
+
+        async def _emit_cli_file_diff(path_hint: str) -> None:
+            """
+            Compute a git diff for a file that a CLI model just wrote, and
+            emit a 📊 event via stream_event_callback.  Called only for CLI
+            providers (API providers emit diffs directly from ToolExecutor).
+            """
+            from runtime.diff_utils import format_diff_notify_from_git
+
+            # Resolve path hint → absolute path.
+            # Strip common prefixes like "Editing: " that the fallback parser adds.
+            hint = path_hint
+            for prefix in ("Editing: ", "Created: ", "Writing: "):
+                if hint.startswith(prefix):
+                    hint = hint[len(prefix):]
+                    break
+            hint = hint.strip().strip("`'\"")
+
+            p = Path(hint)
+            if not p.is_absolute():
+                p = work_dir / hint
+            if not p.exists():
+                # Best-effort: search by filename
+                matches = list(work_dir.rglob(Path(hint).name))
+                if not matches:
+                    return
+                p = matches[0]
+
+            try:
+                rel = p.relative_to(work_dir)
+            except ValueError:
+                rel = Path(p.name)
+
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    "git", "diff", "HEAD", "--", str(rel),
+                    cwd=str(work_dir),
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=5)
+                diff_out = stdout.decode("utf-8", errors="replace")
+            except Exception:
+                return
+
+            if not diff_out.strip():
+                # Maybe a new untracked file — show line count instead
+                try:
+                    n = len(p.read_text(errors="replace").splitlines())
+                    diff_out = ""  # no git diff available
+                    diff_event = f"📊 {rel}  +{n} -0 (new file)"
+                except Exception:
+                    return
+            else:
+                diff_event = format_diff_notify_from_git(str(rel), diff_out)
+
+            if diff_event and stream_event_callback:
+                stream_event_callback(diff_event)
+
         def on_stream_line(line: str):
             actionable = runtime.parser.get_actionable_line(line)
             if actionable:
@@ -156,7 +216,16 @@ class ExecutionService:
                     loop.call_soon_threadsafe(stream_queue.put_nowait, actionable)
                 except Exception:
                     pass
-                
+
+                # CLI mode: emit git diff when a file-write event is detected.
+                # API mode: ToolExecutor already emits 📊 events directly.
+                if _is_cli and actionable.startswith(("✏️ ", "📂 ")):
+                    path_body = actionable[2:].strip()
+                    if path_body:
+                        loop.call_soon_threadsafe(
+                            lambda pb=path_body: loop.create_task(_emit_cli_file_diff(pb))
+                        )
+
                 # Check for interaction
                 if interaction_callback and ("❓" in actionable or "✅" in actionable):
                     # We found a question or approval. Parser state should be updated.
@@ -214,6 +283,7 @@ class ExecutionService:
         if is_api_provider(provider_name):
             _configure_api_manager(runtime.manager, session, prompt)
             runtime.manager._cwd = work_dir  # pass cwd to ToolExecutor inside the backend
+            runtime.manager._interaction_callback = interaction_callback  # ask_user tool
 
         async def run_agent():
             started_at = monotonic()

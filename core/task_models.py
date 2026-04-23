@@ -92,6 +92,8 @@ class SubtaskRun:
     handoff_record: dict[str, Any] = field(default_factory=dict)
     retry_count: int = 0
     original_provider: str = ""
+    parent_subtask_id: str = ""
+    depth: int = 0
 
     @property
     def touched_files(self) -> list[str]:

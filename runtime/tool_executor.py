@@ -13,7 +13,7 @@ import asyncio
 import glob as _glob
 import uuid
 from pathlib import Path
-from typing import Callable
+from typing import Awaitable, Callable
 
 
 MAX_OUTPUT_CHARS = 8000
@@ -147,6 +147,28 @@ TOOL_DEFINITIONS: list[dict] = [
     {
         "type": "function",
         "function": {
+            "name": "ask_user",
+            "description": (
+                "Ask the user a question and wait for their answer. "
+                "Use this when you need clarification, a decision, or information "
+                "that you cannot determine from the codebase alone. "
+                "The user will be prompted in the Telegram chat."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "question": {
+                        "type": "string",
+                        "description": "The question to ask the user.",
+                    },
+                },
+                "required": ["question"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "search_in_files",
             "description": (
                 "Search for a text pattern across files (like grep -rn). "
@@ -237,8 +259,18 @@ class PersistentShell:
                 pass
         self._proc = None
 
-    async def run(self, command: str, timeout: int = 30) -> str:
-        """Run *command* in the persistent shell and return its output."""
+    async def run(
+        self,
+        command: str,
+        timeout: int = 30,
+        line_callback: "Callable[[str], None] | None" = None,
+    ) -> str:
+        """Run *command* in the persistent shell and return its output.
+
+        If *line_callback* is provided it is invoked with each non-empty output
+        line as it arrives, before the full output is returned.  This gives
+        real-time visibility into long-running commands (npm install, pytest, …).
+        """
         async with self._lock:
             if not self._proc or self._proc.returncode is not None:
                 return "[shell not running]"
@@ -276,6 +308,8 @@ class PersistentShell:
                 if text == sentinel:
                     break
                 lines.append(text)
+                if line_callback and text.strip():
+                    line_callback(text)
 
             output = "\n".join(lines)
             if len(output) > MAX_OUTPUT_CHARS:
@@ -300,10 +334,12 @@ class ToolExecutor:
         cwd: Path,
         notify: Callable[[str], None],
         shell: PersistentShell | None = None,
+        interaction_callback: "Callable[[str, str], Awaitable[str | None]] | None" = None,
     ):
         self.cwd = Path(cwd).resolve()
         self._notify = notify
         self._shell = shell  # if set, bash calls run inside the persistent process
+        self._interaction_callback = interaction_callback
 
     # ------------------------------------------------------------------
     # Dispatch
@@ -344,6 +380,8 @@ class ToolExecutor:
                     tool_args.get("file_pattern", ""),
                     bool(tool_args.get("case_sensitive", False)),
                 )
+            if tool_name == "ask_user":
+                return await self._ask_user(tool_args.get("question", ""))
             return f"Error: unknown tool '{tool_name}'"
         except Exception as exc:
             return f"Error: {exc}"
@@ -363,7 +401,11 @@ class ToolExecutor:
         short = command[:120] + ("…" if len(command) > 120 else "")
         self._notify(f"🐚 {short}")
         if self._shell is not None:
-            return await self._shell.run(command, timeout=timeout)
+            def _on_output_line(line: str) -> None:
+                stripped = line.strip()
+                if stripped:
+                    self._notify(f"🐚 {stripped[:200]}")
+            return await self._shell.run(command, timeout=timeout, line_callback=_on_output_line)
         # Fallback: standalone subprocess (no state persistence)
         proc = await asyncio.create_subprocess_shell(
             command,
@@ -392,11 +434,33 @@ class ToolExecutor:
             content = content[:MAX_OUTPUT_CHARS] + "\n... (truncated)"
         return content
 
+    def _rel(self, target: Path) -> str:
+        """Return path relative to cwd, or just the name if outside cwd."""
+        try:
+            return str(target.relative_to(self.cwd))
+        except ValueError:
+            return target.name
+
     def _write_file(self, path: str, content: str) -> str:
         target = self._resolve(path)
         self._notify(f"✏️ {target.name}")
+
+        # Snapshot old content before overwriting so we can diff it.
+        old_content = ""
+        if target.exists():
+            try:
+                old_content = target.read_text(errors="replace")
+            except Exception:
+                pass
+
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content)
+
+        from runtime.diff_utils import format_diff_notify
+        diff_event = format_diff_notify(self._rel(target), old_content, content)
+        if diff_event:
+            self._notify(diff_event)
+
         return f"Written {len(content)} bytes to {path}"
 
     def _edit_file(self, path: str, old_str: str, new_str: str) -> str:
@@ -410,6 +474,12 @@ class ToolExecutor:
             return f"Error: old_str is not unique in {path} ({count} occurrences)"
         updated = original.replace(old_str, new_str, 1)
         target.write_text(updated)
+
+        from runtime.diff_utils import format_diff_notify
+        diff_event = format_diff_notify(self._rel(target), original, updated)
+        if diff_event:
+            self._notify(diff_event)
+
         return f"Edited {path}"
 
     def _list_directory(self, path: str = "") -> str:
@@ -435,6 +505,20 @@ class ToolExecutor:
         if len(result) > MAX_OUTPUT_CHARS:
             result = result[:MAX_OUTPUT_CHARS] + "\n... (truncated)"
         return result or "(no matches)"
+
+    async def _ask_user(self, question: str) -> str:
+        if not question.strip():
+            return "Error: question must not be empty"
+        if not self._interaction_callback:
+            return "[ask_user is not available — no interaction callback configured]"
+        self._notify(f"⚙️ Asking user: {question.strip()[:120]}")
+        try:
+            response = await self._interaction_callback("question", question)
+        except Exception as exc:
+            return f"[ask_user error: {exc}]"
+        if not response or not response.strip():
+            return "[no response received from user]"
+        return response.strip()
 
     async def _search_in_files(
         self,

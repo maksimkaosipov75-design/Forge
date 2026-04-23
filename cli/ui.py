@@ -1064,10 +1064,11 @@ class CliUi:
         """Print a per-subtask result after it finishes."""
         style = self._provider_style(subtask.provider)
         icon = "✓" if subtask.status in ("success", "reused") else "✗"
+        indent = "  " * min(getattr(subtask, "depth", 0), 3)
         if self.console:
             self.console.print()
             self.console.print(
-                f"  [{style}]{icon}[/] [{style}]{subtask.provider}[/]  [bright_black]{subtask.title}[/bright_black]"
+                f"  {indent}[{style}]{icon}[/] [{style}]{subtask.provider}[/]  [bright_black]{subtask.title}[/bright_black]"
             )
             for f in subtask.new_files[:6]:
                 self.print_file_diff(f, is_new=True, provider=subtask.provider)
@@ -1076,7 +1077,7 @@ class CliUi:
             return
         accent = self._ansi_provider_color(subtask.provider)
         reset = self._ansi_reset()
-        print(f"  {accent}{icon} {subtask.provider}{reset}  {subtask.title}")
+        print(f"  {indent}{accent}{icon} {subtask.provider}{reset}  {subtask.title}")
         for f in subtask.new_files[:6]:
             self.print_file_diff(f, is_new=True, provider=subtask.provider)
         for f in subtask.changed_files[:6]:

@@ -320,6 +320,48 @@ class OrchestratorServiceTests(unittest.TestCase):
         self.assertEqual(record["touched_files"], ["src/parser.py", "src/cli.py"])
         self.assertTrue(record["notes"])
 
+    def test_expand_subtask_into_children_inserts_nested_steps(self):
+        class DummyContainer:
+            provider_paths = {"qwen": "qwen", "codex": "codex", "claude": "claude"}
+
+        service = OrchestratorService(DummyContainer(), execution_service=None)
+        plan = OrchestrationPlan(
+            prompt="Build a complex backend service",
+            complexity="complex",
+            strategy="split",
+            subtasks=[
+                PlannedSubtask(
+                    subtask_id="backend",
+                    title="Backend",
+                    description="Implement the backend service and contracts",
+                    task_kind="backend_core",
+                    suggested_provider="codex",
+                    reason="backend fit",
+                    parallel_group=1,
+                ),
+                PlannedSubtask(
+                    subtask_id="review",
+                    title="Review",
+                    description="Review the service",
+                    task_kind="review",
+                    suggested_provider="claude",
+                    reason="review fit",
+                    depends_on=["backend"],
+                    parallel_group=2,
+                ),
+            ],
+        )
+
+        expanded = service._expand_subtask_into_children(plan, plan.subtasks[0])
+
+        self.assertTrue(expanded)
+        self.assertEqual(plan.subtasks[0].parent_subtask_id, "backend")
+        self.assertEqual(plan.subtasks[1].parent_subtask_id, "backend")
+        self.assertEqual(plan.subtasks[0].depth, 1)
+        self.assertEqual(plan.subtasks[1].depth, 1)
+        self.assertEqual(plan.subtasks[2].subtask_id, "backend")
+        self.assertEqual(plan.subtasks[2].depends_on, ["backend--impl", "backend--verify"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -92,6 +92,30 @@ def create_bot_and_setup(manager=None, parser=None, file_mgr=None):
 
         session = core.get_session(message.chat.id)
 
+        # ── interaction response intercept ────────────────────────────────────
+        # When the API model called ask_user and is awaiting the user's typed
+        # reply, route this message directly to the pending interaction future
+        # instead of enqueuing a new task.  /cancel still cancels the task.
+        if text != "/cancel":
+            renderer = core.get_active_renderer(session.chat_id)
+            if renderer is not None and renderer.is_waiting_for_interaction:
+                msg_id = renderer.accept_text_reply(text)
+                # Remove the inline keyboard from the question message.
+                if msg_id:
+                    try:
+                        await core.bot.edit_message_reply_markup(
+                            chat_id=session.chat_id,
+                            message_id=msg_id,
+                            reply_markup=None,
+                        )
+                    except Exception:
+                        pass
+                try:
+                    await message.answer("✉️ <i>Response sent to the model.</i>")
+                except Exception:
+                    pass
+                return
+
         # ── informational / session management ────────────────────────────────
         if text == "/start":
             await handle_start(core, message, session)

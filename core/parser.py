@@ -381,7 +381,7 @@ class LogParser:
             if event_type == "tool":
                 return f"🔧 {text}" if text else "🔧 tool"
         # Stream-json уже имеет чистые события с эмодзи
-        if line.startswith(("⚙️", "🧠", "💬", "🔧", "🏁", "🔢", "✏️", "📂", "👁️", "🐚", "❌", "✅", "🔍")):
+        if line.startswith(("⚙️", "🧠", "💬", "🔧", "🏁", "🔢", "✏️", "📂", "👁️", "🐚", "❌", "✅", "🔍", "📊")):
             return line
         if line.startswith("__READY__"):
             return None

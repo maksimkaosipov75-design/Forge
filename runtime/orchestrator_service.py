@@ -6,6 +6,7 @@ from pathlib import Path
 from time import monotonic
 from typing import Awaitable, Callable
 
+from core.event_protocol import encode_forge_event
 from core.orchestrator import OrchestrationPlan
 from core.providers import is_api_provider
 from core.task_models import SubtaskRun, TaskResult, TaskRun, utc_now_iso
@@ -90,10 +91,220 @@ def _read_file_contents(file_paths: list[str], max_bytes_each: int = 3000, max_f
     return results
 
 
+def _agent_action_from_stream_line(line: str) -> str:
+    raw = (line or "").strip()
+    if not raw:
+        return ""
+    if raw.startswith("🧠 "):
+        return "Reasoning"
+    if raw.startswith("💬 "):
+        return "Writing response"
+    if raw.startswith(("✏️ ", "📂 ")):
+        target = raw.split()[-1] if raw.split() else ""
+        return f"Editing {Path(target).name}" if target else "Editing files"
+    if raw.startswith("👁️ "):
+        target = raw.split()[-1] if raw.split() else ""
+        return f"Reading {Path(target).name}" if target else "Reading files"
+    if raw.startswith("🐚 "):
+        command = raw[2:].strip()
+        if command.startswith("Running: "):
+            command = command[len("Running: "):]
+        return f"$ {command[:42]}" if command else "Running command"
+    if raw.startswith("🔧 Using: "):
+        return raw[len("🔧 Using: "):].strip()[:42]
+    if raw.startswith("🔧 "):
+        return raw[2:].strip()[:42]
+    if raw.startswith("⚙️ "):
+        return raw[2:].strip()[:42]
+    if raw.startswith("✅ "):
+        return raw[2:].strip()[:42] or "Completed"
+    if raw.startswith("❌ "):
+        return raw[2:].strip()[:42] or "Failed"
+    return ""
+
+
 class OrchestratorService:
     def __init__(self, container, execution_service):
         self.container = container
         self.execution_service = execution_service
+
+    @staticmethod
+    def _emit_agent_event(
+        stream_event_callback,
+        *,
+        subtask_id: str,
+        provider: str,
+        title: str,
+        status: str,
+        action: str = "",
+        step_index: int = 0,
+        total_steps: int = 0,
+        parallel_group: int = 0,
+        model_name: str = "",
+        error_text: str = "",
+        depth: int = 0,
+        parent_subtask_id: str = "",
+    ) -> None:
+        if not stream_event_callback:
+            return
+        try:
+            stream_event_callback(
+                encode_forge_event(
+                    "agent_status",
+                    text=action,
+                    subtask_id=subtask_id,
+                    provider=provider,
+                    title=title,
+                    status=status,
+                    step_index=step_index,
+                    total_steps=total_steps,
+                    parallel_group=parallel_group,
+                    model_name=model_name,
+                    error_text=error_text,
+                    depth=depth,
+                    parent_subtask_id=parent_subtask_id,
+                )
+            )
+        except Exception:
+            pass
+
+    @staticmethod
+    def _should_expand_subtask(plan: OrchestrationPlan, subtask) -> bool:
+        if getattr(subtask, "depth", 0) >= 1:
+            return False
+        if getattr(subtask, "parent_subtask_id", ""):
+            return False
+        if subtask.task_kind not in {"python_data", "backend_core", "ui_surface", "integration", "general"}:
+            return False
+        if plan.complexity != "complex" and len(plan.subtasks) < 4:
+            return False
+        return True
+
+    def _child_provider_for_subtask(self, subtask, lane: str) -> str:
+        if subtask.task_kind == "backend_core":
+            preferred = ("codex", "qwen", "claude") if lane == "implement" else ("qwen", "claude", "codex")
+        elif subtask.task_kind == "ui_surface":
+            preferred = ("claude", "qwen", "codex") if lane == "implement" else ("qwen", "claude", "codex")
+        elif subtask.task_kind == "integration":
+            preferred = ("codex", "claude", "qwen") if lane == "implement" else ("claude", "qwen", "codex")
+        else:
+            preferred = (subtask.suggested_provider, "qwen", "codex", "claude")
+        for name in preferred:
+            if name in self.container.provider_paths:
+                return name
+        return subtask.suggested_provider
+
+    def _default_child_subtasks(self, subtask) -> list:
+        child_group = max(0, int(subtask.parallel_group))
+        implement_id = f"{subtask.subtask_id}--impl"
+        validate_id = f"{subtask.subtask_id}--verify"
+        implement = type(subtask)(
+            subtask_id=implement_id,
+            title=f"{subtask.title} · implementation",
+            description=(
+                f"{subtask.description}\n\n"
+                "Focus on the main implementation slice for this parent task. "
+                "Own the core code changes and leave a crisp handoff for sibling agents."
+            )[:900],
+            task_kind=f"{subtask.task_kind}_child",
+            suggested_provider=self._child_provider_for_subtask(subtask, "implement"),
+            reason=f"Child implementation lane for {subtask.title}.",
+            depends_on=list(subtask.depends_on),
+            parallel_group=child_group,
+            parent_subtask_id=subtask.subtask_id,
+            depth=getattr(subtask, "depth", 0) + 1,
+        )
+        validate = type(subtask)(
+            subtask_id=validate_id,
+            title=f"{subtask.title} · validation",
+            description=(
+                f"Work alongside the implementation agent for: {subtask.description}\n\n"
+                "Check contracts, edge cases, missing tests, and integration risks. "
+                "Patch small issues directly when possible and prepare a concise handoff."
+            )[:900],
+            task_kind=f"{subtask.task_kind}_review",
+            suggested_provider=self._child_provider_for_subtask(subtask, "verify"),
+            reason=f"Child validation lane for {subtask.title}.",
+            depends_on=list(subtask.depends_on),
+            parallel_group=child_group,
+            parent_subtask_id=subtask.subtask_id,
+            depth=getattr(subtask, "depth", 0) + 1,
+        )
+        return [implement, validate]
+
+    async def _plan_child_subtasks(self, session, plan: OrchestrationPlan, subtask) -> list | None:
+        planning_provider = self.container.pick_planning_provider(session)
+        if not planning_provider:
+            return None
+        try:
+            ai_planner = self.container.build_ai_planner(session)
+            await self.container.ensure_runtime_started(session, planning_provider)
+            planning_runtime = self.container.get_runtime(session, planning_provider)
+            child_plan = await ai_planner.build_child_plan(
+                plan.prompt,
+                subtask,
+                self.execution_service,
+                session,
+                planning_runtime,
+            )
+        except Exception as exc:
+            log.warning("Child planning failed for %s: %s", subtask.subtask_id, exc)
+            return None
+        if child_plan is None or not child_plan.subtasks:
+            return None
+
+        base_group = max(0, int(subtask.parallel_group))
+        min_group = min((item.parallel_group for item in child_plan.subtasks), default=0)
+        id_map = {
+            item.subtask_id: f"{subtask.subtask_id}--{item.subtask_id}"
+            for item in child_plan.subtasks
+        }
+        normalized_children = []
+        for item in child_plan.subtasks:
+            normalized = type(subtask)(
+                subtask_id=id_map[item.subtask_id],
+                title=item.title,
+                description=item.description,
+                task_kind=item.task_kind,
+                suggested_provider=item.suggested_provider,
+                reason=item.reason,
+                depends_on=[],
+                parallel_group=base_group + max(0, item.parallel_group - min_group),
+                parent_subtask_id=subtask.subtask_id,
+                depth=getattr(subtask, "depth", 0) + 1,
+            )
+            normalized.depends_on = list(dict.fromkeys(
+                [id_map.get(dep, dep) for dep in item.depends_on if dep in id_map]
+                + list(subtask.depends_on)
+            ))
+            normalized_children.append(normalized)
+        return normalized_children
+
+    def _install_child_subtasks(self, plan: OrchestrationPlan, subtask, children: list) -> bool:
+        try:
+            parent_index = next(i for i, item in enumerate(plan.subtasks) if item.subtask_id == subtask.subtask_id)
+        except StopIteration:
+            return False
+        if not children:
+            return False
+        referenced_ids = {dep for item in children for dep in item.depends_on}
+        terminal_ids = [item.subtask_id for item in children if item.subtask_id not in referenced_ids]
+        subtask.depends_on = terminal_ids or [item.subtask_id for item in children]
+        subtask.parallel_group = max(item.parallel_group for item in children) + 1
+        subtask.description = (
+            "Integrate child-agent results for this task, resolve conflicts, and produce the final handoff.\n\n"
+            + subtask.description
+        )[:900]
+        plan.subtasks[parent_index:parent_index] = children
+        return True
+
+    async def _expand_subtask_into_children(self, session, plan: OrchestrationPlan, subtask) -> bool:
+        if not self._should_expand_subtask(plan, subtask):
+            return False
+        children = await self._plan_child_subtasks(session, plan, subtask)
+        if not children:
+            children = self._default_child_subtasks(subtask)
+        return self._install_child_subtasks(plan, subtask, children)
 
     # ------------------------------------------------------------------ #
     # Plan building (AI-driven with rule-based fallback)                    #
@@ -219,6 +430,12 @@ class OrchestratorService:
                 f"Instructions: {subtask.description}"
             ),
         ]
+        if getattr(subtask, "parent_subtask_id", ""):
+            parts.append(
+                f"Parent task: {subtask.parent_subtask_id}\n"
+                "You are a child agent working alongside sibling agents. "
+                "Coordinate through clear file changes and concise handoff notes."
+            )
         if cwd:
             listing = _cwd_listing(cwd)
             if listing:
@@ -695,6 +912,8 @@ class OrchestratorService:
                 changed_files=list(preserved.changed_files),
                 handoff_summary=preserved.handoff_summary,
                 handoff_record=dict(preserved.handoff_record),
+                parent_subtask_id=preserved.parent_subtask_id,
+                depth=preserved.depth,
             )
             task_run.subtasks.append(reused)
             if reused.handoff_summary:
@@ -708,6 +927,23 @@ class OrchestratorService:
             group = self._next_ready_group(plan, task_run, resume_from=resume_from)
             if not group:
                 break
+            expanded_any = False
+            for _, ready_subtask in group:
+                if await self._expand_subtask_into_children(session, plan, ready_subtask):
+                    expanded_any = True
+                    self._emit_agent_event(
+                        stream_event_callback,
+                        subtask_id=ready_subtask.subtask_id,
+                        provider=ready_subtask.suggested_provider,
+                        title=ready_subtask.title,
+                        status="pending",
+                        action="Spawned child agents",
+                        parallel_group=ready_subtask.parallel_group,
+                        depth=getattr(ready_subtask, "depth", 0),
+                        parent_subtask_id=getattr(ready_subtask, "parent_subtask_id", ""),
+                    )
+            if expanded_any:
+                continue
             if len(group) == 1:
                 ok = await self._run_group_sequential(
                     session, plan, task_run, subtask_results,
@@ -762,6 +998,8 @@ class OrchestratorService:
                     depends_on=list(subtask.depends_on),
                     status="skipped",
                     error_text=message,
+                    parent_subtask_id=getattr(subtask, "parent_subtask_id", ""),
+                    depth=getattr(subtask, "depth", 0),
                 )
             )
             if task_run.status == "running":
@@ -929,9 +1167,42 @@ class OrchestratorService:
         if status_callback:
             await status_callback(status_prefix)
 
+        self._emit_agent_event(
+            stream_event_callback,
+            subtask_id=subtask.subtask_id,
+            provider=provider_name,
+            title=subtask.title,
+            status="running",
+            action="Starting task",
+            step_index=index,
+            total_steps=len(plan.subtasks),
+            parallel_group=subtask.parallel_group,
+            depth=getattr(subtask, "depth", 0),
+            parent_subtask_id=getattr(subtask, "parent_subtask_id", ""),
+        )
+
+        def scoped_stream_event_callback(line: str):
+            action = _agent_action_from_stream_line(line)
+            if action:
+                self._emit_agent_event(
+                    stream_event_callback,
+                    subtask_id=subtask.subtask_id,
+                    provider=provider_name,
+                    title=subtask.title,
+                    status="running",
+                    action=action,
+                    step_index=index,
+                    total_steps=len(plan.subtasks),
+                    parallel_group=subtask.parallel_group,
+                    depth=getattr(subtask, "depth", 0),
+                    parent_subtask_id=getattr(subtask, "parent_subtask_id", ""),
+                )
+            if stream_event_callback:
+                stream_event_callback(line)
+
         task_result = await self._execute_subtask_timed(
             session, plan, subtask, provider_name, prompt,
-            status_callback, status_prefix, stream_event_callback,
+            status_callback, status_prefix, scoped_stream_event_callback,
         )
 
         retry_count = 0
@@ -951,9 +1222,42 @@ class OrchestratorService:
                 )
                 if status_callback:
                     await status_callback(retry_prefix)
+                self._emit_agent_event(
+                    stream_event_callback,
+                    subtask_id=subtask.subtask_id,
+                    provider=alt,
+                    title=subtask.title,
+                    status="running",
+                    action=f"Retrying via {alt}",
+                    step_index=index,
+                    total_steps=len(plan.subtasks),
+                    parallel_group=subtask.parallel_group,
+                    depth=getattr(subtask, "depth", 0),
+                    parent_subtask_id=getattr(subtask, "parent_subtask_id", ""),
+                )
+
+                def retry_stream_event_callback(line: str):
+                    action = _agent_action_from_stream_line(line)
+                    if action:
+                        self._emit_agent_event(
+                            stream_event_callback,
+                            subtask_id=subtask.subtask_id,
+                            provider=alt,
+                            title=subtask.title,
+                            status="running",
+                            action=action,
+                            step_index=index,
+                            total_steps=len(plan.subtasks),
+                            parallel_group=subtask.parallel_group,
+                            depth=getattr(subtask, "depth", 0),
+                            parent_subtask_id=getattr(subtask, "parent_subtask_id", ""),
+                        )
+                    if stream_event_callback:
+                        stream_event_callback(line)
+
                 task_result = await self._execute_subtask_timed(
                     session, plan, subtask, alt, prompt,
-                    status_callback, retry_prefix, stream_event_callback,
+                    status_callback, retry_prefix, retry_stream_event_callback,
                 )
                 provider_name = alt
 
@@ -971,7 +1275,7 @@ class OrchestratorService:
                 )
                 retry_result = await self._execute_subtask_timed(
                     session, plan, subtask, provider_name, augmented,
-                    status_callback, status_prefix, stream_event_callback,
+                    status_callback, status_prefix, scoped_stream_event_callback,
                 )
                 if retry_result.exit_code == 0:
                     task_result = retry_result
@@ -1006,6 +1310,8 @@ class OrchestratorService:
             handoff_record=handoff_record,
             retry_count=retry_count,
             original_provider=original_provider,
+            parent_subtask_id=getattr(subtask, "parent_subtask_id", ""),
+            depth=getattr(subtask, "depth", 0),
         ))
         task_run.input_tokens += task_result.input_tokens
         task_run.output_tokens += task_result.output_tokens
@@ -1016,6 +1322,21 @@ class OrchestratorService:
         self.container.session_store.write_checkpoint(session, task_run)
 
         if task_result.exit_code != 0:
+            self._emit_agent_event(
+                stream_event_callback,
+                subtask_id=subtask.subtask_id,
+                provider=provider_name,
+                title=subtask.title,
+                status="failed",
+                action="Failed",
+                step_index=index,
+                total_steps=len(plan.subtasks),
+                parallel_group=subtask.parallel_group,
+                model_name=task_result.model_name,
+                error_text=task_result.error_text,
+                depth=getattr(subtask, "depth", 0),
+                parent_subtask_id=getattr(subtask, "parent_subtask_id", ""),
+            )
             if index == 1 and len(plan.subtasks) == 1:
                 task_run.status = "failed"
             else:
@@ -1023,6 +1344,20 @@ class OrchestratorService:
             task_run.error_text = task_result.error_text or f"Subtask {subtask.subtask_id} failed"
             return False
 
+        self._emit_agent_event(
+            stream_event_callback,
+            subtask_id=subtask.subtask_id,
+            provider=provider_name,
+            title=subtask.title,
+            status="success",
+            action="Completed",
+            step_index=index,
+            total_steps=len(plan.subtasks),
+            parallel_group=subtask.parallel_group,
+            model_name=task_result.model_name,
+            depth=getattr(subtask, "depth", 0),
+            parent_subtask_id=getattr(subtask, "parent_subtask_id", ""),
+        )
         return True
 
     # ------------------------------------------------------------------ #

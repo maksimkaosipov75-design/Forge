@@ -181,6 +181,46 @@ class ToolExecutorTests(unittest.TestCase):
         self.assertTrue(any(e.startswith("🔍") for e in self.events))
 
     # ------------------------------------------------------------------
+    # diff events (write_file / edit_file)
+    # ------------------------------------------------------------------
+
+    def test_write_file_emits_diff_event_for_new_file(self):
+        """Writing a new file must emit a 📊 event showing all lines as added."""
+        run(self.executor.execute("write_file", {"path": "new.py", "content": "x = 1\ny = 2\n"}))
+        diff_events = [e for e in self.events if e.startswith("📊")]
+        self.assertTrue(diff_events, "Expected at least one 📊 event")
+        self.assertIn("+2", diff_events[0])
+
+    def test_write_file_emits_diff_event_for_overwrite(self):
+        """Overwriting an existing file must emit a 📊 event with correct add/del counts."""
+        (self.cwd / "f.py").write_text("a = 1\nb = 2\n")
+        run(self.executor.execute("write_file", {"path": "f.py", "content": "a = 1\nb = 99\n"}))
+        diff_events = [e for e in self.events if e.startswith("📊")]
+        self.assertTrue(diff_events)
+        first = diff_events[0]
+        self.assertIn("+1", first)
+        self.assertIn("-1", first)
+
+    def test_edit_file_emits_diff_event(self):
+        """edit_file must emit a 📊 event reflecting the substitution."""
+        (self.cwd / "code.py").write_text("x = 1\ny = 2\n")
+        run(self.executor.execute("edit_file", {
+            "path": "code.py", "old_str": "x = 1", "new_str": "x = 99"
+        }))
+        diff_events = [e for e in self.events if e.startswith("📊")]
+        self.assertTrue(diff_events)
+        first = diff_events[0]
+        self.assertIn("+1", first)
+        self.assertIn("-1", first)
+
+    def test_write_file_no_diff_event_for_identical_content(self):
+        """Re-writing a file with identical content must NOT emit a 📊 event."""
+        (self.cwd / "same.py").write_text("unchanged\n")
+        run(self.executor.execute("write_file", {"path": "same.py", "content": "unchanged\n"}))
+        diff_events = [e for e in self.events if e.startswith("📊")]
+        self.assertEqual(diff_events, [])
+
+    # ------------------------------------------------------------------
     # unknown tool
     # ------------------------------------------------------------------
 
@@ -253,6 +293,90 @@ class PersistentShellTests(unittest.TestCase):
 
         result = run(_run())
         self.assertIn("subdir", result)
+
+    def test_bash_output_lines_streamed_as_events(self):
+        """Each output line of a persistent-shell command must emit a 🐚 event."""
+        events: list[str] = []
+
+        async def _run():
+            async with PersistentShell(self.cwd) as sh:
+                ex = ToolExecutor(cwd=self.cwd, notify=events.append, shell=sh)
+                # seq emits one number per line; the command itself won't contain "1", "2", "3"
+                # as standalone words, but the output events will start with exactly "🐚 1" etc.
+                return await ex.execute("bash", {"command": "seq 3"})
+
+        run(_run())
+        shell_events = [e for e in events if e.startswith("🐚")]
+        # We expect: 1 command event + 3 output-line events = at least 4 total
+        self.assertGreaterEqual(len(shell_events), 4)
+        # The three output lines must appear as their own events
+        output_lines = {e.strip() for e in shell_events}
+        self.assertIn("🐚 1", output_lines)
+        self.assertIn("🐚 2", output_lines)
+        self.assertIn("🐚 3", output_lines)
+
+
+class AskUserToolTests(unittest.TestCase):
+    def setUp(self):
+        self.events: list[str] = []
+        self.tmp = tempfile.TemporaryDirectory()
+        self.cwd = Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_ask_user_returns_callback_response(self):
+        async def fake_callback(kind: str, text: str) -> str:
+            return "yes, proceed"
+
+        async def _run():
+            ex = ToolExecutor(
+                cwd=self.cwd,
+                notify=self.events.append,
+                interaction_callback=fake_callback,
+            )
+            return await ex.execute("ask_user", {"question": "Should I delete the file?"})
+
+        result = run(_run())
+        self.assertEqual(result, "yes, proceed")
+
+    def test_ask_user_emits_notify_event(self):
+        async def fake_callback(kind: str, text: str) -> str:
+            return "ok"
+
+        async def _run():
+            ex = ToolExecutor(
+                cwd=self.cwd,
+                notify=self.events.append,
+                interaction_callback=fake_callback,
+            )
+            await ex.execute("ask_user", {"question": "Continue?"})
+
+        run(_run())
+        self.assertTrue(any("⚙️" in e and "Continue" in e for e in self.events))
+
+    def test_ask_user_without_callback_returns_fallback(self):
+        async def _run():
+            ex = ToolExecutor(cwd=self.cwd, notify=self.events.append)
+            return await ex.execute("ask_user", {"question": "Anything?"})
+
+        result = run(_run())
+        self.assertIn("not available", result)
+
+    def test_ask_user_empty_response_returns_fallback(self):
+        async def fake_callback(kind: str, text: str) -> str | None:
+            return None
+
+        async def _run():
+            ex = ToolExecutor(
+                cwd=self.cwd,
+                notify=self.events.append,
+                interaction_callback=fake_callback,
+            )
+            return await ex.execute("ask_user", {"question": "Hello?"})
+
+        result = run(_run())
+        self.assertIn("no response", result)
 
 
 if __name__ == "__main__":

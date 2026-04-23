@@ -12,10 +12,17 @@ class RuleBasedOrchestratorTests(unittest.TestCase):
         )
 
         self.assertEqual(plan.complexity, "complex")
-        self.assertEqual(len(plan.subtasks), 3)
+        self.assertGreaterEqual(len(plan.subtasks), 5)
+        self.assertEqual(plan.subtasks[0].subtask_id, "project-brief")
         self.assertEqual(plan.subtasks[0].suggested_provider, "qwen")
-        self.assertEqual(plan.subtasks[1].suggested_provider, "codex")
-        self.assertEqual(plan.subtasks[2].suggested_provider, "claude")
+        provider_by_id = {item.subtask_id: item.suggested_provider for item in plan.subtasks}
+        self.assertEqual(provider_by_id["python-data"], "qwen")
+        self.assertEqual(provider_by_id["backend-core"], "codex")
+        self.assertEqual(provider_by_id["ui-surface"], "claude")
+        integration = next(item for item in plan.subtasks if item.subtask_id == "integration")
+        self.assertIn("python-data", integration.depends_on)
+        self.assertIn("backend-core", integration.depends_on)
+        self.assertIn("ui-surface", integration.depends_on)
 
     def test_falls_back_when_preferred_provider_is_unavailable(self):
         planner = RuleBasedOrchestrator(["qwen", "codex"])

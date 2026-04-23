@@ -138,6 +138,8 @@ class SessionStoreTests(unittest.TestCase):
                         title="Backend",
                         provider="codex",
                         status="success",
+                        parent_subtask_id="project-brief",
+                        depth=1,
                         handoff_summary="plain summary",
                         handoff_record={
                             "subtask_id": "backend",
@@ -159,6 +161,8 @@ class SessionStoreTests(unittest.TestCase):
 
             self.assertEqual(restored.last_task_run.handoff_records[0]["subtask_id"], "backend")
             self.assertEqual(restored.last_task_run.subtasks[0].handoff_record["provider"], "codex")
+            self.assertEqual(restored.last_task_run.subtasks[0].parent_subtask_id, "project-brief")
+            self.assertEqual(restored.last_task_run.subtasks[0].depth, 1)
 
     def test_save_and_load_preserves_ui_preferences(self):
         with tempfile.TemporaryDirectory() as tmpdir:

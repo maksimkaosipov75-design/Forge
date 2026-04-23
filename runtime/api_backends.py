@@ -164,6 +164,7 @@ class OpenRouterExecutionBackend(BaseApiBackend):
         self.thinking_enabled: bool = False
         self.tools_enabled: bool = True
         self._cwd: Path | None = None  # injected by executor; used by ToolExecutor
+        self._interaction_callback: Optional[Callable] = None  # injected by executor
         self.conversation_history: list[dict] = []
         self.project_context: str = ""  # injected by executor before each call
         self._active_shell: "PersistentShell | None" = None  # for stop() to cancel
@@ -487,7 +488,12 @@ class OpenRouterExecutionBackend(BaseApiBackend):
         await shell.start()
         self._active_shell = shell
         try:
-            tool_executor = ToolExecutor(cwd=work_dir, notify=self._notify, shell=shell)
+            tool_executor = ToolExecutor(
+                cwd=work_dir,
+                notify=self._notify,
+                shell=shell,
+                interaction_callback=self._interaction_callback,
+            )
 
             for _iteration in range(MAX_ITERATIONS):
                 # Prune old tool results before sending to avoid context overflow.

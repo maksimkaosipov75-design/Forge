@@ -328,6 +328,8 @@ class SessionStore:
                     "reason": item.reason,
                     "depends_on": list(item.depends_on),
                     "parallel_group": item.parallel_group,
+                    "parent_subtask_id": item.parent_subtask_id,
+                    "depth": item.depth,
                 }
                 for item in plan.subtasks
             ],
@@ -350,6 +352,8 @@ class SessionStore:
                     reason=item.get("reason", ""),
                     depends_on=list(item.get("depends_on", [])),
                     parallel_group=int(item.get("parallel_group", 0)),
+                    parent_subtask_id=item.get("parent_subtask_id", ""),
+                    depth=int(item.get("depth", 0)),
                 )
                 for item in payload.get("subtasks", [])
                 if isinstance(item, dict)
@@ -396,6 +400,7 @@ class SessionStore:
             lines.extend(["## Subtasks", ""])
             for item in task_run.subtasks:
                 retry_note = f"  (retry #{item.retry_count} from {item.original_provider})" if item.retry_count else ""
+                parent_note = f"  parent={item.parent_subtask_id}" if item.parent_subtask_id else ""
                 lines.extend([
                     f"### {item.subtask_id} · {item.title}",
                     "",
@@ -404,6 +409,7 @@ class SessionStore:
                     f"- Transport: {item.transport or 'unknown'}",
                     f"- Status: {item.status}",
                     f"- Kind: {item.task_kind}",
+                    f"- Depth: {item.depth}{parent_note}",
                     f"- Duration: {item.duration_ms}ms",
                     f"- Tokens: {item.input_tokens} in / {item.output_tokens} out",
                     "",

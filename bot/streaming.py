@@ -34,12 +34,12 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 _EDIT_INTERVAL = 1.0        # seconds between Telegram edits
-_MAX_VISIBLE_LINES = 8      # recent event lines shown in status
+_MAX_VISIBLE_LINES = 6      # recent event lines shown in status
 _MAX_THINKING_CHARS = 1000  # max chars in collapsed thinking blockquote
 _THINKING_SNIPPET_LEN = 90  # max chars of rolling snippet during thinking
 
 # These prefixes signal that thinking has finished
-_THINKING_DONE_ON = ("💬 ", "🔧 ", "✏️ ", "📂 ", "👁️ ", "🐚 ", "❌ ", "🏁 ")
+_THINKING_DONE_ON = ("💬 ", "🔧 ", "✏️ ", "📂 ", "👁️ ", "🐚 ", "❌ ", "🏁 ", "📊 ")
 
 
 def _fmt_elapsed(seconds: float) -> str:
@@ -88,6 +88,21 @@ def _event_to_line(raw: str) -> tuple[str, bool] | None:
         return f"❌ {escape(raw[2:].strip()[:200])}", False
     if raw.startswith("⚙️ "):
         return f"⚙️ <i>{escape(raw[2:].strip()[:80])}</i>", False
+    if raw.startswith("📊 "):
+        # Diff event: "📊 filename  +N -M\n+ line1\n- line2\n..."
+        raw_lines = raw.split("\n")
+        header = escape(raw_lines[0][2:].strip())  # "filename  +N -M"
+        diff_html: list[str] = []
+        for dl in raw_lines[1:]:
+            s = dl.strip()
+            if s.startswith("+ "):
+                diff_html.append(f"<code>+{escape(s[2:])}</code>")
+            elif s.startswith("- "):
+                diff_html.append(f"<code>-{escape(s[2:])}</code>")
+        result = f"📊 {header}"
+        if diff_html:
+            result += "\n" + "\n".join(diff_html)
+        return result, False
     return None
 
 
@@ -217,10 +232,27 @@ class TelegramStreamRenderer:
 
         return (answer + "\n") if answer else "\n"
 
+    @property
+    def is_waiting_for_interaction(self) -> bool:
+        """True while on_interaction() is suspended waiting for a reply."""
+        return (
+            self._interaction_future is not None
+            and not self._interaction_future.done()
+        )
+
     def resolve_interaction(self, answer: str) -> None:
         """Called by the callback handler when the user presses an inline button."""
         if self._interaction_future and not self._interaction_future.done():
             self._interaction_future.set_result(answer)
+
+    def accept_text_reply(self, answer: str) -> int | None:
+        """
+        For typed free-text answers: resolve the pending interaction and return
+        the question message_id so the caller can remove the inline keyboard.
+        """
+        msg_id = self._interaction_msg_id
+        self.resolve_interaction(answer)
+        return msg_id
 
     # ── throttled editing — thread-safe debounce ──────────────────────────────
 
@@ -314,11 +346,13 @@ class TelegramStreamRenderer:
 
         # ── recent event history (last N lines, excluding current action) ─────
         # Show the last few lines as context, skipping the last one if it's
-        # already shown as "current action"
+        # already shown as "current action".
+        # Each item is separated by \n\n so Telegram renders a visible gap
+        # between consecutive actions — improves readability at a glance.
         history = self._event_lines[:-1] if self._current_action and self._event_lines else self._event_lines
         visible = history[-(_MAX_VISIBLE_LINES - 1):]
         if visible:
-            parts.append("<i>" + "\n".join(visible) + "</i>")
+            parts.append("\n\n".join(f"<i>{line}</i>" for line in visible))
 
         return "\n\n".join(parts)
 

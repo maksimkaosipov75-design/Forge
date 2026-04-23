@@ -9,6 +9,7 @@ import subprocess as _subprocess
 import time as _time
 from pathlib import Path
 
+from core.event_protocol import decode_forge_event
 from core.providers import (
     get_provider_definition,
     is_supported_provider,
@@ -1023,6 +1024,10 @@ def create_textual_app(container, chat_id: int = 0):
             self._thinking_line_idx: int = -1 # index of current thinking line in _stream_lines
             self._awaiting_plan_confirm: bool = False  # True after /plan — next Enter runs or cancels
             self._password_modal_open: bool = False  # True while PasswordModal is on screen
+            self._agent_rows: dict[str, dict] = {}
+            self._agent_row_order: list[str] = []
+            self._agent_board_start: int = -1
+            self._agent_board_line_count: int = 0
 
         def watch_current_provider(self, _old: str, _new: str) -> None:
             """Refresh the idle status bar whenever the active provider changes."""
@@ -1970,6 +1975,137 @@ def create_textual_app(container, chat_id: int = 0):
             suffix = current.split("] ", 1)[1] if "] " in current else current
             self.orchestration_steps[step_index] = f"[{state}] {suffix}"
             self.query_one("#side", SideWidget).update(self._side_text())
+
+        def _reset_agent_board(self):
+            self._agent_rows = {}
+            self._agent_row_order = []
+            self._agent_board_start = -1
+            self._agent_board_line_count = 0
+
+        def _seed_agent_board(self, plan, session, include_synthesis: bool, include_review: bool):
+            self._reset_agent_board()
+            for item in plan.subtasks:
+                model_name = (session.provider_models.get(item.suggested_provider) or "").strip()
+                if not model_name:
+                    model_name = provider_default_model(item.suggested_provider) or ""
+                self._agent_row_order.append(item.subtask_id)
+                self._agent_rows[item.subtask_id] = {
+                    "provider": item.suggested_provider,
+                    "title": item.title,
+                    "status": "pending",
+                    "action": "Waiting for dependencies",
+                    "model_name": model_name,
+                    "parallel_group": item.parallel_group,
+                    "depth": getattr(item, "depth", 0),
+                    "parent_subtask_id": getattr(item, "parent_subtask_id", ""),
+                }
+            if include_synthesis:
+                self._agent_row_order.append("synthesis")
+                self._agent_rows["synthesis"] = {
+                    "provider": "mixed",
+                    "title": "Synthesis",
+                    "status": "pending",
+                    "action": "Waiting for worker results",
+                    "model_name": "",
+                    "parallel_group": len(plan.subtasks) + 1,
+                }
+            if include_review:
+                self._agent_row_order.append("review")
+                self._agent_rows["review"] = {
+                    "provider": "mixed",
+                    "title": "Review",
+                    "status": "pending",
+                    "action": "Waiting for synthesis",
+                    "model_name": "",
+                    "parallel_group": len(plan.subtasks) + 2,
+                }
+            self._refresh_agent_board()
+
+        def _render_agent_board_lines(self) -> list[str]:
+            if not self._agent_row_order:
+                return []
+            lines = [
+                "",
+                "  [dim]live agents[/dim]",
+            ]
+            status_icons = {
+                "pending": ("○", "#777777"),
+                "running": ("●", None),
+                "success": ("✓", "#58c777"),
+                "failed": ("✗", "#ff6b6b"),
+                "skipped": ("·", "#888888"),
+                "reused": ("↺", "#58c777"),
+            }
+            for agent_id in self._agent_row_order:
+                item = self._agent_rows.get(agent_id, {})
+                provider = item.get("provider", "mixed")
+                title = str(item.get("title", agent_id))[:28]
+                action = str(item.get("action", "Waiting"))[:54].replace("[", "\\[")
+                status = str(item.get("status", "pending"))
+                model_name = str(item.get("model_name", "")).strip()
+                depth = int(item.get("depth", 0) or 0)
+                provider_color = _PROVIDER_COLORS.get(provider, "#7dd3fc")
+                icon, fixed_color = status_icons.get(status, ("○", provider_color))
+                icon_color = fixed_color or provider_color
+                model_part = f"/{model_name[:16]}" if model_name else ""
+                indent = "  " * min(depth, 3)
+                lines.append(
+                    f"  {indent}[{icon_color}]{icon}[/{icon_color}] "
+                    f"[{provider_color}]{provider}{model_part}[/{provider_color}] "
+                    f"[dim]{title}[/dim]  {action}"
+                )
+            return lines
+
+        def _refresh_agent_board(self):
+            lines = self._render_agent_board_lines()
+            if not lines:
+                return
+            if self._agent_board_start < 0:
+                self._agent_board_start = len(self._stream_lines)
+                self._stream_lines.extend(lines)
+            else:
+                end = self._agent_board_start + self._agent_board_line_count
+                self._stream_lines[self._agent_board_start:end] = lines
+            self._agent_board_line_count = len(lines)
+            self._stream_lines = self._stream_lines[-5000:]
+            self.query_one("#stream", StreamWidget).update("\n".join(self._stream_lines))
+            self.call_after_refresh(self._scroll_to_bottom)
+
+        def _handle_agent_event(self, payload: dict) -> bool:
+            if payload.get("type") != "agent_status":
+                return False
+            agent_id = str(payload.get("subtask_id") or "").strip()
+            if not agent_id:
+                return True
+            item = self._agent_rows.setdefault(agent_id, {})
+            if agent_id not in self._agent_row_order:
+                parent_id = str(payload.get("parent_subtask_id") or "").strip()
+                if parent_id and parent_id in self._agent_row_order:
+                    insert_at = self._agent_row_order.index(parent_id) + 1
+                    while insert_at < len(self._agent_row_order):
+                        sibling = self._agent_rows.get(self._agent_row_order[insert_at], {})
+                        if sibling.get("parent_subtask_id") != parent_id:
+                            break
+                        insert_at += 1
+                    self._agent_row_order.insert(insert_at, agent_id)
+                else:
+                    self._agent_row_order.append(agent_id)
+            provider = str(payload.get("provider") or item.get("provider") or "mixed").strip()
+            model_name = str(payload.get("model_name") or item.get("model_name") or "").strip()
+            item.update(
+                {
+                    "provider": provider,
+                    "title": str(payload.get("title") or item.get("title") or agent_id),
+                    "status": str(payload.get("status") or item.get("status") or "pending"),
+                    "action": str(payload.get("text") or item.get("action") or "Waiting"),
+                    "model_name": model_name,
+                    "parallel_group": int(payload.get("parallel_group") or item.get("parallel_group") or 0),
+                    "depth": int(payload.get("depth") or item.get("depth") or 0),
+                    "parent_subtask_id": str(payload.get("parent_subtask_id") or item.get("parent_subtask_id") or ""),
+                }
+            )
+            self._refresh_agent_board()
+            return True
 
         def action_show_help(self) -> None:
             asyncio.create_task(self._handle_command("/help"))
@@ -3310,6 +3446,7 @@ def create_textual_app(container, chat_id: int = 0):
                     for i, item in enumerate(plan.subtasks, start=1)
                 ],
             )
+            self._seed_agent_board(plan, session, will_synthesize, will_review)
             current_step = {"index": -1}
             step_start = [_time.monotonic()]
             synthesis_idx = len(plan.subtasks)
@@ -3363,6 +3500,16 @@ def create_textual_app(container, chat_id: int = 0):
                             self._mark_orchestration_step(current_step["index"], "done")
                         if will_synthesize:
                             self._mark_orchestration_step(synthesis_idx, "running")
+                            self._handle_agent_event(
+                                {
+                                    "type": "agent_status",
+                                    "subtask_id": "synthesis",
+                                    "provider": "mixed",
+                                    "title": "Synthesis",
+                                    "status": "running",
+                                    "text": "Combining worker outputs",
+                                }
+                            )
                         self._status_state.update({"action": "Synthesizing…", "tokens": 0, "start": _time.monotonic()})
                         self._append_stream("", "  [dim]" + "─  " * 14 + "[/dim]", f"[{color}]▶[/] [bold]Synthesis[/bold]")
                 elif "reviewing" in lowered:
@@ -3372,11 +3519,24 @@ def create_textual_app(container, chat_id: int = 0):
                             self._mark_orchestration_step(synthesis_idx, "done")
                         if will_review:
                             self._mark_orchestration_step(review_idx, "running")
+                            self._handle_agent_event(
+                                {
+                                    "type": "agent_status",
+                                    "subtask_id": "review",
+                                    "provider": "mixed",
+                                    "title": "Review",
+                                    "status": "running",
+                                    "text": "Reviewing integrated result",
+                                }
+                            )
                         self._status_state.update({"action": "Reviewing…", "tokens": 0, "start": _time.monotonic()})
                         self._append_stream("", "  [dim]" + "─  " * 14 + "[/dim]", f"[{color}]▶[/] [bold]Review[/bold]")
                 self._add_timeline(clean[:72])
 
             def stream_event_callback(line: str):
+                payload = decode_forge_event(line)
+                if isinstance(payload, dict) and self._handle_agent_event(payload):
+                    return
                 self._update_status_event(line)
                 self._append_stream_event(line)
 
@@ -3397,9 +3557,31 @@ def create_textual_app(container, chat_id: int = 0):
                 self._mark_orchestration_step(
                     synthesis_idx, "done" if task_run.synthesis_answer else "skipped"
                 )
+                self._handle_agent_event(
+                    {
+                        "type": "agent_status",
+                        "subtask_id": "synthesis",
+                        "provider": task_run.synthesis_provider or "mixed",
+                        "title": "Synthesis",
+                        "status": "success" if task_run.synthesis_answer else "skipped",
+                        "text": "Completed" if task_run.synthesis_answer else "Skipped",
+                        "model_name": task_run.synthesis_model,
+                    }
+                )
             if will_review:
                 self._mark_orchestration_step(
                     review_idx, "done" if task_run.review_answer else "skipped"
+                )
+                self._handle_agent_event(
+                    {
+                        "type": "agent_status",
+                        "subtask_id": "review",
+                        "provider": task_run.review_provider or "mixed",
+                        "title": "Review",
+                        "status": "success" if task_run.review_answer else "skipped",
+                        "text": "Completed" if task_run.review_answer else "Skipped",
+                        "model_name": task_run.review_model,
+                    }
                 )
             self._add_timeline(f"Done status={task_run.status}.")
             self._refresh_all()
@@ -3415,7 +3597,8 @@ def create_textual_app(container, chat_id: int = 0):
                 subtask_color = {
                     "qwen": "#b07cff", "codex": "#6aa7ff", "claude": "#ff9e57",
                 }.get(subtask.provider, "#6aa7ff")
-                result_lines.append(f"\n  {st_icon} [{subtask_color}]{subtask.provider}[/]  [dim]{subtask.title}[/dim]")
+                indent = "  " * min(getattr(subtask, "depth", 0), 3)
+                result_lines.append(f"\n  {indent}{st_icon} [{subtask_color}]{subtask.provider}[/]  [dim]{subtask.title}[/dim]")
                 for f in subtask.new_files[:6]:
                     result_lines.extend(_file_diff_text(f, is_new=True, add_color=subtask_color))
                 for f in subtask.changed_files[:6]:

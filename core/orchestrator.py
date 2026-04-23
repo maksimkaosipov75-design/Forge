@@ -65,6 +65,8 @@ class PlannedSubtask:
     depends_on: list[str] = field(default_factory=list)
     # parallel_group: subtasks with the same value run concurrently (0 = first group)
     parallel_group: int = 0
+    parent_subtask_id: str = ""
+    depth: int = 0
 
 
 @dataclass
@@ -136,6 +138,7 @@ class RuleBasedOrchestrator:
                 )
             )
 
+        subtasks = self._expand_project_plan(text, subtasks)
         complexity = self._estimate_complexity(text, subtasks)
         strategy = self._build_strategy(complexity, subtasks)
         return OrchestrationPlan(
@@ -156,9 +159,101 @@ class RuleBasedOrchestrator:
                 return normalized
         return self.available_providers[0] if self.available_providers else "qwen"
 
+    def _expand_project_plan(self, prompt: str, subtasks: list[PlannedSubtask]) -> list[PlannedSubtask]:
+        if not subtasks:
+            return subtasks
+
+        project_like = self._matches_any(
+            prompt.lower(),
+            "project", "app", "application", "platform", "service", "system",
+            "desktop", "product", "workflow", "orchestrator", "bridge",
+        )
+        if len(subtasks) == 1 and not project_like:
+            return subtasks
+
+        expanded: list[PlannedSubtask] = []
+        coordinator_needed = len(subtasks) >= 2 or len(prompt) > 320
+        coordinator_id = ""
+        base_group = 0
+
+        if coordinator_needed:
+            coordinator_id = "project-brief"
+            expanded.append(
+                PlannedSubtask(
+                    subtask_id=coordinator_id,
+                    title="Project brief and shared interfaces",
+                    description=(
+                        "Map the project into worker-friendly implementation slices, "
+                        "name the files or modules each worker should touch, and capture "
+                        "handoff constraints so agents can work in parallel safely."
+                    ),
+                    task_kind="coordination",
+                    suggested_provider=self._pick_provider("qwen", "codex", "claude"),
+                    reason="A lightweight coordinator improves parallel work and clearer handoffs.",
+                    parallel_group=0,
+                )
+            )
+            base_group = 1
+
+        worker_ids: list[str] = []
+        for item in subtasks:
+            depends = list(item.depends_on)
+            if coordinator_id:
+                depends = list(dict.fromkeys([coordinator_id] + depends))
+            group_offset = 1 if item.depends_on else 0
+            expanded.append(
+                PlannedSubtask(
+                    subtask_id=item.subtask_id,
+                    title=item.title,
+                    description=item.description,
+                    task_kind=item.task_kind,
+                    suggested_provider=item.suggested_provider,
+                    reason=item.reason,
+                    depends_on=depends,
+                    parallel_group=base_group + group_offset,
+                )
+            )
+            worker_ids.append(item.subtask_id)
+
+        if len(worker_ids) >= 2:
+            integration_group = max(item.parallel_group for item in expanded) + 1
+            expanded.append(
+                PlannedSubtask(
+                    subtask_id="integration",
+                    title="Cross-agent integration",
+                    description=(
+                        "Collect outputs from the worker agents, resolve interface mismatches, "
+                        "merge the final implementation, and make sure the project behaves as one cohesive result."
+                    ),
+                    task_kind="integration",
+                    suggested_provider=self._pick_provider("codex", "qwen", "claude"),
+                    reason="A dedicated integration pass makes parallel agent output feel like one project.",
+                    depends_on=worker_ids,
+                    parallel_group=integration_group,
+                )
+            )
+            review_group = integration_group + 1
+            expanded.append(
+                PlannedSubtask(
+                    subtask_id="review-pass",
+                    title="Project review and polish",
+                    description=(
+                        "Review the integrated project for quality, regressions, missing edge cases, "
+                        "and final UX or wording polish before delivery."
+                    ),
+                    task_kind="review",
+                    suggested_provider=self._pick_provider("claude", "qwen", "codex"),
+                    reason="A final review pass helps the orchestrated result beat a single-model run.",
+                    depends_on=["integration"],
+                    parallel_group=review_group,
+                )
+            )
+
+        return expanded
+
     @staticmethod
     def _estimate_complexity(prompt: str, subtasks: list[PlannedSubtask]) -> str:
-        if len(subtasks) >= 3 or len(prompt) > 500:
+        if len(subtasks) >= 4 or len(prompt) > 500:
             return "complex"
         if len(subtasks) == 2 or len(prompt) > 180:
             return "medium"
@@ -169,8 +264,8 @@ class RuleBasedOrchestrator:
         if len(subtasks) == 1:
             return "single-agent execution is enough; orchestration can stay optional"
         if complexity == "complex":
-            return "split into dependent subtasks, execute core layers first, then pass artifacts forward"
-        return "split by specialty and keep handoff lightweight between agents"
+            return "use a coordinator, parallel specialist workers, then integrate and review the combined result"
+        return "split by specialty, run independent workers in parallel, and keep handoff lightweight between agents"
 
 
 class AIOrchestrator:
@@ -260,6 +355,30 @@ class AIOrchestrator:
             session.last_task_result = prev_result
         return None
 
+    async def build_child_plan(
+        self,
+        original_prompt: str,
+        parent_subtask,
+        execution_service,
+        session,
+        runtime,
+    ) -> "OrchestrationPlan | None":
+        prev_result = session.last_task_result
+        try:
+            result = await execution_service.execute_provider_task(
+                session=session,
+                runtime=runtime,
+                provider_name=runtime.provider,
+                prompt=self._build_child_planning_prompt(original_prompt, parent_subtask),
+            )
+            if result.exit_code == 0 and result.answer_text.strip():
+                return self._parse_response(original_prompt, result.answer_text)
+        except Exception:
+            pass
+        finally:
+            session.last_task_result = prev_result
+        return None
+
     def _build_replan_prompt(
         self,
         original_prompt: str,
@@ -296,10 +415,45 @@ class AIOrchestrator:
             "Do NOT repeat steps that already succeeded.\n"
             f"Output exactly this JSON structure:\n{schema}\n\n"
             "Rules:\n"
-            "- 1 to 3 subtasks maximum\n"
+            "- 1 to 6 subtasks maximum\n"
             "- parallel_group: same integer = run concurrently\n"
             f"- only use these providers: {available_str}\n"
             "- OUTPUT JSON ONLY — no other text, no code fences"
+        )
+
+    def _build_child_planning_prompt(self, original_prompt: str, parent_subtask) -> str:
+        available_str = ", ".join(self.available_providers)
+        provider_lines = "\n".join(
+            f"- {p}: {self._SPECIALTIES.get(p, 'general coding')}"
+            for p in self.available_providers
+        )
+        schema = (
+            '{"complexity":"simple|medium|complex","strategy":"one-sentence approach",'
+            '"rationale":"why these child agents",'
+            '"subtasks":[{"id":"c1","title":"Short child task",'
+            '"description":"Specific instructions for this child agent",'
+            f'"provider":"{self.available_providers[0] if self.available_providers else "qwen"}",'
+            '"reason":"why this provider","depends_on":[],"parallel_group":0}]}'
+        )
+        return (
+            "You are planning CHILD AGENTS for one parent task inside a larger orchestration.\n"
+            "Output ONLY valid JSON.\n\n"
+            f"Original project:\n{original_prompt}\n\n"
+            "Parent task:\n"
+            f"- id: {getattr(parent_subtask, 'subtask_id', 'parent')}\n"
+            f"- title: {getattr(parent_subtask, 'title', '')}\n"
+            f"- kind: {getattr(parent_subtask, 'task_kind', 'general')}\n"
+            f"- instructions: {getattr(parent_subtask, 'description', '')}\n\n"
+            f"Available providers:\n{provider_lines}\n\n"
+            f"Output exactly this JSON structure:\n{schema}\n\n"
+            "Rules:\n"
+            "- return 2 to 3 child subtasks when the parent is substantial; otherwise 1 to 2\n"
+            "- child subtasks should cooperate: implementation, verification, docs, integration, or contract work are all allowed when relevant\n"
+            "- keep child tasks concrete and complementary, not duplicates\n"
+            "- parallel_group: same integer means concurrent work\n"
+            "- depends_on may only reference child subtask IDs from this child plan\n"
+            f"- only use these providers: {available_str}\n"
+            "- OUTPUT JSON ONLY — no markdown, no explanation"
         )
 
     def _build_planning_prompt(self, prompt: str) -> str:
@@ -322,11 +476,12 @@ class AIOrchestrator:
             f"Task:\n{prompt}\n\n"
             f"Output exactly this JSON structure:\n{schema}\n\n"
             "Rules:\n"
-            "- 1 to 3 subtasks maximum\n"
+            "- Prefer 2 to 6 subtasks for project-sized work; 1 subtask is only for genuinely compact requests\n"
             "- parallel_group: subtasks sharing the same integer run concurrently; "
             "increment the integer for sequential dependencies\n"
             "- depends_on: list of subtask IDs that must finish before this one starts\n"
-            "- complexity: 'simple' for 1 subtask, 'medium' for 2, 'complex' for 3\n"
+            "- For broad projects, prefer: coordinator -> parallel workers -> integration -> review\n"
+            "- complexity: 'simple' for 1 subtask, 'medium' for 2-3, 'complex' for 4+\n"
             f"- only use these providers: {available_str}\n"
             "- descriptions must be specific and actionable, not vague\n"
             "- OUTPUT JSON ONLY — no other text, no code fences"
@@ -353,6 +508,8 @@ class AIOrchestrator:
                 reason=str(item.get("reason", ""))[:200],
                 depends_on=[str(d) for d in item.get("depends_on", [])],
                 parallel_group=int(item.get("parallel_group", 0)),
+                parent_subtask_id=str(item.get("parent_subtask_id", ""))[:100],
+                depth=int(item.get("depth", 0)),
             ))
         if not subtasks:
             return None

@@ -270,7 +270,10 @@ class PersistentShellTests(unittest.TestCase):
             sub = self.cwd / "sub"
             sub.mkdir()
             async with PersistentShell(self.cwd) as sh:
-                await sh.run(f"cd {sub}")
+                # as_posix(), not str(): on Windows the native form is
+                # C:\\Users\\... and bash treats each backslash as an escape, so
+                # the cd silently does nothing. Forward slashes work in both.
+                await sh.run(f"cd {sub.as_posix()}")
                 return await sh.run("pwd")
         result = run(_run())
         self.assertIn("sub", result)
@@ -307,7 +310,7 @@ class PersistentShellTests(unittest.TestCase):
             sub.mkdir()
             async with PersistentShell(self.cwd) as sh:
                 ex = ToolExecutor(cwd=self.cwd, notify=events.append, shell=sh)
-                await ex.execute("bash", {"command": f"cd {sub}"})
+                await ex.execute("bash", {"command": f"cd {sub.as_posix()}"})
                 return await ex.execute("bash", {"command": "pwd"})
 
         result = run(_run())

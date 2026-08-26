@@ -40,3 +40,6 @@ rutube_downloader.nimble
 test_rutube.nim
 videograb
 videograb.nim
+
+# Build metadata
+*.egg-info/

@@ -12,6 +12,9 @@ from __future__ import annotations
 import asyncio
 import glob as _glob
 import logging
+import os
+import shutil
+import sys
 import uuid
 from pathlib import Path
 
@@ -229,6 +232,58 @@ TOOL_DEFINITIONS: list[dict] = [
 # Persistent shell
 # ---------------------------------------------------------------------------
 
+def _resolve_shell() -> tuple[list[str], str]:
+    """Pick the shell to run agent commands in, and say which kind it is.
+
+    On anything POSIX this is just bash. On Windows it matters a great deal
+    which bash: `bash` on PATH is normally ``C:\\Windows\\System32\\bash.exe``,
+    the WSL launcher. That shell runs inside the WSL virtual machine, which has
+    its own filesystem namespace - the Windows C: drive appears there as
+    ``/mnt/c``. An agent that writes a file with write_file and then looks for
+    it with bash would be working in two different worlds, and the mismatch is
+    quiet: commands succeed, they just operate on the wrong filesystem.
+
+    Git Bash and MSYS2 share the Windows filesystem, so they are what we want.
+    ``FORGE_SHELL`` overrides the search if someone needs a specific one.
+    """
+    if os.name != "nt":
+        return ["bash", "--norc", "--noprofile"], "bash"
+
+    override = os.getenv("FORGE_SHELL", "").strip()
+    if override and Path(override).exists():
+        return [override, "--norc", "--noprofile"], "bash"
+
+    candidates = [
+        Path(os.getenv("ProgramFiles", r"C:\Program Files")) / "Git" / "bin" / "bash.exe",
+        Path(os.getenv("ProgramFiles(x86)", r"C:\Program Files (x86)")) / "Git" / "bin" / "bash.exe",
+        Path(os.getenv("LOCALAPPDATA", "")) / "Programs" / "Git" / "bin" / "bash.exe",
+        Path(os.getenv("USERPROFILE", "")) / "scoop" / "apps" / "git" / "current" / "bin" / "bash.exe",
+        Path(r"C:\msys64\usr\bin\bash.exe"),
+    ]
+    for candidate in candidates:
+        if candidate.is_file():
+            return [str(candidate), "--norc", "--noprofile"], "bash"
+
+    # Whatever is on PATH, as long as it is not the WSL launcher.
+    found = shutil.which("bash")
+    if found:
+        system_root = Path(os.getenv("SystemRoot", r"C:\Windows")).resolve()
+        try:
+            Path(found).resolve().relative_to(system_root)
+            is_wsl_launcher = True
+        except ValueError:
+            is_wsl_launcher = False
+        if not is_wsl_launcher:
+            return [found, "--norc", "--noprofile"], "bash"
+
+    log.warning(
+        "No Windows-native bash found (Git Bash or MSYS2); falling back to cmd.exe. "
+        "Shell commands written in bash syntax will not work. Install Git for Windows, "
+        "or point FORGE_SHELL at a bash that shares the Windows filesystem."
+    )
+    return ["cmd.exe", "/Q"], "cmd"
+
+
 class PersistentShell:
     """
     A bash process that lives for the duration of a single agent task.
@@ -242,10 +297,9 @@ class PersistentShell:
             output = await shell.run("cd src && python -m pytest", timeout=60)
     """
 
-    _BASH = ["bash", "--norc", "--noprofile"]
-
     def __init__(self, cwd: Path):
         self.cwd = Path(cwd).resolve()
+        self._argv, self._kind = _resolve_shell()
         self._proc: asyncio.subprocess.Process | None = None
         self._sentinel = f"__FORGE_{uuid.uuid4().hex}__"
         self._lock = asyncio.Lock()  # serialise concurrent bash calls
@@ -259,7 +313,7 @@ class PersistentShell:
 
     async def start(self) -> None:
         self._proc = await asyncio.create_subprocess_exec(
-            *self._BASH,
+            *self._argv,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
@@ -331,7 +385,10 @@ class PersistentShell:
                 if not raw:
                     lines.append("[shell process terminated]")
                     break
-                text = raw.decode("utf-8", errors="replace").rstrip("\n")
+                # cmd.exe and Windows tools terminate lines with CRLF; leaving
+                # the CR on makes the sentinel comparison below fail and puts a
+                # stray carriage return at the end of every captured line.
+                text = raw.decode("utf-8", errors="replace").rstrip("\r\n")
                 if text == sentinel:
                     break
                 lines.append(text)
@@ -448,9 +505,15 @@ class ToolExecutor:
                 if stripped:
                     self._notify(f"🐚 {stripped[:200]}")
             return await self._shell.run(command, timeout=timeout, line_callback=_on_output_line)
-        # Fallback: standalone subprocess (no state persistence)
-        proc = await asyncio.create_subprocess_shell(
-            command,
+        # Fallback: standalone subprocess (no state persistence). Resolve the
+        # shell the same way PersistentShell does rather than using
+        # create_subprocess_shell, which on Windows means cmd.exe - so a command
+        # written in bash syntax would fail here while succeeding in the
+        # persistent shell, depending only on which path the caller took.
+        argv, kind = _resolve_shell()
+        run_flag = "/c" if kind == "cmd" else "-c"
+        proc = await asyncio.create_subprocess_exec(
+            *argv, run_flag, command,
             cwd=self.cwd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,

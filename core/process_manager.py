@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import os
 import tempfile
 from pathlib import Path
 from typing import Optional, Callable
@@ -13,15 +14,26 @@ log = logging.getLogger(__name__)
 
 
 DEFAULT_TIMEOUT = 600  # 10 minutes
+DEFAULT_STARTUP_TIMEOUT = 30
 
 
 class BaseProcessManager:
-    def __init__(self, cli_path: str, on_output: Callable[[str], None], timeout: int = DEFAULT_TIMEOUT, provider_name: str = "qwen", model_name: str = ""):
+    def __init__(
+        self,
+        cli_path: str,
+        on_output: Callable[[str], None],
+        timeout: int = DEFAULT_TIMEOUT,
+        provider_name: str = "qwen",
+        model_name: str = "",
+        startup_timeout: int = DEFAULT_STARTUP_TIMEOUT,
+    ):
         self.cli_path = cli_path
         self.on_output = on_output
         self.timeout = timeout
+        self.startup_timeout = startup_timeout
         self.provider_name = normalize_provider_name(provider_name)
         self.model_name: str = model_name  # "" = use CLI default
+        self.thinking_mode: str = "compact"
         self._running = False
         self._session_active = False
         self._proc: Optional[asyncio.subprocess.Process] = None
@@ -70,14 +82,20 @@ class BaseProcessManager:
         self.health.register_failure(failure)
 
     async def stop(self):
-        if self._proc and self._proc.returncode is None:
-            log.info(f"Killing active process PID={self._proc.pid}")
-            self._proc.kill()
-            await self._proc.wait()
-            self._proc = None
-        self._running = False
-        self._session_active = False
-        log.info("Session reset")
+        async with self._command_lock:
+            if self._proc and self._proc.returncode is None:
+                log.info(f"Terminating process PID={self._proc.pid}")
+                self._proc.terminate()
+                try:
+                    await asyncio.wait_for(self._proc.wait(), timeout=5.0)
+                except asyncio.TimeoutError:
+                    log.warning(f"Process PID={self._proc.pid} did not exit after 5s, killing")
+                    self._proc.kill()
+                    await self._proc.wait()
+                self._proc = None
+            self._running = False
+            self._session_active = False
+            log.info("Session reset")
 
     @property
     def is_running(self) -> bool:
@@ -112,7 +130,7 @@ class QwenProcessManager(BaseProcessManager):
             return events, final_text
 
         if payload_type == "system":
-            events.append("⚙️ Initializing session...")
+            events.append("⚙️ Инициализация сессии...")
 
         elif payload_type == "assistant":
             message = payload.get("message", {})
@@ -169,12 +187,12 @@ class QwenProcessManager(BaseProcessManager):
             events.append(f"🔧 Using: {tool_name}")
 
         elif payload_type == "tool_result":
-            events.append("🔧 Tool result")
+            events.append("🔧 Результат инструмента")
 
         elif payload_type == "result":
             subtype = payload.get("subtype", "")
             duration_ms = payload.get("duration_ms", 0)
-            events.append(f"🏁 Done ({subtype}): {duration_ms}ms")
+            events.append(f"🏁 Завершено ({subtype}): {duration_ms}ms")
             final_text = payload.get("result", "") or None
             usage = payload.get("usage") or {}
             input_tokens = usage.get("input_tokens") or usage.get("inputTokens") or 0
@@ -217,15 +235,18 @@ class QwenProcessManager(BaseProcessManager):
         log.info(f"Process started PID={proc.pid}, cwd={work_dir}")
 
         # Read stdout line by line because qwen emits stream-json incrementally.
+        seen_output = False
         while True:
             try:
-                line = await asyncio.wait_for(proc.stdout.readline(), timeout=self.timeout)
+                timeout = self.timeout if seen_output else self.startup_timeout
+                line = await asyncio.wait_for(proc.stdout.readline(), timeout=timeout)
             except asyncio.TimeoutError:
-                log.error(f"Timeout {self.timeout}s — killing process PID={proc.pid}")
+                timeout_text = "Startup timeout" if not seen_output else "Timeout"
+                log.error("%s %ss — killing process PID=%s", timeout_text, timeout, proc.pid)
                 proc.kill()
                 await proc.wait()
                 self._proc = None
-                self.mark_failure(f"Timeout after {self.timeout}s")
+                self.mark_failure(f"{timeout_text} after {timeout}s")
                 return -1
             if not line:
                 break
@@ -233,6 +254,7 @@ class QwenProcessManager(BaseProcessManager):
             raw = line.decode("utf-8", errors="replace").strip()
             if not raw:
                 continue
+            seen_output = True
 
             try:
                 d = json.loads(raw)
@@ -302,7 +324,7 @@ class CodexProcessManager(BaseProcessManager):
 
         if payload_type in {"thread.started", "turn.started"}:
             if payload_type == "thread.started":
-                events.append("⚙️ Initializing session...")
+                events.append("⚙️ Инициализация сессии...")
 
         elif payload_type == "error":
             message = payload.get("message", "")
@@ -341,10 +363,10 @@ class CodexProcessManager(BaseProcessManager):
                     events.append(f"💬 {text}")
 
         elif payload_type == "turn.completed":
-            events.append("🏁 Done (success): 0ms")
+            events.append("🏁 Завершено (success): 0ms")
 
         elif payload_type == "task_complete":
-            events.append("🏁 Done (success): 0ms")
+            events.append("🏁 Завершено (success): 0ms")
             final_text = cls._extract_text(payload) or final_text
 
         return events, final_text
@@ -379,26 +401,54 @@ class CodexProcessManager(BaseProcessManager):
             args.append(text)
 
         log.info("Starting codex exec --json (model=%s) in %s", self.model_name or "default", work_dir)
+        self._notify("⚙️ Инициализация сессии...", "")
 
         proc = await asyncio.create_subprocess_exec(
             *args,
-            stdin=asyncio.subprocess.PIPE,
+            stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=str(work_dir),
         )
         self._proc = proc
         log.info(f"Process started PID={proc.pid}, cwd={work_dir}")
+        stderr_parts: list[str] = []
 
+        async def read_stderr() -> None:
+            while True:
+                line = await proc.stderr.readline()
+                if not line:
+                    break
+                text_line = line.decode("utf-8", errors="replace").strip()
+                if not text_line:
+                    continue
+                stderr_parts.append(text_line)
+                log.info("Codex stderr: %s", text_line)
+                lowered = text_line.lower()
+                if "reading additional input from stdin" in lowered:
+                    continue
+                if lowered.startswith("warning:") and "could not update path" in lowered:
+                    continue
+                if lowered.startswith("warning:"):
+                    self._notify(f"⚙️ Codex: {text_line}", "")
+                else:
+                    self._notify(f"❌ {text_line}", "")
+
+        stderr_task = asyncio.create_task(read_stderr())
+
+        seen_output = False
         while True:
             try:
-                line = await asyncio.wait_for(proc.stdout.readline(), timeout=self.timeout)
+                timeout = self.timeout if seen_output else self.startup_timeout
+                line = await asyncio.wait_for(proc.stdout.readline(), timeout=timeout)
             except asyncio.TimeoutError:
-                log.error(f"Timeout {self.timeout}s — killing process PID={proc.pid}")
+                timeout_text = "Startup timeout" if not seen_output else "Timeout"
+                log.error("%s %ss — killing process PID=%s", timeout_text, timeout, proc.pid)
                 proc.kill()
                 await proc.wait()
+                await stderr_task
                 self._proc = None
-                self.mark_failure(f"Timeout after {self.timeout}s")
+                self.mark_failure(f"{timeout_text} after {timeout}s")
                 return -1
 
             if not line:
@@ -407,6 +457,7 @@ class CodexProcessManager(BaseProcessManager):
             raw = line.decode("utf-8", errors="replace").strip()
             if not raw:
                 continue
+            seen_output = True
 
             try:
                 payload = json.loads(raw)
@@ -420,17 +471,8 @@ class CodexProcessManager(BaseProcessManager):
             if final_text and self._final_result_callback:
                 self._final_result_callback(final_text)
 
-        stderr_parts: list[str] = []
-        while True:
-            line = await proc.stderr.readline()
-            if not line:
-                break
-            text_line = line.decode("utf-8", errors="replace").strip()
-            if text_line:
-                stderr_parts.append(text_line)
-                log.info("Codex stderr: %s", text_line)
-
         await proc.wait()
+        await stderr_task
         self._proc = None
         self._session_active = proc.returncode == 0
 
@@ -503,7 +545,7 @@ class ClaudeProcessManager(BaseProcessManager):
             return [event_line], final_text
 
         if payload_type == "system" and payload_subtype == "init":
-            return ["⚙️ Initializing session..."], None
+            return ["⚙️ Инициализация сессии..."], None
 
         if payload_type == "system" and payload_subtype == "api_retry":
             attempt = payload.get("attempt", "?")
@@ -528,8 +570,8 @@ class ClaudeProcessManager(BaseProcessManager):
         if payload_type == "tool_result":
             tool_name = payload.get("name") or payload.get("tool_name")
             if tool_name:
-                return [f"🔧 Tool result: {tool_name}"], None
-            return ["🔧 Tool result"], None
+                return [f"🔧 Результат инструмента: {tool_name}"], None
+            return ["🔧 Результат инструмента"], None
 
         if payload_type == "result":
             subtype = payload.get("subtype", "success")
@@ -538,7 +580,7 @@ class ClaudeProcessManager(BaseProcessManager):
             usage = payload.get("usage") or {}
             input_tokens = usage.get("input_tokens") or usage.get("inputTokens") or 0
             output_tokens = usage.get("output_tokens") or usage.get("outputTokens") or 0
-            events = [f"🏁 Done ({subtype}): {duration_ms}ms"]
+            events = [f"🏁 Завершено ({subtype}): {duration_ms}ms"]
             if input_tokens or output_tokens:
                 events.append(f"🔢 {input_tokens},{output_tokens}")
             return events, result_text
@@ -566,11 +608,17 @@ class ClaudeProcessManager(BaseProcessManager):
             "--output-format",
             "stream-json",
             "--include-partial-messages",
-            "--permission-mode",
-            "bypassPermissions",
         ]
+        if os.getenv("CLAUDE_BYPASS_PERMISSIONS", "0").strip().lower() in {"1", "true", "yes", "on"}:
+            args.extend(["--permission-mode", "bypassPermissions"])
         if self.model_name:
             args.extend(["--model", self.model_name])
+        effort = {
+            "compact": "medium",
+            "full": "high",
+        }.get((self.thinking_mode or "").strip().lower())
+        if effort:
+            args.extend(["--effort", effort])
         if self._session_active:
             args.append("-c")
         args.append(text)
@@ -587,15 +635,18 @@ class ClaudeProcessManager(BaseProcessManager):
         self._proc = proc
         log.info("Process started PID=%s, cwd=%s", proc.pid, work_dir)
 
+        seen_output = False
         while True:
             try:
-                line = await asyncio.wait_for(proc.stdout.readline(), timeout=self.timeout)
+                timeout = self.timeout if seen_output else self.startup_timeout
+                line = await asyncio.wait_for(proc.stdout.readline(), timeout=timeout)
             except asyncio.TimeoutError:
-                log.error("Timeout %ss — killing process PID=%s", self.timeout, proc.pid)
+                timeout_text = "Startup timeout" if not seen_output else "Timeout"
+                log.error("%s %ss — killing process PID=%s", timeout_text, timeout, proc.pid)
                 proc.kill()
                 await proc.wait()
                 self._proc = None
-                self.mark_failure(f"Timeout after {self.timeout}s")
+                self.mark_failure(f"{timeout_text} after {timeout}s")
                 return -1
 
             if not line:
@@ -604,6 +655,7 @@ class ClaudeProcessManager(BaseProcessManager):
             raw = line.decode("utf-8", errors="replace").strip()
             if not raw:
                 continue
+            seen_output = True
 
             try:
                 payload = json.loads(raw)

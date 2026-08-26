@@ -5,6 +5,18 @@ from core.process_manager import ClaudeProcessManager, CodexProcessManager, Qwen
 
 
 class ProcessManagerPayloadParsingTests(unittest.TestCase):
+    def test_process_manager_has_short_startup_timeout(self):
+        manager = CodexProcessManager(
+            cli_path="codex",
+            on_output=lambda _line: None,
+            timeout=600,
+            provider_name="codex",
+            startup_timeout=7,
+        )
+
+        self.assertEqual(manager.startup_timeout, 7)
+        self.assertLess(manager.startup_timeout, manager.timeout)
+
     def test_parse_stream_event_text_delta(self):
         payload = {
             "type": "stream_event",

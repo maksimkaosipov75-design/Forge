@@ -7,9 +7,10 @@ __pycache__/
 # Environment
 .env
 
-# IDE
+# IDE / local agent settings
 .vscode/
 .idea/
+.claude/
 
 # OS
 .DS_Store

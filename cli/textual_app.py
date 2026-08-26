@@ -28,6 +28,12 @@ _HTML_TAG = _re.compile(r"<[^>]+>")
 # Clipboard helpers (copy / paste without external mandatory dependencies)
 # ---------------------------------------------------------------------------
 
+# Rich markup escape for a literal '['. Out of line for the same reason as
+# _QUOTE_CHARS in core/parser.py: no backslashes inside f-string expressions
+# on Python 3.11.
+_RICH_OPEN_BRACKET = "\\["
+
+
 def _clipboard_fallback_file() -> Path:
     """Where to stash clipboard text when no clipboard tool is available.
 
@@ -2530,7 +2536,7 @@ def create_textual_app(container, chat_id: int = 0):
                     self._append_stream(
                         "",
                         "  [dim]── history search (type to filter, ↑/↓ to select) ──[/dim]",
-                        *[f"  [dim]{i+1}.[/dim] {m.replace('[', '\\[')}" for i, m in enumerate(matches)],
+                        *[f"  [dim]{i+1}.[/dim] {m.replace('[', _RICH_OPEN_BRACKET)}" for i, m in enumerate(matches)],
                     )
                 else:
                     self._append_stream("  [dim]No history matches.[/dim]")

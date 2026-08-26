@@ -6,6 +6,12 @@ from enum import Enum
 
 from core.event_protocol import decode_forge_event
 
+# Backtick and apostrophe, stripped off paths a CLI quotes in its output.
+# Kept out of the f-strings that use it: a backslash inside an f-string
+# expression is a SyntaxError before Python 3.12, and this project supports
+# 3.11.
+_QUOTE_CHARS = "`'"
+
 
 class ActionCategory(Enum):
     THINKING = "thinking"
@@ -393,13 +399,13 @@ class LogParser:
 
         # Фоллбэк для обычного текста
         if m := self.file_create_pattern.search(line):
-            return f"📂 Created: {m.group(1).strip('`\'')}"
+            return f"📂 Created: {m.group(1).strip(_QUOTE_CHARS)}"
         if m := self.file_edit_pattern.search(line):
-            return f"✏️ Editing: {m.group(1).strip('`\'')}"
+            return f"✏️ Editing: {m.group(1).strip(_QUOTE_CHARS)}"
         if m := self.file_read_pattern.search(line):
-            return f"👁️ Reading: {m.group(1).strip('`\'')}"
+            return f"👁️ Reading: {m.group(1).strip(_QUOTE_CHARS)}"
         if m := self.shell_cmd_pattern.search(line):
-            return f"🐚 Running: {m.group(1).strip('`\'')[:60]}"
+            return f"🐚 Running: {m.group(1).strip(_QUOTE_CHARS)[:60]}"
         if self.error_pattern.search(line):
             return f"❌ {line[:120]}"
         if self.done_patterns.search(line):

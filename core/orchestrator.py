@@ -1,11 +1,14 @@
 import copy
 import hashlib
 import json as _json
+import logging
 import re as _re
 import time
 from dataclasses import dataclass, field
 
 from core.providers import normalize_provider_name
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -319,8 +322,8 @@ class AIOrchestrator:
                 if plan is not None:
                     self._cache.put(prompt, self.available_providers, plan)
                     return plan
-        except Exception:
-            pass
+        except Exception as exc:
+            log.warning("AI planning failed, falling back to rule-based: %s", exc)
         finally:
             session.last_task_result = prev_result
         return self.fallback.build_plan(prompt)
@@ -349,8 +352,8 @@ class AIOrchestrator:
             )
             if result.exit_code == 0 and result.answer_text.strip():
                 return self._parse_response(original_prompt, result.answer_text)
-        except Exception:
-            pass
+        except Exception as exc:
+            log.warning("AI replanning failed: %s", exc)
         finally:
             session.last_task_result = prev_result
         return None
@@ -373,8 +376,8 @@ class AIOrchestrator:
             )
             if result.exit_code == 0 and result.answer_text.strip():
                 return self._parse_response(original_prompt, result.answer_text)
-        except Exception:
-            pass
+        except Exception as exc:
+            log.warning("AI child planning failed: %s", exc)
         finally:
             session.last_task_result = prev_result
         return None

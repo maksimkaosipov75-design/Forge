@@ -44,7 +44,8 @@ def _cwd_listing(cwd: str, max_entries: int = 30) -> str:
             if len(lines) >= max_entries:
                 break
         return "\n".join(lines) if lines else ""
-    except Exception:
+    except Exception as exc:
+        log.debug("Failed to list directory %s: %s", cwd, exc)
         return ""
 
 
@@ -62,8 +63,8 @@ def _read_project_context(cwd: str, max_bytes: int = 4000) -> str:
                 budget -= len(text)
                 if budget <= 0:
                     break
-            except Exception:
-                pass
+            except Exception as exc:
+                log.debug("Failed to read project file %s: %s", name, exc)
     return "\n\n".join(parts)
 
 
@@ -86,8 +87,8 @@ def _read_file_contents(file_paths: list[str], max_bytes_each: int = 3000, max_f
                 continue  # skip very large files
             content = p.read_text(errors="replace")[:max_bytes_each]
             results.append((str(p.name), content))
-        except Exception:
-            pass
+        except Exception as exc:
+            log.debug("Failed to read file %s: %s", path_str, exc)
     return results
 
 
@@ -165,8 +166,8 @@ class OrchestratorService:
                     parent_subtask_id=parent_subtask_id,
                 )
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            log.debug("Failed to create subtask from entry: %s", exc)
 
     @staticmethod
     def _should_expand_subtask(plan: OrchestrationPlan, subtask) -> bool:

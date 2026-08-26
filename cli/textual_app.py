@@ -16,6 +16,7 @@ from core.providers import (
     list_provider_models,
     normalize_provider_name,
     provider_default_model,
+    provider_supports_thinking,
 )
 from cli.session_actions import get_thinking_mode, set_thinking_mode
 from cli.thinking import append_thinking_chunk, render_thinking_text
@@ -92,6 +93,7 @@ _PROVIDER_COLORS = {
     "codex": "#6aa7ff",
     "claude": "#ff9e57",
     "openrouter": "#58c777",
+    "local": "#ff4d6d",
 }
 
 
@@ -100,6 +102,28 @@ def _strip_html(text: str) -> str:
 
 
 _SPIN_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
+_LOCAL_LOAD_FRAMES = (
+    "▰▱▱▱▱▱",
+    "▰▰▱▱▱▱",
+    "▰▰▰▱▱▱",
+    "▱▰▰▰▱▱",
+    "▱▱▰▰▰▱",
+    "▱▱▱▰▰▰",
+    "▱▱▱▱▰▰",
+    "▱▱▱▱▱▰",
+)
+_LOCAL_PULL_FRAMES = (
+    "▰▱▱▱▱▱▱▱▱▱",
+    "▰▰▱▱▱▱▱▱▱▱",
+    "▰▰▰▱▱▱▱▱▱▱",
+    "▰▰▰▰▱▱▱▱▱▱",
+    "▰▰▰▰▰▱▱▱▱▱",
+    "▰▰▰▰▰▰▱▱▱▱",
+    "▰▰▰▰▰▰▰▱▱▱",
+    "▰▰▰▰▰▰▰▰▱▱",
+    "▰▰▰▰▰▰▰▰▰▱",
+    "▰▰▰▰▰▰▰▰▰▰",
+)
 _PASSWORD_RE = _re.compile(
     r'\[sudo\]|password\s*(?:for\s+\w+\s*)?:|passphrase\s*:|enter\s+password|authentication\s+required',
     _re.IGNORECASE,
@@ -128,6 +152,10 @@ def _action_from_event(line: str) -> str | None:
                 break
         return f"$ {cmd[:38]}…" if len(cmd) > 38 else f"$ {cmd}"
     if line.startswith("⚙️ "):
+        text = line[2:].strip()
+        if text.lower().startswith("loading local model"):
+            model = text[len("Loading local model"):].split(";", 1)[0].strip()
+            return f"Loading local model {model}…" if model else "Loading local model…"
         return "Initializing…"
     if line.startswith("💬 "):
         return "Writing…"
@@ -714,13 +742,30 @@ def create_textual_app(container, chat_id: int = 0):
                 self.dismiss(None)
 
     class ModelPickerModal(ModalScreen):
-        def __init__(self, provider_name: str, current_model: str, default_model: str, catalog: list, initial_query: str = ""):
+        def __init__(
+            self,
+            provider_name: str,
+            current_model: str,
+            default_model: str,
+            catalog: list,
+            initial_query: str = "",
+            thinking_mode: str = "compact",
+            thinking_supported: bool = False,
+            local_download_supported: bool = False,
+            tools_only: bool = False,
+            search_callback=None,
+        ):
             super().__init__()
             self.provider_name = provider_name
             self.current_model = current_model
             self.default_model = default_model
             self.catalog = list(catalog)
             self.initial_query = initial_query
+            self.thinking_mode = thinking_mode
+            self.thinking_supported = thinking_supported
+            self.local_download_supported = local_download_supported
+            self.tools_only = tools_only
+            self.search_callback = search_callback
             self.filtered: list[tuple[str, str, str, tuple[str, ...]]] = []
             self.selected = 0
             self._page_size = 18
@@ -768,10 +813,16 @@ def create_textual_app(container, chat_id: int = 0):
         def compose(self) -> ComposeResult:
             with Container(id="model-dialog"):
                 count = len(self.catalog)
-                yield Label(f"Select model · {self.provider_name}  [dim]({count} curated + custom)[/dim]", id="model-title")
+                mode = "tools model" if self.tools_only else "model"
+                yield Label(f"Select {mode} · {self.provider_name}  [dim]({count} curated + custom)[/dim]", id="model-title")
                 yield Input(placeholder="filter models…", id="model-filter")
                 yield Static("", id="model-list")
-                yield Label("Up/Down to move  ·  Enter to select  ·  Esc to cancel", id="model-hint")
+                hint = "Up/Down to move  ·  Enter to select"
+                if self.thinking_supported:
+                    hint += "  ·  T thinking"
+                if self.local_download_supported:
+                    hint += "  ·  D download"
+                yield Label(hint + "  ·  Esc to cancel", id="model-hint")
 
         def on_mount(self) -> None:
             control = self.query_one("#model-filter", Input)
@@ -782,8 +833,14 @@ def create_textual_app(container, chat_id: int = 0):
 
         def _refresh_list(self, query: str):
             lowered = query.strip().casefold()
+            source_catalog = self.catalog
+            if self.search_callback and len(lowered) >= 2:
+                try:
+                    source_catalog = list(self.search_callback(query, self.tools_only))
+                except Exception:
+                    source_catalog = self.catalog
             items: list[tuple[str, str, str, tuple[str, ...]]] = []
-            for model in self.catalog:
+            for model in source_catalog:
                 haystack = " ".join([model.name, model.label, model.description, *getattr(model, "aliases", ())]).casefold()
                 if lowered and lowered not in haystack:
                     continue
@@ -811,6 +868,8 @@ def create_textual_app(container, chat_id: int = 0):
             lines: list[str] = []
             lines.append(f"[dim]Current:[/dim] {self.current_model or self.default_model or 'default'}")
             lines.append(f"[dim]Default:[/dim] {self.default_model or 'none'}")
+            if self.thinking_supported:
+                lines.append(f"[dim]Thinking:[/dim] {self.thinking_mode}  [dim](press T)[/dim]")
             if total > self._page_size:
                 lines.append(f"[dim]{start + 1}–{end} of {total}[/dim]")
             lines.append("")
@@ -824,6 +883,18 @@ def create_textual_app(container, chat_id: int = 0):
                     tags.append("[green]✓[/green]")
                 if name != "__custom__" and name == self.default_model:
                     tags.append("[cyan]★[/cyan]")
+                if name != "__custom__" and self.provider_name == "local":
+                    lowered_desc = description.casefold()
+                    if "chat-only" in lowered_desc:
+                        tags.append("[red]chat-only[/red]")
+                    elif "tools unknown" in lowered_desc:
+                        tags.append("[yellow]tools?[/yellow]")
+                    elif "tools" in lowered_desc:
+                        tags.append("[green]tools[/green]")
+                    if "not installed" in lowered_desc:
+                        tags.append("[yellow]install[/yellow]")
+                    elif "installed" in lowered_desc:
+                        tags.append("[green]installed[/green]")
                 tag_text = f" {''.join(tags)}" if tags else ""
                 if name == "__custom__":
                     lines.append(f"[{style}] {marker} {label}{tag_text}[/{style}]")
@@ -857,11 +928,30 @@ def create_textual_app(container, chat_id: int = 0):
                 event.prevent_default()
                 return
             if event.key in {"enter", "return"} and self.filtered:
-                self.dismiss(self.filtered[self.selected][0])
+                selected = self.filtered[self.selected]
+                action = "download" if self._selection_requires_download(selected) else "model"
+                self.dismiss((action, selected[0], self.thinking_mode))
+                event.prevent_default()
+                return
+            if event.key == "d" and self.local_download_supported and self.filtered:
+                self.dismiss(("download", self.filtered[self.selected][0], self.thinking_mode))
+                event.prevent_default()
+                return
+            if event.key == "t" and self.thinking_supported:
+                modes = ["off", "compact", "full"]
+                current = self.thinking_mode if self.thinking_mode in modes else "compact"
+                self.thinking_mode = modes[(modes.index(current) + 1) % len(modes)]
+                self._render_list()
                 event.prevent_default()
                 return
             if event.key == "escape":
                 self.dismiss(None)
+
+        def _selection_requires_download(self, selected: tuple[str, str, str, tuple[str, ...]]) -> bool:
+            if not self.local_download_supported or selected[0] == "__custom__":
+                return False
+            description = selected[2].casefold()
+            return "not installed" in description
 
         def on_mouse_scroll_down(self, event) -> None:
             if self.filtered:
@@ -1518,6 +1608,8 @@ def create_textual_app(container, chat_id: int = 0):
             # Strip any static trailing ellipsis/dots from the action label —
             # the animated dot suffix takes over.
             action = self._status_state["action"].rstrip("…·. ")
+            loading_local = action.lower().startswith("loading local model")
+            pulling_local = action.lower().startswith("installing local model")
             # Show model name next to provider when available
             session = container.get_session(chat_id)
             provider = self.current_provider
@@ -1528,6 +1620,29 @@ def create_textual_app(container, chat_id: int = 0):
             if not model_str:
                 model_str = provider_default_model(provider)
             model_part = f"  [dim]{model_str}[/dim]" if model_str else ""
+            if loading_local:
+                load_frame = _LOCAL_LOAD_FRAMES[frame % len(_LOCAL_LOAD_FRAMES)]
+                return (
+                    f"[{color}]{spinner}[/] {action}[dim]{dot}[/dim]  "
+                    f"[{color}]{load_frame}[/]  [dim]warming GPU · {time_str}[/dim]{model_part}"
+                )
+            if pulling_local:
+                percent = self._status_state.get("pull_percent")
+                installed = bool(self._status_state.get("pull_installed"))
+                pull_status = str(self._status_state.get("pull_status") or "Preparing")
+                if isinstance(percent, int):
+                    filled = max(0, min(10, round(percent / 10)))
+                    bar = "▰" * filled + "▱" * (10 - filled)
+                    percent_text = f"{percent:3d}%"
+                else:
+                    bar = _LOCAL_PULL_FRAMES[frame % len(_LOCAL_PULL_FRAMES)]
+                    percent_text = " --%"
+                install_text = "[green]installed[/green]" if installed else "[yellow]installing[/yellow]"
+                return (
+                    f"[{color}]{spinner}[/] {action}[dim]{dot}[/dim]  "
+                    f"[{color}]{bar}[/] {percent_text}  {install_text}  "
+                    f"[dim]{pull_status} · {time_str}[/dim]"
+                )
             return f"[{color}]{spinner}[/] {action}[dim]{dot}[/dim]{model_part}  [dim]({time_str} · {tok_str} tokens)[/dim]"
 
         def _idle_status_renderable(self) -> str:
@@ -1637,41 +1752,72 @@ def create_textual_app(container, chat_id: int = 0):
             ]
             self._push_output("\n".join(lines))
 
-        def _open_model_picker(self, provider_name: str, initial_query: str = "") -> None:
+        def _open_model_picker(self, provider_name: str, initial_query: str = "", tools_only: bool = False) -> None:
             session = container.get_session(chat_id)
             current_model = container.resolve_provider_model(session, provider_name)
             default_model = provider_default_model(provider_name)
-            catalog = container.list_available_models(provider_name)
+            catalog = container.list_available_models(provider_name, tools_only=tools_only)
+            thinking_supported = provider_supports_thinking(provider_name, current_model)
+            thinking_mode = get_thinking_mode(session)
 
-            def _on_pick(value: str | None) -> None:
+            def _on_pick(value) -> None:
                 if value is None:
                     return
+                action = "model"
+                picked_thinking_mode = None
+                if isinstance(value, tuple):
+                    action, value, picked_thinking_mode = value
+                if picked_thinking_mode and thinking_supported:
+                    message = set_thinking_mode(session, picked_thinking_mode)
+                    container.save_session(session)
+                    self._add_timeline(message)
                 if value == "__custom__":
                     self.push_screen(
                         TextEntryModal(
-                            title=f"Custom model · {provider_name}",
+                            title=f"Custom {'tools model' if tools_only else 'model'} · {provider_name}",
                             placeholder="enter exact model id…",
                             initial_value=session.provider_models.get(provider_name, "").strip(),
                         ),
-                        lambda custom_value: self._set_provider_model_from_modal(provider_name, custom_value),
+                        lambda custom_value: self._set_provider_model_from_modal(provider_name, custom_value, require_tools=tools_only),
                     )
                     return
-                self._set_provider_model(provider_name, value)
+                if provider_name == "local" and action == "download":
+                    self.run_worker(self._download_local_model_and_set(value), exclusive=False)
+                    return
+                self._set_provider_model(provider_name, value, require_tools=tools_only)
 
-            self.push_screen(ModelPickerModal(provider_name, current_model, default_model, catalog, initial_query=initial_query), _on_pick)
+            self.push_screen(
+                ModelPickerModal(
+                    provider_name,
+                    current_model,
+                    default_model,
+                    catalog,
+                    initial_query=initial_query,
+                    thinking_mode=thinking_mode,
+                    thinking_supported=thinking_supported,
+                    local_download_supported=provider_name == "local",
+                    tools_only=tools_only,
+                    search_callback=(
+                        (lambda query, only_tools=False: container.local_model_catalog.search_models(query, tools_only=only_tools))
+                        if provider_name == "local"
+                        else None
+                    ),
+                ),
+                _on_pick,
+            )
 
-        def _set_provider_model_from_modal(self, provider_name: str, value: str | None):
+        def _set_provider_model_from_modal(self, provider_name: str, value: str | None, require_tools: bool = False):
             if value is None:
                 return
             cleaned = value.strip()
             if not cleaned:
                 self._append_stream("  [yellow]No custom model entered.[/yellow]")
                 return
-            self._set_provider_model(provider_name, cleaned)
+            self._set_provider_model(provider_name, cleaned, require_tools=require_tools)
 
-        def _set_provider_model(self, provider_name: str, model_name: str):
+        def _set_provider_model(self, provider_name: str, model_name: str, require_tools: bool = False):
             session = container.get_session(chat_id)
-            resolution = container.resolve_model_selection(provider_name, model_name)
+            resolution = container.resolve_model_selection(provider_name, model_name, require_tools=require_tools)
             if resolution.status == "ambiguous":
                 self._push_output(
                     "[yellow]"
@@ -1684,6 +1830,9 @@ def create_textual_app(container, chat_id: int = 0):
                 self._append_stream(f"  [yellow]{resolution.message}[/yellow]")
                 return
             new_model = resolution.model_name
+            if provider_name == "local" and new_model and not container.local_model_is_installed(new_model, refresh=True):
+                self.run_worker(self._download_local_model_and_set(new_model), exclusive=False)
+                return
             session.provider_models[provider_name] = new_model
             container.reset_runtime(session, provider_name)
             container.save_session(session)
@@ -1694,6 +1843,56 @@ def create_textual_app(container, chat_id: int = 0):
                 f" → [bold]{label}[/bold]"
             )
             self._refresh_all()
+
+        async def _download_local_model_and_set(self, model_name: str):
+            session = container.get_session(chat_id)
+            resolution = container.resolve_model_selection("local", model_name)
+            selected = resolution.model_name or model_name
+            self._append_stream(f"  [yellow]Installing local model:[/yellow] [bold]{selected}[/bold]")
+            previous_provider = self.current_provider
+            self.current_provider = "local"
+            self._status_state = {
+                "action": f"Installing local model {selected}",
+                "tokens": 0,
+                "start": _time.monotonic(),
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "pull_percent": None,
+                "pull_status": "Preparing download",
+                "pull_installed": False,
+            }
+            self._show_status_line("local")
+
+            def on_progress(progress):
+                self._status_state.update(
+                    {
+                        "action": f"Installing local model {progress.model_name}",
+                        "pull_percent": progress.percent,
+                        "pull_status": progress.status,
+                        "pull_installed": progress.installed,
+                    }
+                )
+                try:
+                    self.query_one("#statusline", StatusLineWidget).update(self._status_renderable())
+                except Exception:
+                    pass
+
+            try:
+                result = await container.pull_local_model(selected, progress_callback=on_progress)
+                if not result.ok:
+                    self._append_stream(f"  [red]{result.message}[/red]")
+                    return
+                self._status_state.update({"pull_percent": 100, "pull_status": "Installed", "pull_installed": True})
+                session.provider_models["local"] = result.model_name
+                container.reset_runtime(session, "local")
+                container.save_session(session)
+                self._add_timeline(f"Installed local model → {result.model_name}")
+                self._append_stream(f"  [green]Installed and selected:[/green] [bold]{result.model_name}[/bold]")
+                self._refresh_all()
+            finally:
+                await asyncio.sleep(0.35)
+                self.current_provider = previous_provider
+                self._hide_status_line()
 
         def _update_status_event(self, line: str):
             action = _action_from_event(line)
@@ -2807,18 +3006,34 @@ def create_textual_app(container, chat_id: int = 0):
                         actual = runtime.manager.model_name if (runtime and hasattr(runtime, "manager")) else ""
                         display = cur or actual or provider_default_model(pname) or "[dim]default[/dim]"
                         pcolor = _PROVIDER_COLORS.get(pname, color)
-                        lines.append(f"  [{pcolor}]{pname:<10}[/{pcolor}]  {display}")
+                        thinking = (
+                            f"  [dim]thinking: {get_thinking_mode(session)}[/dim]"
+                            if provider_supports_thinking(pname, display)
+                            else ""
+                        )
+                        lines.append(f"  [{pcolor}]{pname:<10}[/{pcolor}]  {display}{thinking}")
                         for item in container.list_available_models(pname)[:10]:
                             mname = item.name
                             mdesc = item.label
                             marker = "▶" if (cur or actual) == mname else " "
-                            lines.append(f"    [dim]{marker} {mname:<36} {mdesc}[/dim]")
+                            tool_tag = ""
+                            if pname == "local":
+                                desc = item.description.casefold()
+                                if "chat-only" in desc:
+                                    tool_tag = " [red]chat-only[/red]"
+                                elif "tools unknown" in desc:
+                                    tool_tag = " [yellow]tools?[/yellow]"
+                                elif "tools" in desc:
+                                    tool_tag = " [green]tools[/green]"
+                            lines.append(f"    [dim]{marker} {mname:<36} {mdesc}[/dim]{tool_tag}")
                         lines.append("")
                     lines.append("[dim]Usage:  /model <provider> <model>    e.g. /model qwen qwen-coder-plus[/dim]")
                     lines.append("[dim]         /model <provider>            open model picker[/dim]")
                     lines.append("[dim]         /model <provider> default    reset to provider default[/dim]")
                     lines.append("[dim]         /model openrouter sonnet     search by family/name[/dim]")
                     lines.append("[dim]         /model openrouter refresh    refresh live OpenRouter catalog[/dim]")
+                    lines.append("[dim]         /model local tools           pick local LLM with tools[/dim]")
+                    lines.append("[dim]         /model local pull qwen2.5-coder:7b  download and select local model[/dim]")
                     self._push_output("\n".join(lines))
                     return
 
@@ -2840,6 +3055,10 @@ def create_textual_app(container, chat_id: int = 0):
                     self._open_model_picker(target_provider)
                     return
 
+                if target_provider == "local" and new_model.lower() == "tools":
+                    self._open_model_picker(target_provider, tools_only=True)
+                    return
+
                 if target_provider == "openrouter" and new_model.lower() == "refresh":
                     refreshed = container.list_available_models("openrouter", refresh=True)
                     self._push_output(
@@ -2847,9 +3066,25 @@ def create_textual_app(container, chat_id: int = 0):
                     )
                     self._open_model_picker(target_provider)
                     return
+                if target_provider == "local" and new_model.lower() == "refresh":
+                    refreshed = container.list_available_models("local", refresh=True)
+                    self._push_output(
+                        f"[green]Refreshed local model catalog[/green]\n\nVisible models: {len(refreshed)}"
+                    )
+                    self._open_model_picker(target_provider)
+                    return
+                if target_provider == "local" and new_model.lower().startswith(("pull ", "download ")):
+                    _, local_query = new_model.split(maxsplit=1)
+                    self.run_worker(self._download_local_model_and_set(local_query), exclusive=False)
+                    return
+
+                require_tools = False
+                if target_provider == "local" and new_model.lower().startswith("tools "):
+                    require_tools = True
+                    new_model = new_model.split(maxsplit=1)[1].strip()
 
                 # Actually set the model
-                self._set_provider_model(target_provider, new_model)
+                self._set_provider_model(target_provider, new_model, require_tools=require_tools)
                 # Refresh welcome screen so the model shows there too
                 if self.current_mode == "idle":
                     self._push_output(self._welcome_text())
@@ -3256,7 +3491,7 @@ def create_textual_app(container, chat_id: int = 0):
 
         async def _run_prompt(self, prompt: str, provider_override: str | None = None):
             try:
-              await self._run_prompt_inner(prompt, provider_override)
+                await self._run_prompt_inner(prompt, provider_override)
             except asyncio.CancelledError:
                 if self._active_runtime is not None:
                     asyncio.create_task(self._active_runtime.manager.stop())
@@ -3264,9 +3499,16 @@ def create_textual_app(container, chat_id: int = 0):
                 self._hide_status_line()
                 self.current_mode = "idle"
                 self._active_task = None
-            except Exception:
+            except Exception as exc:
+                self._hide_status_line()
+                if self._active_runtime is not None:
+                    asyncio.create_task(self._active_runtime.manager.stop())
+                    self._active_runtime = None
+                self.current_mode = "idle"
+                self._append_stream(f"  [red]Run failed before the provider responded: {exc}[/red]")
+                self._add_timeline("Run failed before provider response.")
+                self._refresh_all()
                 self._active_task = None
-                raise
             else:
                 self._active_task = None
 
@@ -3285,7 +3527,28 @@ def create_textual_app(container, chat_id: int = 0):
                 self.current_mode = "idle"
                 self._refresh_all()
                 return
-            runtime = await container.ensure_runtime_started(session, provider_name)
+            model_ok, model_message = container.validate_provider_model(session, provider_name)
+            if not model_ok:
+                self._push_output(
+                    f"[yellow]{provider_name}: {model_message}[/yellow]\n\n"
+                    f"[dim]Tip: /model {provider_name} default resets the model.[/dim]"
+                )
+                self.current_mode = "idle"
+                self._refresh_all()
+                return
+            try:
+                runtime = await asyncio.wait_for(
+                    container.ensure_runtime_started(session, provider_name),
+                    timeout=12,
+                )
+            except asyncio.TimeoutError:
+                self._push_output(
+                    f"[red]{provider_name}: provider startup timed out before a session was ready.[/red]\n\n"
+                    "[dim]Check /status, CLI authentication, or choose another provider/model.[/dim]"
+                )
+                self.current_mode = "idle"
+                self._refresh_all()
+                return
             self.current_mode = "single"
             self._active_runtime = runtime
             self._set_orchestration_steps([])

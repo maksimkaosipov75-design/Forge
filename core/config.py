@@ -1,4 +1,5 @@
 import os
+import logging
 try:
     from dotenv import load_dotenv
 except ModuleNotFoundError:  # pragma: no cover - optional dependency in minimal environments
@@ -6,6 +7,22 @@ except ModuleNotFoundError:  # pragma: no cover - optional dependency in minimal
         return False
 
 load_dotenv()
+log = logging.getLogger(__name__)
+
+
+def _get_int_env(name: str, default: int, minimum: int | None = None) -> int:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        log.warning("Invalid integer for %s=%r, using default %d", name, raw, default)
+        return default
+    if minimum is not None and value < minimum:
+        log.warning("%s=%d is below minimum %d, using minimum", name, value, minimum)
+        return minimum
+    return value
 
 
 class Settings:
@@ -21,15 +38,24 @@ class Settings:
         self.OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
         self.OPENROUTER_BASE_URL = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
         self.OPENROUTER_DEFAULT_MODEL = os.getenv("OPENROUTER_DEFAULT_MODEL", "qwen/qwen3-coder:free")
-        self.OPENROUTER_HTTP_TIMEOUT = int(os.getenv("OPENROUTER_HTTP_TIMEOUT", "300"))
-        self.OPENROUTER_MODELS_HTTP_TIMEOUT = int(os.getenv("OPENROUTER_MODELS_HTTP_TIMEOUT", "8"))
-        self.OPENROUTER_MODEL_CACHE_TTL_SECONDS = int(os.getenv("OPENROUTER_MODEL_CACHE_TTL_SECONDS", "21600"))
-        self.RATE_LIMIT_MAX_REQUESTS = int(os.getenv("RATE_LIMIT_MAX_REQUESTS", "20"))
-        self.RATE_LIMIT_WINDOW_SECONDS = int(os.getenv("RATE_LIMIT_WINDOW_SECONDS", "3600"))
-        self.MAX_PROMPT_LENGTH = int(os.getenv("MAX_PROMPT_LENGTH", "12000"))
-        self.ENABLE_STATUS_HTTP = os.getenv("ENABLE_STATUS_HTTP", "1") not in {"0", "false", "False"}
+        self.OPENROUTER_HTTP_TIMEOUT = _get_int_env("OPENROUTER_HTTP_TIMEOUT", 300, minimum=1)
+        self.OPENROUTER_MODELS_HTTP_TIMEOUT = _get_int_env("OPENROUTER_MODELS_HTTP_TIMEOUT", 8, minimum=1)
+        self.OPENROUTER_MODEL_CACHE_TTL_SECONDS = _get_int_env("OPENROUTER_MODEL_CACHE_TTL_SECONDS", 21600, minimum=0)
+        self.LOCAL_LLM_BASE_URL = os.getenv("LOCAL_LLM_BASE_URL", "http://127.0.0.1:11434/v1")
+        self.LOCAL_LLM_API_KEY = os.getenv("LOCAL_LLM_API_KEY", "")
+        self.LOCAL_LLM_DEFAULT_MODEL = os.getenv("LOCAL_LLM_DEFAULT_MODEL", "qwen2.5-coder:7b")
+        self.LOCAL_LLM_HTTP_TIMEOUT = _get_int_env("LOCAL_LLM_HTTP_TIMEOUT", 300, minimum=1)
+        self.LOCAL_LLM_STARTUP_TIMEOUT = _get_int_env("LOCAL_LLM_STARTUP_TIMEOUT", 600, minimum=1)
+        self.LOCAL_LLM_ENABLE_TOOLS = os.getenv("LOCAL_LLM_ENABLE_TOOLS", "0").strip().lower() in {"1", "true", "yes", "on"}
+        self.LOCAL_LLM_DISABLE_THINKING = os.getenv("LOCAL_LLM_DISABLE_THINKING", "1").strip().lower() in {"1", "true", "yes", "on"}
+        self.LOCAL_LLM_ENABLE_STREAMING = os.getenv("LOCAL_LLM_ENABLE_STREAMING", "0").strip().lower() in {"1", "true", "yes", "on"}
+        self.CLAUDE_BYPASS_PERMISSIONS = os.getenv("CLAUDE_BYPASS_PERMISSIONS", "0").strip().lower() in {"1", "true", "yes", "on"}
+        self.RATE_LIMIT_MAX_REQUESTS = _get_int_env("RATE_LIMIT_MAX_REQUESTS", 20, minimum=1)
+        self.RATE_LIMIT_WINDOW_SECONDS = _get_int_env("RATE_LIMIT_WINDOW_SECONDS", 3600, minimum=1)
+        self.MAX_PROMPT_LENGTH = _get_int_env("MAX_PROMPT_LENGTH", 12000, minimum=256)
+        self.ENABLE_STATUS_HTTP = os.getenv("ENABLE_STATUS_HTTP", "0").strip().lower() in {"1", "true", "yes", "on"}
         self.STATUS_HTTP_HOST = os.getenv("STATUS_HTTP_HOST", "127.0.0.1")
-        self.STATUS_HTTP_PORT = int(os.getenv("STATUS_HTTP_PORT", "8089"))
+        self.STATUS_HTTP_PORT = _get_int_env("STATUS_HTTP_PORT", 8089, minimum=1)
 
 
 settings = Settings()

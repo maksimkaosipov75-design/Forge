@@ -1,10 +1,15 @@
 import asyncio
+import logging
 import os as _os
+import shutil
 from pathlib import Path
+
+log = logging.getLogger(__name__)
 
 from core.config import Settings, settings as default_settings
 from core.credential_store import CredentialStore
 from core.file_manager import FileManager
+from core.local_model_catalog import LocalModelCatalog, LocalModelPullResult
 from core.metrics import MetricsCollector
 from core.openrouter_catalog import ModelResolveResult, OpenRouterModelCatalog
 from core.orchestrator import AIOrchestrator, RuleBasedOrchestrator
@@ -16,7 +21,7 @@ from core.process_manager import (
     create_process_manager,
 )
 from core.providers import get_provider_definition, is_api_provider, normalize_provider_name, provider_default_model
-from runtime.api_backends import OpenRouterExecutionBackend
+from runtime.api_backends import LocalLLMExecutionBackend, OpenRouterExecutionBackend
 from runtime.executor import ExecutionService
 from runtime.orchestrator_service import OrchestratorService
 from core.session_store import SessionStore
@@ -52,6 +57,7 @@ class RuntimeContainer:
             "codex": settings.CODEX_CLI_PATH,
             "claude": settings.CLAUDE_CLI_PATH,
             "openrouter": settings.OPENROUTER_BASE_URL,
+            "local": settings.LOCAL_LLM_BASE_URL,
         }
         if manager is not None:
             self.provider_paths[self.default_provider] = manager.cli_path
@@ -78,6 +84,10 @@ class RuntimeContainer:
             ttl_seconds=self.settings.OPENROUTER_MODEL_CACHE_TTL_SECONDS,
             api_key_getter=lambda: self.resolve_api_key("openrouter"),
         )
+        self.local_model_catalog = LocalModelCatalog(
+            base_url_getter=lambda: self.settings.LOCAL_LLM_BASE_URL,
+            timeout=min(self.settings.LOCAL_LLM_HTTP_TIMEOUT, 30),
+        )
 
     def session_projects_file(self, chat_id: int) -> Path:
         stem = self.base_projects_file.stem or "projects"
@@ -98,14 +108,28 @@ class RuntimeContainer:
             runtime_manager = provided_manager
         elif is_api_provider(normalized_provider):
             definition = get_provider_definition(normalized_provider)
-            runtime_manager = OpenRouterExecutionBackend(
-                api_key=self.resolve_api_key(normalized_provider),
-                base_url=self.settings.OPENROUTER_BASE_URL,
-                on_output=lambda line, target_parser=runtime_parser: target_parser.feed(line),
-                model_name=selected_model or definition.default_model,
-                timeout=self.settings.OPENROUTER_HTTP_TIMEOUT,
-                app_name="Forge",
-            )
+            if normalized_provider == "local":
+                runtime_manager = LocalLLMExecutionBackend(
+                    api_key=self.resolve_api_key(normalized_provider),
+                    base_url=self.settings.LOCAL_LLM_BASE_URL,
+                    on_output=lambda line, target_parser=runtime_parser: target_parser.feed(line),
+                    model_name=model_name or self.settings.LOCAL_LLM_DEFAULT_MODEL or definition.default_model,
+                    timeout=self.settings.LOCAL_LLM_HTTP_TIMEOUT,
+                    startup_timeout=self.settings.LOCAL_LLM_STARTUP_TIMEOUT,
+                    app_name="Forge",
+                    tools_enabled=self.settings.LOCAL_LLM_ENABLE_TOOLS,
+                    disable_thinking=self.settings.LOCAL_LLM_DISABLE_THINKING,
+                    prefer_streaming=self.settings.LOCAL_LLM_ENABLE_STREAMING,
+                )
+            else:
+                runtime_manager = OpenRouterExecutionBackend(
+                    api_key=self.resolve_api_key(normalized_provider),
+                    base_url=self.settings.OPENROUTER_BASE_URL,
+                    on_output=lambda line, target_parser=runtime_parser: target_parser.feed(line),
+                    model_name=selected_model or definition.default_model,
+                    timeout=self.settings.OPENROUTER_HTTP_TIMEOUT,
+                    app_name="Forge",
+                )
         else:
             runtime_manager = create_process_manager(
                 provider=normalized_provider,
@@ -158,42 +182,143 @@ class RuntimeContainer:
         configured = session.provider_models.get(provider_name, "").strip()
         return configured or provider_default_model(provider_name)
 
-    def list_available_models(self, provider_name: str, refresh: bool = False):
+    def validate_provider_model(self, session: ChatSession, provider_name: str) -> tuple[bool, str]:
+        """Fail fast when a selected model clearly belongs to another provider."""
+        normalized = normalize_provider_name(provider_name)
+        configured = session.provider_models.get(normalized, "").strip()
+        if not configured:
+            return True, ""
+
+        if normalized == "openrouter":
+            resolution = self.resolve_model_selection(normalized, configured)
+            if resolution.status == "missing":
+                return False, resolution.message
+            if resolution.status == "ambiguous":
+                return False, resolution.message or f"OpenRouter model '{configured}' is ambiguous."
+
+            # Exact OpenRouter ids may be entered manually. Treat them as invalid only
+            # when we have a real catalog, not just the built-in featured fallbacks.
+            models = self.list_available_models(normalized)
+            built_in_count = len(get_provider_definition(normalized).available_models)
+            if "/" in configured and len(models) > built_in_count:
+                names = {item.name.casefold() for item in models}
+                if configured.casefold() not in names:
+                    return False, (
+                        f"OpenRouter model '{configured}' is not in the catalog. "
+                        "Run /model openrouter refresh or choose a listed model."
+                    )
+            return True, ""
+        if normalized == "local":
+            return True, ""
+
+        lowered = configured.casefold()
+        incompatible: tuple[str, ...]
+        if normalized == "codex":
+            incompatible = ("claude", "qwen", "openrouter/")
+        elif normalized == "claude":
+            incompatible = ("gpt-", "qwen", "openrouter/")
+        else:
+            incompatible = ("gpt-", "claude", "openrouter/")
+        if "/" in configured or lowered.startswith(incompatible):
+            return False, (
+                f"Model '{configured}' does not look compatible with provider '{normalized}'. "
+                f"Use /model {normalized} default or pick a {normalized} model."
+            )
+        return True, ""
+
+    def list_available_models(self, provider_name: str, refresh: bool = False, tools_only: bool = False):
         normalized = normalize_provider_name(provider_name)
         if normalized == "openrouter":
             return self.openrouter_catalog.list_models(refresh=refresh)
+        if normalized == "local":
+            return self.local_model_catalog.list_models(refresh=refresh, tools_only=tools_only)
         return list_provider_models(normalized)
 
-    def resolve_model_selection(self, provider_name: str, query: str, refresh: bool = False) -> ModelResolveResult:
+    def resolve_model_selection(
+        self,
+        provider_name: str,
+        query: str,
+        refresh: bool = False,
+        require_tools: bool = False,
+    ) -> ModelResolveResult:
         normalized = normalize_provider_name(provider_name)
         if normalized == "openrouter":
             return self.openrouter_catalog.resolve_model(query, refresh=refresh)
+        if normalized == "local":
+            return self.local_model_catalog.resolve_model(query, refresh=refresh, require_tools=require_tools)
         cleaned = (query or "").strip()
         if not cleaned:
             return ModelResolveResult(status="empty", message="No model query provided.")
         if cleaned.lower() == "default":
             return ModelResolveResult(status="exact", model_name="")
+        models = self.list_available_models(normalized)
+        lowered = cleaned.casefold()
+        exact_matches = [
+            item
+            for item in models
+            if lowered in {item.name.casefold(), item.label.casefold(), *(alias.casefold() for alias in item.aliases)}
+        ]
+        if len(exact_matches) == 1:
+            return ModelResolveResult(status="exact", model_name=exact_matches[0].name)
+        if len(exact_matches) > 1:
+            return ModelResolveResult(
+                status="ambiguous",
+                matches=tuple(exact_matches[:8]),
+                message=f"'{cleaned}' matches several {normalized} models.",
+            )
+        fuzzy_matches = [
+            item for item in models
+            if lowered in " ".join((item.name, item.label, item.description, *item.aliases)).casefold()
+        ]
+        if len(fuzzy_matches) == 1:
+            return ModelResolveResult(status="exact", model_name=fuzzy_matches[0].name)
+        if len(fuzzy_matches) > 1:
+            return ModelResolveResult(
+                status="ambiguous",
+                matches=tuple(fuzzy_matches[:8]),
+                message=f"'{cleaned}' matches several {normalized} models.",
+            )
         return ModelResolveResult(status="raw", model_name=cleaned, message="Using the exact model name you entered.")
+
+    def local_model_is_installed(self, model_name: str, refresh: bool = False) -> bool:
+        return self.local_model_catalog.is_model_installed(model_name, refresh=refresh)
+
+    async def pull_local_model(self, model_name: str, progress_callback=None) -> LocalModelPullResult:
+        return await self.local_model_catalog.pull_model(model_name, progress_callback=progress_callback)
 
     def provider_is_ready(self, provider_name: str) -> tuple[bool, str]:
         normalized = normalize_provider_name(provider_name)
         if normalized == "openrouter" and not self.resolve_api_key(normalized).strip():
             return False, "OpenRouter API key is not configured."
+        if normalized == "local":
+            if not self.settings.LOCAL_LLM_BASE_URL.strip():
+                return False, "LOCAL_LLM_BASE_URL is not configured."
+            return True, ""
+        if not is_api_provider(normalized):
+            cli_path = self.provider_paths.get(normalized, normalized)
+            if not shutil.which(cli_path):
+                return False, f"{normalized} CLI not found: {cli_path}"
         return True, ""
 
     def resolve_api_key(self, provider_name: str) -> str:
         normalized = normalize_provider_name(provider_name)
         if normalized == "openrouter":
             return self.settings.OPENROUTER_API_KEY.strip() or self.credential_store.get_api_key(normalized).strip()
+        if normalized == "local":
+            return self.settings.LOCAL_LLM_API_KEY.strip() or self.credential_store.get_api_key(normalized).strip()
         return ""
 
     def reset_runtime(self, session: ChatSession, provider_name: str):
         runtime = session.runtimes.pop(provider_name, None)
         if runtime and runtime.manager.is_running:
             try:
-                asyncio.create_task(runtime.manager.stop())
+                loop = asyncio.get_running_loop()
+                loop.create_task(runtime.manager.stop())
             except Exception:
-                pass
+                try:
+                    asyncio.run(runtime.manager.stop())
+                except Exception as exc:
+                    log.debug("Failed to stop runtime %s: %s", provider_name, exc)
 
     async def ensure_runtime_started(self, session: ChatSession, provider_name: str) -> ProviderRuntime:
         runtime = self.get_runtime(session, provider_name)
@@ -215,8 +340,8 @@ class RuntimeContainer:
         return AIOrchestrator(available, fallback)
 
     def pick_planning_provider(self, session: ChatSession) -> str:
-        """Choose the best provider for AI planning (prefers openrouter > claude > qwen > codex)."""
-        for preferred in ("openrouter", "claude", "qwen", "codex"):
+        """Choose the best provider for AI planning (prefers openrouter > local > claude > qwen > codex)."""
+        for preferred in ("openrouter", "local", "claude", "qwen", "codex"):
             if preferred not in self.provider_paths:
                 continue
             ready, _ = self.provider_is_ready(preferred)

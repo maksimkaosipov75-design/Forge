@@ -2,15 +2,74 @@ import asyncio
 import json
 import logging
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Callable, Optional
 from urllib import error, request
 
-from core.event_protocol import encode_forge_event, extract_forge_event
+from core.event_protocol import decode_forge_event, encode_forge_event, extract_forge_event
 from core.provider_status import FailureReason, ProviderHealth, classify_failure_text
 
 
 log = logging.getLogger(__name__)
+
+
+class _ThinkBlockFilter:
+    """Remove model-emitted <think>...</think> blocks across streamed chunks."""
+
+    _OPEN = "<think>"
+    _CLOSE = "</think>"
+
+    def __init__(self):
+        self.in_think = False
+        self.tail = ""
+
+    @staticmethod
+    def _partial_suffix_len(text: str, marker: str) -> int:
+        lowered = text.casefold()
+        marker = marker.casefold()
+        max_len = min(len(marker) - 1, len(lowered))
+        for size in range(max_len, 0, -1):
+            if marker.startswith(lowered[-size:]):
+                return size
+        return 0
+
+    def feed(self, text: str) -> str:
+        data = self.tail + (text or "")
+        self.tail = ""
+        if not data:
+            return ""
+
+        lowered = data.casefold()
+        out: list[str] = []
+        i = 0
+        while i < len(data):
+            if self.in_think:
+                close_idx = lowered.find(self._CLOSE, i)
+                if close_idx < 0:
+                    tail_len = self._partial_suffix_len(data[i:], self._CLOSE)
+                    if tail_len:
+                        self.tail = data[-tail_len:]
+                    return "".join(out)
+                i = close_idx + len(self._CLOSE)
+                self.in_think = False
+                continue
+
+            open_idx = lowered.find(self._OPEN, i)
+            if open_idx < 0:
+                tail_len = self._partial_suffix_len(data[i:], self._OPEN)
+                if tail_len:
+                    out.append(data[i:len(data) - tail_len])
+                    self.tail = data[-tail_len:]
+                else:
+                    out.append(data[i:])
+                break
+
+            out.append(data[i:open_idx])
+            i = open_idx + len(self._OPEN)
+            self.in_think = True
+
+        return "".join(out)
 
 
 class BaseApiBackend:
@@ -20,11 +79,13 @@ class BaseApiBackend:
         on_output: Callable[[str], None],
         model_name: str = "",
         timeout: int = 120,
+        startup_timeout: int | None = None,
     ):
         self.provider_name = provider_name
         self.on_output = on_output
         self.model_name = model_name
         self.timeout = timeout
+        self.startup_timeout = startup_timeout or 30
         self.health = ProviderHealth(provider=provider_name)
         self._running = False
         self._stream_callback: Optional[Callable[[str], None]] = None
@@ -44,8 +105,8 @@ class BaseApiBackend:
         if resp is not None:
             try:
                 resp.close()
-            except Exception:
-                pass
+            except Exception as exc:
+                log.debug("Error closing active response: %s", exc)
 
     @property
     def is_running(self) -> bool:
@@ -149,25 +210,54 @@ class OpenRouterExecutionBackend(BaseApiBackend):
         on_output: Callable[[str], None],
         model_name: str = "",
         timeout: int = 120,
+        startup_timeout: int | None = None,
         app_name: str = "Forge",
+        provider_name: str = "openrouter",
+        include_stream_usage: bool = True,
+        require_api_key: bool = True,
+        tools_enabled: bool = True,
     ):
         super().__init__(
-            provider_name="openrouter",
+            provider_name=provider_name,
             on_output=on_output,
             model_name=model_name,
             timeout=timeout,
+            startup_timeout=startup_timeout,
         )
         self.api_key = api_key
         self.base_url = base_url.rstrip("/")
         self.app_name = app_name
+        self.include_stream_usage = include_stream_usage
+        self.require_api_key = require_api_key
+        self.send_app_headers = True
         # Set by the executor before each send_command call.
         self.thinking_enabled: bool = False
-        self.tools_enabled: bool = True
+        self.tools_enabled: bool = tools_enabled
+        self._default_tools_enabled: bool = tools_enabled
+        self.non_stream_fallback_enabled: bool = False
+        self.buffer_stream_text_events: bool = False
+        self.temperature: float | None = None
+        self.top_p: float | None = None
         self._cwd: Path | None = None  # injected by executor; used by ToolExecutor
         self._interaction_callback: Optional[Callable] = None  # injected by executor
         self.conversation_history: list[dict] = []
         self.project_context: str = ""  # injected by executor before each call
         self._active_shell: "PersistentShell | None" = None  # for stop() to cancel
+
+    def _request_extra_options(self, *, stream: bool) -> dict:
+        return {}
+
+    def _reset_output_filter(self) -> None:
+        return None
+
+    def _filter_output_text(self, text: str) -> str:
+        return text
+
+    def _filter_stream_events(self, events: list[str]) -> list[str]:
+        return events
+
+    def _looks_like_degenerate_text(self, text: str) -> bool:
+        return False
 
     async def stop(self):
         """Cancel the in-flight HTTP request AND the running bash shell."""
@@ -177,8 +267,8 @@ class OpenRouterExecutionBackend(BaseApiBackend):
             self._active_shell = None
             try:
                 await shell.stop()
-            except Exception:
-                pass
+            except Exception as exc:
+                log.debug("Error stopping shell: %s", exc)
 
     @staticmethod
     def parse_sse_line(raw: str) -> tuple[list[str], str]:
@@ -346,20 +436,26 @@ class OpenRouterExecutionBackend(BaseApiBackend):
 
         return result
 
-    def _build_request(self, messages: "list[dict] | str", model_name: str) -> request.Request:
+    def _build_request(self, messages: "list[dict] | str", model_name: str, *, stream: bool = True) -> request.Request:
         """Build an HTTP request. Accepts a messages list or a raw prompt string."""
         if isinstance(messages, str):
             messages = self._build_messages(messages)
         payload: dict = {
             "model": model_name,
-            "stream": True,
-            "stream_options": {"include_usage": True},
+            "stream": stream,
             "messages": messages,
         }
+        payload.update(self._request_extra_options(stream=stream))
+        if stream and self.include_stream_usage:
+            payload["stream_options"] = {"include_usage": True}
         if self.thinking_enabled:
             # OpenRouter standard reasoning parameter — works for all
             # reasoning-capable models (Qwen3, DeepSeek-R1, Claude, etc.)
             payload["reasoning"] = {"effort": "high"}
+        if self.temperature is not None:
+            payload["temperature"] = self.temperature
+        if self.top_p is not None:
+            payload["top_p"] = self.top_p
         if self.tools_enabled:
             from runtime.tool_executor import TOOL_DEFINITIONS
             payload["tools"] = TOOL_DEFINITIONS
@@ -370,11 +466,79 @@ class OpenRouterExecutionBackend(BaseApiBackend):
             data=body,
             method="POST",
         )
-        req.add_header("Authorization", f"Bearer {self.api_key}")
+        if self.api_key.strip():
+            req.add_header("Authorization", f"Bearer {self.api_key}")
         req.add_header("Content-Type", "application/json")
-        req.add_header("HTTP-Referer", "https://github.com/maksimkaosipov75-design/Forge")
-        req.add_header("X-Title", self.app_name)
+        if self.send_app_headers:
+            req.add_header("HTTP-Referer", "https://github.com/maksimkaosipov75-design/Forge")
+            req.add_header("X-Title", self.app_name)
         return req
+
+    def _friendly_error_message(self, code: int, detail: str, reason: str, model_name: str) -> str:
+        return self._friendly_http_error_message(code, detail, reason, model_name)
+
+    def _loading_message(self, model_name: str) -> str:
+        return ""
+
+    @staticmethod
+    def _read_http_error_detail(exc: error.HTTPError) -> str:
+        try:
+            return exc.read().decode("utf-8", errors="replace")
+        except Exception as e:
+            log.debug("Failed to read HTTP error detail: %s", e)
+            return ""
+
+    @staticmethod
+    def _is_tools_unsupported_error(code: int, detail: str) -> bool:
+        lowered = (detail or "").casefold()
+        if code != 400:
+            return False
+        return any(
+            marker in lowered
+            for marker in (
+                "does not support tools",
+                "do not support tools",
+                "tools not supported",
+                "tool support",
+                "unsupported tools",
+                "tool_choice",
+            )
+        )
+
+    @staticmethod
+    def _is_streaming_unsupported_error(code: int, detail: str) -> bool:
+        lowered = (detail or "").casefold()
+        if code not in (400, 404, 405, 422, 501):
+            return False
+        has_stream_marker = any(marker in lowered for marker in ("stream", "streaming", "sse"))
+        has_unsupported_marker = any(
+            marker in lowered
+            for marker in (
+                "not supported",
+                "unsupported",
+                "invalid",
+                "unknown parameter",
+                "unknown field",
+                "unrecognized",
+            )
+        )
+        return has_stream_marker and has_unsupported_marker
+
+    @staticmethod
+    def _content_to_text(content) -> str:
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            parts: list[str] = []
+            for block in content:
+                if isinstance(block, dict):
+                    text = block.get("text") or block.get("content") or ""
+                    if isinstance(text, str):
+                        parts.append(text)
+                elif isinstance(block, str):
+                    parts.append(block)
+            return "".join(parts)
+        return ""
 
     def _stream_iteration_sync(
         self,
@@ -394,10 +558,11 @@ class OpenRouterExecutionBackend(BaseApiBackend):
             - tool_calls: list of completed tool call dicts
             - finish_reason: "stop" | "tool_calls" | "length" | ""
         """
-        if not self.api_key.strip():
+        if self.require_api_key and not self.api_key.strip():
             raise RuntimeError("OPENROUTER_API_KEY is not configured")
 
         self._cancel_event.clear()
+        self._reset_output_filter()
         req = self._build_request(messages, model_name)
         aggregated: list[str] = []
         tool_call_chunks: dict[int, dict] = {}
@@ -413,10 +578,16 @@ class OpenRouterExecutionBackend(BaseApiBackend):
 
                     # Emit SSE events (text, thinking, errors, usage) via existing parser.
                     events, text_delta = self.parse_sse_line(line)
+                    if text_delta:
+                        filtered_delta = self._filter_output_text(text_delta)
+                        events = [event for event in events if not event.startswith("💬 ")]
+                        if filtered_delta:
+                            if not self.buffer_stream_text_events:
+                                events.append(f"💬 {filtered_delta}")
+                            aggregated.append(filtered_delta)
+                    events = self._filter_stream_events(events)
                     for event in events:
                         loop.call_soon_threadsafe(self._notify, event)
-                    if text_delta:
-                        aggregated.append(text_delta)
 
                     # Also parse tool_calls deltas and finish_reason.
                     stripped = line.strip()
@@ -465,7 +636,66 @@ class OpenRouterExecutionBackend(BaseApiBackend):
                 self._active_response = None
 
         tool_calls = [tool_call_chunks[k] for k in sorted(tool_call_chunks.keys())]
-        return "".join(aggregated).strip(), tool_calls, finish_reason
+        text = "".join(aggregated).strip()
+        if self.buffer_stream_text_events and text and not self._looks_like_degenerate_text(text):
+            loop.call_soon_threadsafe(self._notify, f"💬 {text}")
+        return text, tool_calls, finish_reason
+
+    def _non_stream_iteration_sync(
+        self,
+        messages: list[dict],
+        model_name: str,
+        loop: asyncio.AbstractEventLoop,
+    ) -> "tuple[str, list[dict], str]":
+        if self.require_api_key and not self.api_key.strip():
+            raise RuntimeError("OPENROUTER_API_KEY is not configured")
+
+        self._cancel_event.clear()
+        self._reset_output_filter()
+        req = self._build_request(messages, model_name, stream=False)
+        with request.urlopen(req, timeout=self.timeout) as response:
+            raw = response.read().decode("utf-8", errors="replace")
+
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"Invalid JSON response from {self.provider_name}: {raw[:200]}") from exc
+
+        events: list[str] = []
+        usage_event = self._usage_event(payload)
+        if usage_event:
+            events.append(usage_event)
+
+        text = ""
+        tool_calls: list[dict] = []
+        finish_reason = ""
+        choices = payload.get("choices")
+        if isinstance(choices, list):
+            for choice in choices:
+                if not isinstance(choice, dict):
+                    continue
+                if choice.get("finish_reason"):
+                    finish_reason = str(choice.get("finish_reason") or "")
+                message = choice.get("message") or {}
+                if not isinstance(message, dict):
+                    continue
+                for reasoning_key in ("reasoning", "reasoning_content"):
+                    reasoning_chunk = message.get(reasoning_key)
+                    if isinstance(reasoning_chunk, str) and reasoning_chunk:
+                        events.append(encode_forge_event("thinking", text=reasoning_chunk))
+                        break
+                text += self._content_to_text(message.get("content"))
+                raw_tool_calls = message.get("tool_calls")
+                if isinstance(raw_tool_calls, list):
+                    tool_calls.extend(tc for tc in raw_tool_calls if isinstance(tc, dict))
+
+        filtered_text = self._filter_output_text(text).strip()
+        if filtered_text:
+            events.append(f"💬 {filtered_text}")
+        events = self._filter_stream_events(events)
+        for event in events:
+            loop.call_soon_threadsafe(self._notify, event)
+        return filtered_text, tool_calls, finish_reason
 
     async def send_command(self, text: str, cwd: Path = None):
         if not self._running:
@@ -473,7 +703,7 @@ class OpenRouterExecutionBackend(BaseApiBackend):
 
         model_name = self.model_name.strip()
         if not model_name:
-            raise RuntimeError("OpenRouter model is not configured")
+            raise RuntimeError(f"{self.provider_name} model is not configured")
 
         from runtime.tool_executor import MAX_OUTPUT_CHARS, PersistentShell, ToolExecutor
 
@@ -483,6 +713,7 @@ class OpenRouterExecutionBackend(BaseApiBackend):
 
         MAX_ITERATIONS = 20
         aggregated_text = ""
+        requested_tools_enabled = self.tools_enabled
 
         shell = PersistentShell(cwd=work_dir)
         await shell.start()
@@ -496,15 +727,83 @@ class OpenRouterExecutionBackend(BaseApiBackend):
             )
 
             for _iteration in range(MAX_ITERATIONS):
+                self.tools_enabled = requested_tools_enabled
                 # Prune old tool results before sending to avoid context overflow.
                 messages = self._prune_messages(messages, self._CONTEXT_CHAR_BUDGET)
+                loading_message = self._loading_message(model_name)
+                if loading_message:
+                    self._notify(loading_message)
 
-                text_chunk, tool_calls, finish_reason = await loop.run_in_executor(
-                    None, self._stream_iteration_sync, messages, model_name, loop
-                )
+                try:
+                    with ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"forge-{self.provider_name}") as http_executor:
+                        text_chunk, tool_calls, finish_reason = await loop.run_in_executor(
+                            http_executor, self._stream_iteration_sync, messages, model_name, loop
+                        )
+                except error.HTTPError as exc:
+                    detail = self._read_http_error_detail(exc)
+                    if self.non_stream_fallback_enabled and self._is_streaming_unsupported_error(exc.code, detail):
+                        self._notify("⚠️ Local server rejected streaming; retrying without streaming.")
+                        try:
+                            with ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"forge-{self.provider_name}-plain") as http_executor:
+                                text_chunk, tool_calls, finish_reason = await loop.run_in_executor(
+                                    http_executor, self._non_stream_iteration_sync, messages, model_name, loop
+                                )
+                        except error.HTTPError as non_stream_exc:
+                            detail = self._read_http_error_detail(non_stream_exc)
+                            message = self._friendly_error_message(
+                                non_stream_exc.code,
+                                detail,
+                                str(non_stream_exc.reason or ""),
+                                model_name,
+                            )
+                            self._notify(f"❌ {message[:300]}")
+                            self.mark_failure(message)
+                            return non_stream_exc.code or -1
+                        except Exception as non_stream_exc:
+                            message = str(non_stream_exc)
+                            self._notify(f"❌ {message[:300]}")
+                            self.mark_failure(message)
+                            return -1
+                    else:
+                        if self.tools_enabled and self._is_tools_unsupported_error(exc.code, detail):
+                            requested_tools_enabled = False
+                            self._notify(
+                                "⚠️ This local model does not support tools; retrying in chat-only mode. "
+                                "Pick a tool-capable local model for agentic coding."
+                            )
+                            continue
+                        message = self._friendly_error_message(
+                            exc.code,
+                            detail,
+                            str(exc.reason or ""),
+                            model_name,
+                        )
+                        self._notify(f"❌ {message[:300]}")
+                        self.mark_failure(message)
+                        return exc.code or -1
 
                 if text_chunk:
                     aggregated_text = text_chunk
+
+                if (
+                    text_chunk
+                    and not tool_calls
+                    and self.non_stream_fallback_enabled
+                    and self._looks_like_degenerate_text(text_chunk)
+                ):
+                    self._notify("⚠️ Local model returned token noise; retrying in compatibility mode.")
+                    try:
+                        with ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"forge-{self.provider_name}-compat") as http_executor:
+                            text_chunk, tool_calls, finish_reason = await loop.run_in_executor(
+                                http_executor, self._non_stream_iteration_sync, messages, model_name, loop
+                            )
+                    except Exception as retry_exc:
+                        message = str(retry_exc)
+                        self._notify(f"❌ {message[:300]}")
+                        self.mark_failure(message)
+                        return -1
+                    if text_chunk:
+                        aggregated_text = text_chunk
 
                 if tool_calls:
                     # 🔧-prefixed line: parser increments tool_use_count,
@@ -561,8 +860,8 @@ class OpenRouterExecutionBackend(BaseApiBackend):
             return 0
 
         except error.HTTPError as exc:
-            detail = exc.read().decode("utf-8", errors="replace")
-            message = self._friendly_http_error_message(
+            detail = self._read_http_error_detail(exc)
+            message = self._friendly_error_message(
                 exc.code,
                 detail,
                 str(exc.reason or ""),
@@ -582,8 +881,170 @@ class OpenRouterExecutionBackend(BaseApiBackend):
             self.mark_failure(message)
             return -1
         finally:
+            self.tools_enabled = self._default_tools_enabled
             self._active_shell = None
             await shell.stop()
 
     async def write_stdin(self, text: str) -> None:
         """No-op: HTTP backends don't have stdin."""
+
+
+class LocalLLMExecutionBackend(OpenRouterExecutionBackend):
+    """OpenAI-compatible local LLM backend, e.g. Ollama, LM Studio, or vLLM."""
+
+    def __init__(
+        self,
+        base_url: str,
+        on_output: Callable[[str], None],
+        model_name: str = "",
+        timeout: int = 120,
+        startup_timeout: int | None = None,
+        api_key: str = "",
+        app_name: str = "Forge",
+        tools_enabled: bool = False,
+        disable_thinking: bool = True,
+        prefer_streaming: bool = False,
+    ):
+        super().__init__(
+            api_key=api_key,
+            base_url=base_url,
+            on_output=on_output,
+            model_name=model_name,
+            timeout=timeout,
+            startup_timeout=startup_timeout or max(timeout, 300),
+            app_name=app_name,
+            provider_name="local",
+            include_stream_usage=False,
+            require_api_key=False,
+            tools_enabled=tools_enabled,
+        )
+        self.disable_thinking = disable_thinking
+        self.prefer_streaming = prefer_streaming
+        self.non_stream_fallback_enabled = True
+        self.buffer_stream_text_events = True
+        self.send_app_headers = False
+        self._think_filter = _ThinkBlockFilter()
+        self._compatibility_retry: bool = False
+
+    def _request_extra_options(self, *, stream: bool) -> dict:
+        if self._compatibility_retry:
+            return {
+                "temperature": 0,
+                "top_p": 1,
+                "max_tokens": 512,
+            }
+        return {}
+
+    def _build_messages(self, prompt: str) -> list[dict]:
+        if self.disable_thinking and "qwen3" in self.model_name.casefold() and "/no_think" not in prompt.casefold():
+            prompt = f"{prompt.rstrip()}\n\n/no_think"
+        if not self.tools_enabled:
+            context = self.project_context.strip()
+            if context:
+                prompt = f"{context}\n\nUser request:\n{prompt}"
+            return [{"role": "user", "content": prompt}]
+        return super()._build_messages(prompt)
+
+    def _reset_output_filter(self) -> None:
+        self._think_filter = _ThinkBlockFilter()
+
+    def _filter_output_text(self, text: str) -> str:
+        if self.disable_thinking:
+            return self._think_filter.feed(text)
+        return text
+
+    def _filter_stream_events(self, events: list[str]) -> list[str]:
+        if not self.disable_thinking:
+            return events
+        filtered: list[str] = []
+        for event in events:
+            decoded = decode_forge_event(event)
+            if decoded and str(decoded.get("type") or "").casefold() == "thinking":
+                continue
+            filtered.append(event)
+        return filtered
+
+    def _looks_like_degenerate_text(self, text: str) -> bool:
+        cleaned = "".join(ch for ch in text.strip() if not ch.isspace())
+        if len(cleaned) < 32:
+            return False
+
+        digit_count = sum(ch.isdigit() for ch in cleaned)
+        alpha_count = sum(ch.isalpha() for ch in cleaned)
+        punctuation_count = sum((not ch.isalnum()) for ch in cleaned)
+        longest_run = 1
+        current_run = 1
+        for prev, cur in zip(cleaned, cleaned[1:]):
+            if cur == prev:
+                current_run += 1
+                longest_run = max(longest_run, current_run)
+            else:
+                current_run = 1
+
+        words = [part for part in "".join(ch if ch.isalpha() else " " for ch in text).split() if len(part) >= 2]
+        digit_ratio = digit_count / len(cleaned)
+        alpha_ratio = alpha_count / len(cleaned)
+        punctuation_ratio = punctuation_count / len(cleaned)
+        if longest_run >= 12:
+            return True
+        if digit_ratio >= 0.35 and len(words) < 5:
+            return True
+        if alpha_ratio < 0.35 and punctuation_ratio > 0.12 and len(words) < 4:
+            return True
+        return False
+
+    def _stream_iteration_sync(
+        self,
+        messages: list[dict],
+        model_name: str,
+        loop: asyncio.AbstractEventLoop,
+    ) -> "tuple[str, list[dict], str]":
+        if not self.prefer_streaming:
+            return self._non_stream_iteration_sync(messages, model_name, loop)
+        text, tool_calls, finish_reason = super()._stream_iteration_sync(messages, model_name, loop)
+        if not self._cancel_event.is_set() and not text and not tool_calls and not finish_reason:
+            loop.call_soon_threadsafe(
+                self._notify,
+                "⚠️ Local server returned an unreadable stream; retrying without streaming.",
+            )
+            return self._non_stream_iteration_sync(messages, model_name, loop)
+        return text, tool_calls, finish_reason
+
+    def _non_stream_iteration_sync(
+        self,
+        messages: list[dict],
+        model_name: str,
+        loop: asyncio.AbstractEventLoop,
+    ) -> "tuple[str, list[dict], str]":
+        self._compatibility_retry = True
+        try:
+            return super()._non_stream_iteration_sync(messages, model_name, loop)
+        finally:
+            self._compatibility_retry = False
+
+    def _loading_message(self, model_name: str) -> str:
+        selected = model_name.strip() or "local model"
+        return f"⚙️ Loading local model {selected}; first response can take a while on cold GPU start."
+
+    def _friendly_error_message(self, code: int, detail: str, reason: str, model_name: str) -> str:
+        raw_message = self._extract_error_message(detail, reason) or "Unknown local LLM error"
+        selected_model = model_name.strip() or "current model"
+        if code == 404:
+            return (
+                f"Local LLM endpoint or model was not found for '{selected_model}'. "
+                "Check LOCAL_LLM_BASE_URL and pull/load the selected model. "
+                f"Details: {raw_message}"
+            )
+        if code in (401, 403):
+            return (
+                "Local LLM server rejected the request. If your server requires auth, "
+                "set LOCAL_LLM_API_KEY. "
+                f"Details: {raw_message}"
+            )
+        if code == 400 and self._is_tools_unsupported_error(code, detail):
+            return (
+                f"The selected local model '{selected_model}' does not support tools. "
+                "Forge can chat with it, but agentic coding requires a tool-capable local model. "
+                f"Details: {raw_message}"
+            )
+        return f"Local LLM HTTP {code}: {raw_message}"

@@ -4,7 +4,7 @@ from pathlib import Path
 from time import monotonic
 from typing import Awaitable, Callable
 
-from core.providers import is_api_provider, provider_transport
+from core.providers import is_api_provider, provider_default_model, provider_supports_thinking, provider_transport
 from core.task_models import ProviderRuntime, TaskResult, utc_now_iso
 
 
@@ -21,26 +21,20 @@ _MAX_TREE_CHARS = 4000   # keep system prompt small enough to leave room for rea
 _MAX_FILE_CHARS = 3000   # per-file content cap for key files
 
 
-def _build_project_context(session) -> str:
+def _base_project_context(session, opening_lines: list[str]) -> str:
     """Build a system prompt describing the current project for API providers."""
     try:
         file_mgr = session.file_mgr
         cwd = file_mgr.get_working_dir()
-        lines = [
-            "You are an expert software engineering assistant with full tool access.",
-            "You can and should execute bash commands, read files, write files, and edit files to complete tasks.",
-            "Always verify your changes by running tests or checking output.",
-            "",
-            f"Working directory: {cwd}",
-        ]
+        lines = [*opening_lines, "", f"Working directory: {cwd}"]
         # File tree (depth 3, truncated)
         try:
             tree = file_mgr.tree(max_depth=3)
             if len(tree) > _MAX_TREE_CHARS:
                 tree = tree[:_MAX_TREE_CHARS] + "\n... (truncated)"
             lines += ["", "Project structure:", "```", tree, "```"]
-        except Exception:
-            pass
+        except Exception as exc:
+            log.debug("Failed to build project tree: %s", exc)
         # Try to read a README or main entry file for extra context
         for candidate in ("README.md", "README.rst", "README.txt", "pyproject.toml", "Cargo.toml", "package.json"):
             candidate_path = cwd / candidate
@@ -52,17 +46,41 @@ def _build_project_context(session) -> str:
                             content = content[:_MAX_FILE_CHARS] + "\n... (truncated)"
                         lines += ["", f"{candidate}:", "```", content, "```"]
                     break
-            except Exception:
-                pass
+            except Exception as exc:
+                log.debug("Failed to read candidate %s: %s", candidate, exc)
         return "\n".join(lines)
-    except Exception:
+    except Exception as exc:
+        log.debug("Failed to build base project context: %s", exc)
         return ""
+
+
+def _build_project_context(session) -> str:
+    return _base_project_context(session, [
+        "You are an expert software engineering assistant with full tool access.",
+        "You can and should execute bash commands, read files, write files, and edit files to complete tasks.",
+        "Use fetch_url only when the user asks for internet access or current external information.",
+        "Always verify your changes by running tests or checking output.",
+        "When you answer the user, write coherent complete sentences in the user's language; do not output disconnected words.",
+    ])
+
+
+def _build_local_agent_context(session) -> str:
+    return _base_project_context(session, [
+        "You are Forge, a local software engineering agent.",
+        "Use the provided tools to inspect and edit the project. Do not pretend you used a tool: call it when needed.",
+        "Keep reasoning internal. If you send text to the user, use coherent complete sentences, not fragments or keyword lists.",
+        "Final answer: briefly state what you changed, what you checked, and any remaining issue. Use the user's language.",
+        "Prefer small, safe edits and verify them with tests or commands when possible.",
+    ])
 
 
 def _configure_api_manager(manager, session, current_prompt: str) -> None:
     """Populate thinking_enabled, conversation_history, and project_context on an API backend."""
     thinking_mode = (session.ui_preferences or {}).get("thinking_mode", "compact").strip().lower()
-    manager.thinking_enabled = thinking_mode in ("compact", "full")
+    manager.thinking_enabled = (
+        thinking_mode in ("compact", "full")
+        and provider_supports_thinking(getattr(manager, "provider_name", "openrouter"), getattr(manager, "model_name", ""))
+    )
 
     messages: list[dict] = []
     for result in session.history[-_HISTORY_WINDOW:]:
@@ -72,8 +90,19 @@ def _configure_api_manager(manager, session, current_prompt: str) -> None:
             messages.append({"role": "user", "content": user_text})
         if assistant_text:
             messages.append({"role": "assistant", "content": assistant_text})
-    manager.conversation_history = messages
-    manager.project_context = _build_project_context(session)
+    if getattr(manager, "provider_name", "") == "local" and not getattr(manager, "tools_enabled", False):
+        manager.conversation_history = []
+        manager.project_context = (
+            "You are a concise helpful assistant. Answer the user's message directly in the user's language. "
+            "Use coherent complete sentences. Do not output disconnected words or keyword lists. "
+            "Do not invent tool calls, artifacts, file edits, or shell commands."
+        )
+    elif getattr(manager, "provider_name", "") == "local":
+        manager.conversation_history = messages[-4:]
+        manager.project_context = _build_local_agent_context(session)
+    else:
+        manager.conversation_history = messages
+        manager.project_context = _build_project_context(session)
 
 
 # Directories whose contents are never authored by the user / AI agents.
@@ -144,6 +173,8 @@ class ExecutionService:
         interaction_event = asyncio.Event()
         interaction_event.set()  # Not waiting by default
         returncode_holder = [0]
+        last_activity_at = [monotonic()]
+        task_timed_out = [False]
         loop = asyncio.get_running_loop()
 
         _is_cli = not is_api_provider(provider_name)
@@ -189,7 +220,8 @@ class ExecutionService:
                 )
                 stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=5)
                 diff_out = stdout.decode("utf-8", errors="replace")
-            except Exception:
+            except Exception as exc:
+                log.debug("git diff failed for %s: %s", rel, exc)
                 return
 
             if not diff_out.strip():
@@ -198,7 +230,8 @@ class ExecutionService:
                     n = len(p.read_text(errors="replace").splitlines())
                     diff_out = ""  # no git diff available
                     diff_event = f"📊 {rel}  +{n} -0 (new file)"
-                except Exception:
+                except Exception as exc:
+                    log.debug("Failed to read new file %s: %s", p, exc)
                     return
             else:
                 diff_event = format_diff_notify_from_git(str(rel), diff_out)
@@ -209,13 +242,14 @@ class ExecutionService:
         def on_stream_line(line: str):
             actionable = runtime.parser.get_actionable_line(line)
             if actionable:
+                last_activity_at[0] = monotonic()
                 # Detect interaction requests from the parser
                 # actionable might look like "❓ Title" or "✅ Title"
                 # but better check the parser's event category directly
                 try:
                     loop.call_soon_threadsafe(stream_queue.put_nowait, actionable)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    log.debug("Failed to enqueue stream event: %s", exc)
 
                 # CLI mode: emit git diff when a file-write event is detected.
                 # API mode: ToolExecutor already emits 📊 events directly.
@@ -238,8 +272,8 @@ class ExecutionService:
                 if stream_event_callback:
                     try:
                         stream_event_callback(actionable)
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        log.debug("Stream event callback error: %s", exc)
 
         async def handle_interaction(kind: str, text: str):
             interaction_event.clear()
@@ -277,13 +311,62 @@ class ExecutionService:
                     else:
                         text = status_formatter(progress) if status_formatter else progress
                     await status_callback(text)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    log.debug("Status callback error: %s", exc)
 
         if is_api_provider(provider_name):
             _configure_api_manager(runtime.manager, session, prompt)
             runtime.manager._cwd = work_dir  # pass cwd to ToolExecutor inside the backend
             runtime.manager._interaction_callback = interaction_callback  # ask_user tool
+        elif hasattr(runtime.manager, "thinking_mode"):
+            selected_model = getattr(runtime.manager, "model_name", "") or session.provider_models.get(provider_name, "")
+            if provider_supports_thinking(provider_name, selected_model):
+                runtime.manager.thinking_mode = (session.ui_preferences or {}).get("thinking_mode", "compact")
+            else:
+                runtime.manager.thinking_mode = "off"
+
+        async def startup_watchdog():
+            raw_timeout = getattr(runtime.manager, "startup_timeout", 30)
+            try:
+                startup_timeout = max(1.0, float(raw_timeout))
+            except (TypeError, ValueError):
+                startup_timeout = 30.0
+
+            while not task_done.is_set():
+                await asyncio.sleep(min(1.0, startup_timeout))
+                if task_done.is_set():
+                    return
+                if monotonic() - last_activity_at[0] < startup_timeout:
+                    continue
+
+                task_timed_out[0] = True
+                selected_model = (
+                    getattr(runtime.manager, "model_name", "")
+                    or session.provider_models.get(provider_name, "")
+                    or provider_default_model(provider_name)
+                    or "default"
+                )
+                message = (
+                    f"No provider response after {startup_timeout:g}s while starting "
+                    f"{provider_name} ({selected_model}). Check the selected model, credentials, "
+                    "or provider availability."
+                )
+                log.warning(message)
+                returncode_holder[0] = -1
+                session.last_task_result.error_text = message
+                runtime.manager.mark_failure(message)
+                if stream_event_callback:
+                    try:
+                        stream_event_callback(f"❌ {message}")
+                    except Exception as exc:
+                        log.debug("Startup watchdog stream callback error: %s", exc)
+                try:
+                    await runtime.manager.stop()
+                except Exception:
+                    log.exception("Failed to stop provider runtime after startup timeout")
+                task_done.set()
+                interaction_event.set()
+                return
 
         async def run_agent():
             started_at = monotonic()
@@ -292,18 +375,22 @@ class ExecutionService:
                 # but since it's a subprocess, we just wait for it to finish.
                 # The interaction happens via write_stdin in handle_interaction.
                 rc = await runtime.manager.send_command(prompt, cwd=work_dir)
-                returncode_holder[0] = rc
+                if not task_timed_out[0]:
+                    returncode_holder[0] = rc
             except Exception as exc:
                 log.error("Execution error: %s", exc, exc_info=True)
-                returncode_holder[0] = -1
-                session.last_task_result.error_text = str(exc)
-                runtime.manager.mark_failure(str(exc))
+                if not task_timed_out[0]:
+                    returncode_holder[0] = -1
+                    session.last_task_result.error_text = str(exc)
+                    runtime.manager.mark_failure(str(exc))
             finally:
-                session.last_task_result.duration_ms = int((monotonic() - started_at) * 1000)
+                if not session.last_task_result.duration_ms:
+                    session.last_task_result.duration_ms = int((monotonic() - started_at) * 1000)
                 task_done.set()
                 interaction_event.set()  # Unblock anything waiting
 
-        asyncio.create_task(run_agent())
+        agent_task = asyncio.create_task(run_agent())
+        watchdog_task = asyncio.create_task(startup_watchdog())
         # The status loop polls parser state and edits the status message.
         # When a stream renderer is active it handles all edits itself, so
         # running the loop in parallel would cause conflicting edits.
@@ -315,6 +402,17 @@ class ExecutionService:
         await asyncio.sleep(0.5)
         runtime.manager.set_stream_callback(None)
         runtime.manager.set_final_result_callback(None)
+        watchdog_task.cancel()
+        try:
+            await watchdog_task
+        except asyncio.CancelledError:
+            pass
+        if task_timed_out[0] and not agent_task.done():
+            agent_task.cancel()
+            try:
+                await agent_task
+            except asyncio.CancelledError:
+                pass
         if status_task is not None:
             status_task.cancel()
             try:

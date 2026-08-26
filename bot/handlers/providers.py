@@ -48,6 +48,17 @@ MODEL_CATALOG: dict[str, list[tuple[str, str]]] = {
         ("opus", "alias to latest opus"),
         ("haiku", "alias to latest haiku"),
     ],
+    "openrouter": [
+        ("qwen/qwen3-coder:free", "free coding model [default]"),
+        ("minimax/minimax-m2.5:free", "free general model"),
+        ("openrouter/free", "best-effort free router"),
+    ],
+    "local": [
+        ("qwen2.5-coder:7b", "local coding model [default]"),
+        ("qwen2.5-coder:14b", "stronger local coding"),
+        ("devstral:latest", "local agentic coding"),
+        ("llama3.1:8b", "local chat fallback"),
+    ],
 }
 
 
@@ -131,7 +142,7 @@ async def handle_model_overview(
             )
     sections.append(
         "Usage: <code>/model qwen qwen-coder-plus</code> or "
-        "<code>/model codex default</code>."
+        "<code>/model local qwen2.5-coder:7b</code>."
     )
     await core.send_structured(message, sections)
 

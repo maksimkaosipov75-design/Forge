@@ -113,6 +113,7 @@ class CliUi:
             "codex": "bright_cyan",
             "claude": "orange3",
             "openrouter": "green3",
+            "local": "bright_red",
         }
         return mapping.get(provider, "cyan")
 
@@ -125,6 +126,7 @@ class CliUi:
             "codex": "systems · backend · refactor",
             "claude": "ui · ux · writing",
             "openrouter": "api · planning · review",
+            "local": "private · local · coding",
         }
         return mapping.get(provider, "general purpose")
 
@@ -134,6 +136,7 @@ class CliUi:
             "codex": "\033[96m",
             "claude": "\033[33m",
             "openrouter": "\033[92m",
+            "local": "\033[91m",
         }
         return mapping.get(provider, "\033[36m")
 
@@ -388,7 +391,7 @@ class CliUi:
                 "/status",
                 "/limits",
                 "/providers",
-                "/provider <qwen|codex|claude>",
+                "/provider <qwen|codex|claude|openrouter|local>",
                 "/plan <task>",
                 "/orchestrate <task>",
                 "/runs",

@@ -1,9 +1,10 @@
 import json
 import logging
 import sqlite3
+from contextlib import contextmanager
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from core.orchestrator import OrchestrationPlan, PlannedSubtask
 from core.provider_status import ProviderHealth
@@ -23,10 +24,23 @@ class SessionStore:
         self.db_path = self.sessions_root / "session_store.sqlite3"
         self._init_db()
 
-    def _connect(self) -> sqlite3.Connection:
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
+        """Open the store, commit or roll back, and always close.
+
+        sqlite3.Connection is its own context manager, but that only manages the
+        *transaction* - it commits on success, rolls back on error, and leaves
+        the connection open. Every call here used to leak one. On Linux nothing
+        visibly breaks; on Windows the database file stays locked, so anything
+        that later tries to remove the directory fails with "file in use".
+        """
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
-        return conn
+        try:
+            with conn:
+                yield conn
+        finally:
+            conn.close()
 
     def _init_db(self):
         with self._connect() as conn:

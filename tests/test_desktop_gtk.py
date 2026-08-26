@@ -3,20 +3,31 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from core.task_models import TaskRun
-from desktop.gtk.app import (
-    DRAWER_TRANSITION_MS,
-    INSPECTOR_WIDTH,
-    MESSAGE_TRANSITION_MS,
-    SIDEBAR_WIDTH,
-    format_recent_run_label,
-    format_stream_event_for_chat,
-    format_task_event_label,
-    parse_unified_diff_preview,
-    render_run_artifact_summary,
-    render_run_chat_messages,
-)
+
+# The formatting helpers under test are pure, but they live in a module whose
+# first import is `gi`, so on a machine without PyGObject and GTK4 the whole
+# file fails to load rather than skipping. Worth moving them out of the GTK
+# module eventually; until then, skip rather than fail.
+try:
+    from desktop.gtk.app import (
+        DRAWER_TRANSITION_MS,
+        INSPECTOR_WIDTH,
+        MESSAGE_TRANSITION_MS,
+        SIDEBAR_WIDTH,
+        format_recent_run_label,
+        format_stream_event_for_chat,
+        format_task_event_label,
+        parse_unified_diff_preview,
+        render_run_artifact_summary,
+        render_run_chat_messages,
+    )
+except Exception as exc:  # pragma: no cover - depends on the machine
+    GTK_UNAVAILABLE_REASON = f"GTK desktop bindings unavailable: {exc}"
+else:
+    GTK_UNAVAILABLE_REASON = ""
 
 
+@unittest.skipIf(GTK_UNAVAILABLE_REASON, GTK_UNAVAILABLE_REASON)
 class DesktopGtkFormattingTests(unittest.TestCase):
     def test_desktop_uses_fixed_overlay_drawers_instead_of_resizable_panes(self):
         source = (Path(__file__).resolve().parents[1] / "desktop/gtk/app.py").read_text(encoding="utf-8")

@@ -28,7 +28,7 @@ class TaskResultTests(unittest.TestCase):
         result = TaskResult(exit_code=7, duration_ms=6500)
 
         self.assertEqual(result.short_status, "⚠️ 7")
-        self.assertEqual(result.duration_text, "6.5с")
+        self.assertEqual(result.duration_text, "6.5s")
 
     def test_finished_or_started_at_prefers_finished_at(self):
         result = TaskResult(started_at="2026-04-04T10:00:00+00:00", finished_at="2026-04-04T10:01:00+00:00")

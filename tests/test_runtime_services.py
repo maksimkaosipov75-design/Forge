@@ -324,6 +324,15 @@ class OrchestratorServiceTests(unittest.TestCase):
         class DummyContainer:
             provider_paths = {"qwen": "qwen", "codex": "codex", "claude": "claude"}
 
+            # Child planning became AI-driven and asks the container for a
+            # planning provider before it tries anything. That call is not
+            # inside the try/except that guards the planning itself, so a stub
+            # without it raises rather than falling back. Returning None is the
+            # "no planner configured" answer, which is what this test wants:
+            # the default impl/verify split.
+            def pick_planning_provider(self, session):
+                return None
+
         service = OrchestratorService(DummyContainer(), execution_service=None)
         plan = OrchestrationPlan(
             prompt="Build a complex backend service",
@@ -352,7 +361,14 @@ class OrchestratorServiceTests(unittest.TestCase):
             ],
         )
 
-        expanded = service._expand_subtask_into_children(plan, plan.subtasks[0])
+        # The method gained a session parameter and became a coroutine when
+        # child planning was made AI-driven; this call had not followed.
+        # With a bare session and no execution service the AI path fails and
+        # the default impl/verify split is used, which is what is asserted.
+        session = type("S", (), {"runtimes": {}})()
+        expanded = asyncio.run(
+            service._expand_subtask_into_children(session, plan, plan.subtasks[0])
+        )
 
         self.assertTrue(expanded)
         self.assertEqual(plan.subtasks[0].parent_subtask_id, "backend")

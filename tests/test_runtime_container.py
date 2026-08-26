@@ -5,6 +5,7 @@ from pathlib import Path
 
 from core.config import Settings
 from core.credential_store import CredentialStore
+from core.openrouter_catalog import ModelResolveResult
 from core.file_manager import FileManager
 from core.parser import LogParser
 from core.provider_status import ProviderHealth
@@ -253,6 +254,17 @@ class RuntimeContainerTests(unittest.TestCase):
             container = RuntimeContainer(sessions_root=Path(tmpdir), credential_store=store)
             session = container.get_session(100)
             session.provider_models["openrouter"] = "gpt-5.3-codex"
+
+            # Without this stub the test asks the real OpenRouter catalog over
+            # the network and passes or fails according to what OpenRouter
+            # happens to offer today - at the time of writing it resolves
+            # "gpt-5.3-codex" to openai/gpt-5.3-codex and the assertion below
+            # fails. What is under test is validate_provider_model's handling
+            # of a "missing" resolution, not the catalog's contents.
+            container.openrouter_catalog.resolve_model = lambda query, refresh=False: ModelResolveResult(
+                status="missing",
+                message=f"No OpenRouter model matched '{query}'.",
+            )
 
             ok, message = container.validate_provider_model(session, "openrouter")
 

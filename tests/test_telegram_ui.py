@@ -27,7 +27,7 @@ class TelegramUiTests(unittest.TestCase):
             changed_files=["/tmp/project/app.py"],
         )
 
-        self.assertIn("<b>✅ Задача выполнена</b>", sections)
+        self.assertIn("<b>✅ Task complete</b>", sections)
         self.assertIn("• <code>new.py</code>", sections)
         self.assertIn("• <code>app.py</code>", sections)
 

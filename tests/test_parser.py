@@ -21,7 +21,7 @@ class LogParserTests(unittest.TestCase):
 
         parser.feed("🏁 Завершено (success): 123ms")
         self.assertFalse(parser.state.is_busy)
-        self.assertIn("Задача завершена", parser.state.current_action)
+        self.assertIn("Task complete", parser.state.current_action)
 
     def test_clear_full_buffer_resets_transient_state(self):
         parser = LogParser()
@@ -35,7 +35,7 @@ class LogParserTests(unittest.TestCase):
         self.assertEqual(parser.full_buffer, [])
         self.assertEqual(parser.final_result, "")
         self.assertEqual(parser.state.tool_use_count, 0)
-        self.assertEqual(parser.state.current_action, "Ожидание команды")
+        self.assertEqual(parser.state.current_action, "Waiting for command")
         self.assertEqual(parser.state.last_input_tokens, 0)
         self.assertEqual(parser.state.last_output_tokens, 0)
 

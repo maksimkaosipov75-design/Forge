@@ -88,7 +88,7 @@ class FormatTaskResultSectionsTests(unittest.TestCase):
             new_files=[],
             changed_files=[],
         )
-        self.assertEqual(sections, ["<b>✅ Задача выполнена</b>"])
+        self.assertEqual(sections, ["<b>✅ Task complete</b>"])
 
     def test_new_files_listed(self):
         sections = format_task_result_sections(

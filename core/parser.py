@@ -310,7 +310,12 @@ class LogParser:
             if line.startswith("💬 "):
                 text_lines.append(line[2:])
         if text_lines:
-            return "\n".join(text_lines)
+            # 💬 events from API backends are streaming deltas, often a few
+            # characters or words each. Joining with newlines turns a normal
+            # answer into a broken word list when the final-result callback is
+            # unavailable (e.g. cancelled UI/status path). Concatenate deltas
+            # exactly as streamed; paragraph newlines are already inside them.
+            return "".join(text_lines)
         # Last-resort fallback: raw buffer, but skip protocol/metadata lines
         # (FORGE_EVENT, 🧠 thinking, 🏁 done, 🔢 usage) so they never leak
         # into the displayed answer.

@@ -11,9 +11,13 @@ from __future__ import annotations
 
 import asyncio
 import glob as _glob
+import logging
 import uuid
 from pathlib import Path
+
+log = logging.getLogger(__name__)
 from typing import Awaitable, Callable
+from urllib import error as _url_error, request as _url_request
 
 
 MAX_OUTPUT_CHARS = 8000
@@ -147,6 +151,24 @@ TOOL_DEFINITIONS: list[dict] = [
     {
         "type": "function",
         "function": {
+            "name": "fetch_url",
+            "description": (
+                "Fetch a web page by URL when the user explicitly asks for internet access "
+                "or current external information. Returns plain text/html truncated for context."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "HTTP or HTTPS URL to fetch."},
+                    "timeout": {"type": "integer", "description": "Timeout in seconds. Defaults to 20.", "default": 20},
+                },
+                "required": ["url"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "ask_user",
             "description": (
                 "Ask the user a question and wait for their answer. "
@@ -250,13 +272,18 @@ class PersistentShell:
                 self._proc.stdin.write(b"exit 0\n")
                 await self._proc.stdin.drain()
                 await asyncio.wait_for(self._proc.wait(), timeout=2)
-            except Exception:
+            except (Exception, asyncio.TimeoutError):
                 pass
-            try:
-                self._proc.kill()
-                await self._proc.wait()
-            except Exception:
-                pass
+            if self._proc and self._proc.returncode is None:
+                try:
+                    self._proc.terminate()
+                    await asyncio.wait_for(self._proc.wait(), timeout=5)
+                except (Exception, asyncio.TimeoutError):
+                    try:
+                        self._proc.kill()
+                        await self._proc.wait()
+                    except Exception as exc:
+                        log.debug("Failed to kill process: %s", exc)
         self._proc = None
 
     async def run(
@@ -373,6 +400,11 @@ class ToolExecutor:
                     tool_args.get("pattern", ""),
                     tool_args.get("base_dir", ""),
                 )
+            if tool_name == "fetch_url":
+                return await self._fetch_url(
+                    tool_args.get("url", ""),
+                    int(tool_args.get("timeout", 20)),
+                )
             if tool_name == "search_in_files":
                 return await self._search_in_files(
                     tool_args.get("pattern", ""),
@@ -394,7 +426,17 @@ class ToolExecutor:
         p = Path(path)
         if not p.is_absolute():
             p = self.cwd / p
-        return p.resolve()
+        resolved = p.resolve()
+        if not self._is_within_workspace(resolved):
+            raise PermissionError(f"path escapes working directory: {path}")
+        return resolved
+
+    def _is_within_workspace(self, candidate: Path) -> bool:
+        try:
+            candidate.relative_to(self.cwd)
+            return True
+        except ValueError:
+            return False
 
     async def _bash(self, command: str, timeout: int = 30) -> str:
         timeout = min(max(timeout, 1), BASH_TIMEOUT_MAX)
@@ -418,8 +460,8 @@ class ToolExecutor:
         except asyncio.TimeoutError:
             try:
                 proc.kill()
-            except Exception:
-                pass
+            except Exception as exc:
+                log.debug("Failed to kill timed-out process: %s", exc)
             return f"[timeout after {timeout}s]"
         output = stdout.decode("utf-8", errors="replace")
         if len(output) > MAX_OUTPUT_CHARS:
@@ -450,8 +492,8 @@ class ToolExecutor:
         if target.exists():
             try:
                 old_content = target.read_text(errors="replace")
-            except Exception:
-                pass
+            except Exception as exc:
+                log.debug("Failed to read old content of %s: %s", target, exc)
 
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content)
@@ -497,14 +539,45 @@ class ToolExecutor:
     def _glob_files(self, pattern: str, base_dir: str = "") -> str:
         base = self._resolve(base_dir) if base_dir else self.cwd
         self._notify(f"🔍 {pattern}")
-        matched = sorted(
-            str(Path(p).relative_to(base))
-            for p in _glob.glob(str(base / pattern), recursive=True)
-        )
+        matched = []
+        for raw_path in _glob.glob(str(base / pattern), recursive=True):
+            candidate = Path(raw_path).resolve()
+            if not self._is_within_workspace(candidate):
+                continue
+            matched.append(str(candidate.relative_to(base)))
+        matched.sort()
         result = "\n".join(matched)
         if len(result) > MAX_OUTPUT_CHARS:
             result = result[:MAX_OUTPUT_CHARS] + "\n... (truncated)"
         return result or "(no matches)"
+
+    async def _fetch_url(self, url: str, timeout: int = 20) -> str:
+        url = (url or "").strip()
+        if not url.startswith(("http://", "https://")):
+            return "Error: fetch_url only supports http:// and https:// URLs"
+        timeout = min(max(timeout, 1), 60)
+        self._notify(f"🌐 {url[:160]}")
+
+        def _fetch() -> str:
+            req = _url_request.Request(
+                url,
+                headers={"User-Agent": "ForgeLocalLLM/1.0"},
+                method="GET",
+            )
+            with _url_request.urlopen(req, timeout=timeout) as resp:
+                raw = resp.read(MAX_OUTPUT_CHARS + 1)
+                charset = resp.headers.get_content_charset() or "utf-8"
+                text = raw.decode(charset, errors="replace")
+                if len(raw) > MAX_OUTPUT_CHARS:
+                    text += "\n... (truncated)"
+                return text
+
+        try:
+            return await asyncio.get_running_loop().run_in_executor(None, _fetch)
+        except _url_error.URLError as exc:
+            return f"Error: network request failed: {exc.reason}"
+        except Exception as exc:
+            return f"Error: {exc}"
 
     async def _ask_user(self, question: str) -> str:
         if not question.strip():
@@ -531,14 +604,11 @@ class ToolExecutor:
         short_pat = pattern[:60] + ("…" if len(pattern) > 60 else "")
         self._notify(f"🔍 {short_pat!r}")
 
-        args = ["grep", "-rn", "--color=never"]
+        args = ["rg", "-n", "--no-heading", "--color=never"]
         if not case_sensitive:
             args.append("-i")
         if file_pattern:
-            args.extend(["--include", file_pattern])
-        # Exclude common noise directories
-        for skip in ("__pycache__", ".git", "node_modules", ".venv", "venv", "dist", "build"):
-            args.extend(["--exclude-dir", skip])
+            args.extend(["--glob", file_pattern])
         args.extend(["--", pattern, str(target)])
 
         try:
@@ -557,7 +627,7 @@ class ToolExecutor:
         except asyncio.TimeoutError:
             return "[timeout after 30s]"
         except FileNotFoundError:
-            # grep not available — fall back to Python
+            # ripgrep not available — fall back to Python
             return self._search_python(pattern, target, file_pattern, case_sensitive)
 
     def _search_python(
@@ -594,7 +664,8 @@ class ToolExecutor:
         for fpath in files:
             try:
                 text = fpath.read_text(errors="replace")
-            except Exception:
+            except Exception as exc:
+                log.debug("Failed to read %s for grep: %s", fpath, exc)
                 continue
             for lineno, line in enumerate(text.splitlines(), 1):
                 if rx.search(line):

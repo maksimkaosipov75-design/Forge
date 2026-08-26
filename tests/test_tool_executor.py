@@ -66,6 +66,13 @@ class ToolExecutorTests(unittest.TestCase):
         self.assertTrue(any(e.startswith("👁️") for e in self.events))
         self.assertFalse(any(e.startswith("FORGE_EVENT") for e in self.events))
 
+    def test_read_file_rejects_paths_outside_workspace(self):
+        outside = self.cwd.parent / "outside.txt"
+        outside.write_text("secret")
+        result = run(self.executor.execute("read_file", {"path": str(outside)}))
+        self.assertIn("Error", result)
+        self.assertIn("escapes working directory", result)
+
     # ------------------------------------------------------------------
     # write_file
     # ------------------------------------------------------------------
@@ -134,9 +141,21 @@ class ToolExecutorTests(unittest.TestCase):
         result = run(self.executor.execute("glob_files", {"pattern": "*.rs"}))
         self.assertIn("no matches", result)
 
+    def test_glob_files_ignores_outside_workspace_targets(self):
+        outside_dir = self.cwd.parent / "outside-glob"
+        outside_dir.mkdir(exist_ok=True)
+        (outside_dir / "a.py").write_text("print('x')")
+        result = run(self.executor.execute("glob_files", {"pattern": "../outside-glob/*.py"}))
+        self.assertIn("no matches", result)
+
     def test_glob_files_emits_raw_emoji_event(self):
         run(self.executor.execute("glob_files", {"pattern": "*.py"}))
         self.assertTrue(any(e.startswith("🔍") for e in self.events))
+
+    def test_fetch_url_rejects_non_http_urls(self):
+        result = run(self.executor.execute("fetch_url", {"url": "file:///etc/passwd"}))
+        self.assertIn("Error", result)
+        self.assertIn("http:// and https://", result)
 
     # ------------------------------------------------------------------
     # search_in_files

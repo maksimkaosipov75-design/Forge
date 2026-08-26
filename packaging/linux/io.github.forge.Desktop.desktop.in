@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Forge
+GenericName=AI Agent Workspace
+Comment=Multi-provider desktop workspace for Qwen, Codex, Claude, and OpenRouter
+Exec=@EXEC@
+Icon=io.github.forge.Desktop
+Terminal=false
+Categories=Development;Utility;
+Keywords=AI;Agent;Claude;Codex;Qwen;OpenRouter;GTK;
+StartupNotify=true
+StartupWMClass=io.github.forge.Desktop

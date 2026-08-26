@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.forge.Desktop</id>
+  <name>Forge</name>
+  <summary>Multi-provider AI agent workspace</summary>
+  <metadata_license>MIT</metadata_license>
+  <project_license>MIT</project_license>
+  <developer_name>Forge contributors</developer_name>
+  <launchable type="desktop-id">io.github.forge.Desktop.desktop</launchable>
+  <description>
+    <p>
+      Forge Desktop is a GTK4 workspace for running Qwen, Codex, Claude, and
+      OpenRouter coding agents from one local project interface.
+    </p>
+    <p>
+      The desktop shell includes provider switching, model selection, plan
+      review, task progress, changed-file previews, and run artifacts.
+    </p>
+  </description>
+  <categories>
+    <category>Development</category>
+    <category>Utility</category>
+  </categories>
+  <url type="homepage">https://github.com/maksimkaosipov75-design/Forge</url>
+  <releases>
+    <release version="0.2.0" date="2026-05-02">
+      <description>
+        <p>First GTK4 desktop preview with installable Linux desktop metadata.</p>
+      </description>
+    </release>
+  </releases>
+</component>

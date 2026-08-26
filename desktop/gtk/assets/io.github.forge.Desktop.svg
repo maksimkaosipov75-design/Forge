@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
+  <defs>
+    <linearGradient id="forge-bg" x1="18" y1="14" x2="108" y2="118" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#2b2b2b"/>
+      <stop offset="1" stop-color="#151515"/>
+    </linearGradient>
+    <linearGradient id="forge-accent" x1="32" y1="30" x2="98" y2="100" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#f09a5c"/>
+      <stop offset="0.55" stop-color="#d97745"/>
+      <stop offset="1" stop-color="#4c8dff"/>
+    </linearGradient>
+  </defs>
+  <rect width="128" height="128" rx="28" fill="url(#forge-bg)"/>
+  <rect x="10" y="10" width="108" height="108" rx="24" fill="none" stroke="#ffffff" stroke-opacity="0.08" stroke-width="2"/>
+  <path d="M33 34h62c4.4 0 8 3.6 8 8v31c0 4.4-3.6 8-8 8H61L44 96v-15H33c-4.4 0-8-3.6-8-8V42c0-4.4 3.6-8 8-8z" fill="#242424" stroke="#ffffff" stroke-opacity="0.11" stroke-width="2"/>
+  <path d="M44 54h32M44 68h21" fill="none" stroke="#eee8df" stroke-opacity="0.9" stroke-width="6" stroke-linecap="round"/>
+  <path d="M83 56l13 8-13 8v-6H70v-4h13v-6z" fill="url(#forge-accent)"/>
+  <circle cx="35" cy="35" r="5" fill="#9b6cff"/>
+  <circle cx="93" cy="35" r="5" fill="#3f9f68"/>
+</svg>

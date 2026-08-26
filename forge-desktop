@@ -1,0 +1,14 @@
+#!/usr/bin/env sh
+set -eu
+
+SOURCE=$0
+if command -v readlink >/dev/null 2>&1; then
+  RESOLVED=$(readlink -f -- "$SOURCE" 2>/dev/null || true)
+  if [ -n "${RESOLVED:-}" ]; then
+    SOURCE=$RESOLVED
+  fi
+fi
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$SOURCE")" && pwd)
+cd "$SCRIPT_DIR"
+exec python -m desktop.gtk.app "$@"

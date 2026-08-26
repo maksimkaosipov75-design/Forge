@@ -1,6 +1,6 @@
 # Forge
 
-TUI-first multi-provider coding CLI — Qwen · Claude · Codex · OpenRouter in one terminal.
+TUI-first multi-provider coding CLI — Qwen · Claude · Codex · OpenRouter · local LLMs in one terminal.
 
 Forge gives you one interface for:
 
@@ -40,13 +40,19 @@ Forge gives you one interface for:
   - [`codex`](https://github.com/openai/codex) — OpenAI Codex CLI
   - [`claude`](https://github.com/anthropics/claude-code) — Claude Code CLI
   - OpenRouter API key — for 200+ models via HTTP (no CLI required)
+  - Local OpenAI-compatible server — Ollama, LM Studio, vLLM, llama.cpp server, etc.
 
 ### Install
+
+On Arch/CachyOS or any distro with externally managed Python, do not use
+`pip install --user -e .`. Use a virtual environment:
 
 ```bash
 git clone https://github.com/maksimkaosipov75-design/Forge.git
 cd Forge
-pip install -e .
+python -m venv --system-site-packages .venv
+. .venv/bin/activate
+python -m pip install -e .
 ```
 
 For development tools (pytest, coverage):
@@ -56,6 +62,46 @@ pip install -r requirements-dev.txt
 ```
 
 ### Launch
+
+**Native GTK4 desktop preview:**
+
+```bash
+./forge-desktop
+```
+
+The repository-local launcher does not require installing the package. You can also run the module directly:
+
+```bash
+python -m desktop.gtk.app
+```
+
+To install Forge as a local Linux desktop app with a launcher, icon, and app
+menu entry:
+
+```bash
+./scripts/install_desktop.sh
+forge-desktop
+```
+
+The installer creates an isolated venv under `~/.local/share/forge-ai`, writes
+the command to `~/.local/bin/forge-desktop`, and installs XDG desktop metadata
+under `~/.local/share`. It uses `--system-site-packages` so GTK4/libadwaita and
+PyGObject can come from your distro packages.
+
+The desktop shell is the new GTK4/libadwaita frontend for Forge. It reuses the same provider runtime as the CLI and is being built toward a Claude Desktop/Cowork-style workspace with sessions, planning, task progress, diffs, files, and previews.
+
+Current desktop preview capabilities:
+
+- Provider switching and model override controls
+- Searchable OpenRouter model picker with catalog refresh
+- OpenRouter API key setup through the existing credential store
+- Single-agent prompt runs with live stream events
+- Plan preview and `Run Plan` orchestration
+- Live task rows for orchestrated subtasks
+- Touched-file and git numstat summary after runs
+- Artifact pane with saved run markdown preview
+- `Open Artifact` action for reloading the latest run artifact
+- Button-controlled sidebar and workspace inspector panels for resizable layouts
 
 **Textual TUI** (default):
 
@@ -76,6 +122,8 @@ forge run "fix the parser"
 forge orchestrate "build a small CLI app"
 ```
 
+On Linux, `forge-desktop` requires GTK4, libadwaita, and PyGObject from your system packages. The existing `forge` TUI remains the default terminal interface.
+
 ---
 
 ## Providers
@@ -86,12 +134,14 @@ forge orchestrate "build a small CLI app"
 | `codex`    | CLI       | Install `codex` CLI, run `codex auth` |
 | `claude`   | CLI       | Install `claude` CLI, run `claude auth` |
 | `openrouter` | API key | `/auth openrouter` inside Forge    |
+| `local`    | Local API | Run an OpenAI-compatible server; default: `http://127.0.0.1:11434/v1` |
 
 ### Switching providers
 
 ```
 /provider claude
 /provider openrouter
+/provider local
 ```
 
 ### Switching models
@@ -100,6 +150,34 @@ forge orchestrate "build a small CLI app"
 /model                        # show current model
 /model codex o3               # set model for a provider
 /model openrouter             # interactive model picker
+/model local qwen2.5-coder:7b # local model served by Ollama/LM Studio/etc.
+/model local tools          # choose a local model known to support tools
+/model local tools qwen     # pick a tool-capable local coding model
+/model local refresh          # refresh installed local models
+/model local pull devstral    # download with Ollama and select it
+/model local Qwen GGUF        # search local presets + Hugging Face candidates
+```
+
+Local models use OpenAI-compatible chat completions in chat-only mode by default,
+which matches LM Studio/Ollama chat behavior and avoids confusing smaller models
+with tool schemas. To run local agentic coding with file/shell tools, set
+`LOCAL_LLM_ENABLE_TOOLS=1` and choose a model marked as tool-capable. The
+interactive model picker also works for `local`: open it with `/model local`,
+search by name, alias, or Hugging Face repo, and press Enter. Installed models
+are selected immediately; not-installed models are downloaded through Ollama and
+selected. Local rows are labeled as `tools`, `chat-only`, or `tools?`; use
+`/model local tools` for a separate picker that only shows models marked as
+tool-capable for agentic coding. `D` in the Textual picker and `Download
+selected` in the desktop dialog do the same explicitly. Hugging Face results are
+installed as `hf.co/<repo-id>` model names. Configure with:
+
+```bash
+LOCAL_LLM_BASE_URL=http://127.0.0.1:11434/v1
+LOCAL_LLM_DEFAULT_MODEL=qwen2.5-coder:7b
+LOCAL_LLM_STARTUP_TIMEOUT=600   # cold GPU/model load grace period
+LOCAL_LLM_API_KEY=              # optional, for servers that require auth
+LOCAL_LLM_ENABLE_TOOLS=0        # set 1 only for tool-capable local agent models
+LOCAL_LLM_DISABLE_THINKING=1    # adds /no_think for local Qwen3 models by default
 ```
 
 ---
@@ -222,6 +300,14 @@ CLAUDE_CLI_PATH=claude
 # OpenRouter API (for /auth openrouter or direct key)
 OPENROUTER_API_KEY=
 
+# Local OpenAI-compatible LLM server
+LOCAL_LLM_BASE_URL=http://127.0.0.1:11434/v1
+LOCAL_LLM_DEFAULT_MODEL=qwen2.5-coder:7b
+LOCAL_LLM_API_KEY=
+LOCAL_LLM_STARTUP_TIMEOUT=600
+LOCAL_LLM_ENABLE_TOOLS=0
+LOCAL_LLM_DISABLE_THINKING=1
+
 # Rate limiting
 RATE_LIMIT_MAX_REQUESTS=20
 RATE_LIMIT_WINDOW_SECONDS=3600
@@ -304,7 +390,7 @@ forge/
 ├── runtime/                # Execution engine
 │   ├── container.py        # RuntimeContainer — dependency wiring
 │   ├── executor.py         # ExecutionService — task execution, file tracking
-│   ├── api_backends.py     # HTTP API backends (OpenRouter)
+│   ├── api_backends.py     # HTTP API backends (OpenRouter, local LLM)
 │   └── orchestrator_service.py  # OrchestratorService — multi-agent runs
 │
 ├── tests/                  # Test suite (unittest)

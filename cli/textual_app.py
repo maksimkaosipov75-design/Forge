@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64 as _base64
+import tempfile as _tempfile
 import json as _json
 import os as _os
 import re as _re
@@ -27,6 +28,15 @@ _HTML_TAG = _re.compile(r"<[^>]+>")
 # Clipboard helpers (copy / paste without external mandatory dependencies)
 # ---------------------------------------------------------------------------
 
+def _clipboard_fallback_file() -> Path:
+    """Where to stash clipboard text when no clipboard tool is available.
+
+    Hardcoding /tmp made this a no-op on Windows, where the directory does not
+    exist, so copy silently failed and paste silently returned nothing.
+    """
+    return Path(_tempfile.gettempdir()) / "forge-clipboard.txt"
+
+
 def _clipboard_copy(text: str) -> str:
     """Copy text to clipboard. Returns a status message."""
     # 1. Try native clipboard tools
@@ -35,6 +45,7 @@ def _clipboard_copy(text: str) -> str:
         ["xclip", "-selection", "clipboard"],
         ["xsel", "--clipboard", "--input"],
         ["pbcopy"],
+        ["clip.exe"],
     ):
         try:
             _subprocess.run(cmd, input=text, text=True, capture_output=True, timeout=3, check=True)
@@ -50,9 +61,9 @@ def _clipboard_copy(text: str) -> str:
         pass
     # 3. Temp file fallback
     try:
-        tmp = Path("/tmp/bridge-clipboard.txt")
+        tmp = _clipboard_fallback_file()
         tmp.write_text(text, encoding="utf-8")
-        return f"No clipboard tool — saved to {tmp}  (install wl-clipboard for native copy)"
+        return f"No clipboard tool — saved to {tmp}"
     except Exception:
         pass
     return "Copy failed. Install wl-clipboard: sudo pacman -S wl-clipboard"
@@ -65,6 +76,7 @@ def _clipboard_paste() -> str:
         ["xclip", "-selection", "clipboard", "-o"],
         ["xsel", "--clipboard", "--output"],
         ["pbpaste"],
+        ["powershell.exe", "-NoProfile", "-Command", "Get-Clipboard"],
     ):
         try:
             result = _subprocess.run(cmd, capture_output=True, text=True, timeout=3)
@@ -74,7 +86,7 @@ def _clipboard_paste() -> str:
             pass
     # Fallback: read from temp file written by _clipboard_copy()
     try:
-        tmp = Path("/tmp/bridge-clipboard.txt")
+        tmp = _clipboard_fallback_file()
         if tmp.exists():
             return tmp.read_text(encoding="utf-8")
     except Exception:

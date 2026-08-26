@@ -78,13 +78,24 @@ class RemoteControlManager:
         if current.is_running:
             return current
 
+        # start_new_session is POSIX-only; on Windows it raises. The Windows
+        # equivalent - detaching from the console and getting an own process
+        # group, so the bot survives the terminal closing and does not take
+        # Ctrl+C with it - is these creation flags.
+        if os.name == "nt":
+            detach_kwargs = {
+                "creationflags": subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS,
+            }
+        else:
+            detach_kwargs = {"start_new_session": True}
+
         with self.log_file.open("a", encoding="utf-8") as log_handle:
             process = subprocess.Popen(
                 [sys.executable, "main.py"],
                 cwd=self.repo_root,
                 stdout=log_handle,
                 stderr=subprocess.STDOUT,
-                start_new_session=True,
+                **detach_kwargs,
             )
 
         status = RemoteControlStatus(

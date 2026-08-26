@@ -338,6 +338,26 @@ class PersistentShell:
                         await self._proc.wait()
                     except Exception as exc:
                         log.debug("Failed to kill process: %s", exc)
+
+        # asyncio closes the subprocess transport from its __del__, which runs
+        # whenever the garbage collector gets to it - by then asyncio.run() has
+        # usually closed the loop, and the close fails with "Event loop is
+        # closed" followed by an "unclosed transport" ResourceWarning. Nothing
+        # breaks, but every run ends in a tracebackul of noise. Close it here,
+        # while the loop is still running.
+        if self._proc is not None:
+            if self._proc.stdin is not None:
+                try:
+                    self._proc.stdin.close()
+                except Exception as exc:
+                    log.debug("Failed to close shell stdin: %s", exc)
+            transport = getattr(self._proc, "_transport", None)
+            if transport is not None:
+                try:
+                    transport.close()
+                except Exception as exc:
+                    log.debug("Failed to close shell transport: %s", exc)
+
         self._proc = None
 
     async def run(
@@ -523,9 +543,19 @@ class ToolExecutor:
         except asyncio.TimeoutError:
             try:
                 proc.kill()
+                await proc.wait()
             except Exception as exc:
                 log.debug("Failed to kill timed-out process: %s", exc)
             return f"[timeout after {timeout}s]"
+        finally:
+            # Same reason as in PersistentShell.stop: leave this to __del__ and
+            # it runs after the loop is gone.
+            transport = getattr(proc, "_transport", None)
+            if transport is not None:
+                try:
+                    transport.close()
+                except Exception as exc:
+                    log.debug("Failed to close subprocess transport: %s", exc)
         output = stdout.decode("utf-8", errors="replace")
         if len(output) > MAX_OUTPUT_CHARS:
             output = output[:MAX_OUTPUT_CHARS] + "\n... (truncated)"

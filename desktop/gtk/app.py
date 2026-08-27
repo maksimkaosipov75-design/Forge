@@ -173,11 +173,8 @@ def format_stream_event_for_chat(line: str) -> str:
             break
     replacements = {
         "Initializing session...": "Initializing session",
-        "Инициализация сессии...": "Initializing session",
         "Done (success): 0ms": "Completed",
-        "Завершено (success): 0ms": "Completed",
         "Reading additional input from stdin...": "Waiting for CLI input",
-        "Результат инструмента": "Tool result",
     }
     return replacements.get(text, text)
 

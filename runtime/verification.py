@@ -298,6 +298,8 @@ class VerificationService:
 
 
 def _is_yes(answer: "str | None") -> bool:
+    # This reads a human's answer rather than writing one, so it accepts the
+    # words a human might actually type.
     return (answer or "").strip().lower() in {"y", "yes", "да", "ok", "approve", "true", "1"}
 
 

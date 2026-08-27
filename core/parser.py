@@ -60,12 +60,12 @@ class LogParser:
     def __init__(self, max_buffer=100):
         self.state = AgentState()
         self.max_buffer = max_buffer
-        # Полный буфер без ограничений — для финального ответа
+        # Unbounded buffer, kept for the final answer
         self.full_buffer: List[str] = []
-        # Финальный полный ответ из result события
+        # The complete final answer, taken from the result event
         self.final_result: str = ""
 
-        # Паттерны действий qwen
+        # Action patterns emitted by the qwen CLI
         self.file_create_pattern = re.compile(
             r"(?:Created|Writing|Creating)\s+(?:file\s+)?[`']?([^\s`']+)", re.IGNORECASE
         )
@@ -85,11 +85,14 @@ class LogParser:
             r"(Error|Exception|Failed|Traceback)", re.IGNORECASE
         )
         self.done_patterns = re.compile(
-            r"(Done|Completed|Finished|Successfully|Готово|Завершено)", re.IGNORECASE
+            # The Russian words are not a leftover: this pattern matches the provider
+        # CLI's own output, and those CLIs answer in the user's language. Removing
+        # them would stop completion being detected for a Russian-speaking user.
+        r"(Done|Completed|Finished|Successfully|Готово|Завершено)", re.IGNORECASE
         )
 
     def feed(self, line: str):
-        # Спец-маркер готовности
+        # Special readiness marker
         if line == "__READY__":
             self.state.is_busy = False
             self.state.current_action = "Ready"
@@ -99,10 +102,10 @@ class LogParser:
         if len(self.state.raw_buffer) > self.max_buffer:
             self.state.raw_buffer.pop(0)
 
-        # Полный буфер — без ограничений
+        # Full buffer, unbounded
         self.full_buffer.append(line)
 
-        # Парсим stream-json события
+        # Parse stream-json events
         event = self._parse_stream_event(line)
         if event:
             self.state.events.append(event)
@@ -112,7 +115,7 @@ class LogParser:
                 self.state.is_busy = True
                 self.state.last_tool_name = event.tool_name or event.text or "tool"
 
-                # Определяем тип инструмента и файл
+                # Work out which tool ran, and on which file
                 if event.tool_name in ("write_file", "edit"):
                     action = "✏️ Editing"
                     self.state.last_file_action = action
@@ -136,7 +139,7 @@ class LogParser:
                     self.state.current_action = f"🔧 {event.tool_name}"
 
             elif event.category == ActionCategory.THINKING:
-                # Thinking в статус не выносим, чтобы не засорять UI.
+                # Thinking is kept out of the status line; it would swamp the UI.
                 pass
 
             elif event.category == ActionCategory.DONE:
@@ -147,7 +150,7 @@ class LogParser:
                 self.state.current_action = "🔄 Initializing..."
                 self.state.is_busy = True
 
-        # Детекция создания файла (фоллбэк для обычного текста)
+        # File creation, recognised from plain text as a fallback
         if m := self.file_create_pattern.search(line):
             fname = m.group(1).strip("`'")
             if fname not in self.state.files_touched:
@@ -155,7 +158,7 @@ class LogParser:
             self.state.current_action = f"📂 Created: {fname}"
             self.state.is_busy = True
 
-        # Детекция редактирования
+        # Editing
         if m := self.file_edit_pattern.search(line):
             fname = m.group(1).strip("`'")
             if fname not in self.state.files_touched:
@@ -163,30 +166,30 @@ class LogParser:
             self.state.current_action = f"✏️ Editing: {fname}"
             self.state.is_busy = True
 
-        # Детекция чтения
+        # Reading
         if m := self.file_read_pattern.search(line):
             fname = m.group(1).strip("`'")
             self.state.current_action = f"👁️ Reading: {fname}"
             self.state.is_busy = True
 
-        # Детекция shell-команд
+        # Shell commands
         if m := self.shell_cmd_pattern.search(line):
             cmd = m.group(1).strip("`'")
             self.state.commands_run.append(cmd)
             self.state.current_action = f"🐚 Running: {cmd[:50]}"
             self.state.is_busy = True
 
-        # Прогресс по шагам
+        # Step progress
         if m := self.step_pattern.search(line):
             self.state.completed_steps = int(m.group(1))
             self.state.total_steps = int(m.group(2))
 
-        # Ошибки
+        # Errors
         if self.error_pattern.search(line):
             self.state.last_error = line[:150]
             self.state.is_busy = True
 
-        # Завершение
+        # Completion
         if self.done_patterns.search(line):
             self.state.current_action = "✅ Task complete"
             self.state.is_busy = False
@@ -253,7 +256,7 @@ class LogParser:
         s = self.state
         status = f"📊 Status: {escape(s.current_action)}\n"
 
-        # Прогресс-бар
+        # Progress bar
         if s.is_busy and s.tool_use_count > 0:
             blocks = min(s.tool_use_count, 10)
             bar = "█" * blocks + "░" * (10 - blocks)
@@ -391,13 +394,13 @@ class LogParser:
                 return f"🏁 {text}" if text else "🏁 result"
             if event_type == "tool":
                 return f"🔧 {text}" if text else "🔧 tool"
-        # Stream-json уже имеет чистые события с эмодзи
+        # stream-json already carries clean events, emoji included
         if line.startswith(("⚙️", "🧠", "💬", "🔧", "🏁", "🔢", "✏️", "📂", "👁️", "🐚", "❌", "✅", "🔍", "📊")):
             return line
         if line.startswith("__READY__"):
             return None
 
-        # Фоллбэк для обычного текста
+        # Fallback for plain text
         if m := self.file_create_pattern.search(line):
             return f"📂 Created: {m.group(1).strip(_QUOTE_CHARS)}"
         if m := self.file_edit_pattern.search(line):
@@ -429,9 +432,9 @@ class LogParser:
             parts.append("")
 
         if result_text and result_text.strip():
-            # Экранируем HTML для безопасности
+            # Escape HTML
             escaped = self._escape_html(result_text)
-            # Оборачиваем код в code blocks
+            # Wrap code in code blocks
             parts.append(f"<b>📋 Answer:</b>\n\n<pre>{escaped}</pre>")
 
         return "\n".join(parts)

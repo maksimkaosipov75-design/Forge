@@ -130,7 +130,7 @@ class QwenProcessManager(BaseProcessManager):
             return events, final_text
 
         if payload_type == "system":
-            events.append("⚙️ Инициализация сессии...")
+            events.append("⚙️ Initializing session...")
 
         elif payload_type == "assistant":
             message = payload.get("message", {})
@@ -187,12 +187,12 @@ class QwenProcessManager(BaseProcessManager):
             events.append(f"🔧 Using: {tool_name}")
 
         elif payload_type == "tool_result":
-            events.append("🔧 Результат инструмента")
+            events.append("🔧 Tool result")
 
         elif payload_type == "result":
             subtype = payload.get("subtype", "")
             duration_ms = payload.get("duration_ms", 0)
-            events.append(f"🏁 Завершено ({subtype}): {duration_ms}ms")
+            events.append(f"🏁 Done ({subtype}): {duration_ms}ms")
             final_text = payload.get("result", "") or None
             usage = payload.get("usage") or {}
             input_tokens = usage.get("input_tokens") or usage.get("inputTokens") or 0
@@ -324,7 +324,7 @@ class CodexProcessManager(BaseProcessManager):
 
         if payload_type in {"thread.started", "turn.started"}:
             if payload_type == "thread.started":
-                events.append("⚙️ Инициализация сессии...")
+                events.append("⚙️ Initializing session...")
 
         elif payload_type == "error":
             message = payload.get("message", "")
@@ -363,10 +363,10 @@ class CodexProcessManager(BaseProcessManager):
                     events.append(f"💬 {text}")
 
         elif payload_type == "turn.completed":
-            events.append("🏁 Завершено (success): 0ms")
+            events.append("🏁 Done (success): 0ms")
 
         elif payload_type == "task_complete":
-            events.append("🏁 Завершено (success): 0ms")
+            events.append("🏁 Done (success): 0ms")
             final_text = cls._extract_text(payload) or final_text
 
         return events, final_text
@@ -401,7 +401,7 @@ class CodexProcessManager(BaseProcessManager):
             args.append(text)
 
         log.info("Starting codex exec --json (model=%s) in %s", self.model_name or "default", work_dir)
-        self._notify("⚙️ Инициализация сессии...", "")
+        self._notify("⚙️ Initializing session...", "")
 
         proc = await asyncio.create_subprocess_exec(
             *args,
@@ -545,7 +545,7 @@ class ClaudeProcessManager(BaseProcessManager):
             return [event_line], final_text
 
         if payload_type == "system" and payload_subtype == "init":
-            return ["⚙️ Инициализация сессии..."], None
+            return ["⚙️ Initializing session..."], None
 
         if payload_type == "system" and payload_subtype == "api_retry":
             attempt = payload.get("attempt", "?")
@@ -570,8 +570,8 @@ class ClaudeProcessManager(BaseProcessManager):
         if payload_type == "tool_result":
             tool_name = payload.get("name") or payload.get("tool_name")
             if tool_name:
-                return [f"🔧 Результат инструмента: {tool_name}"], None
-            return ["🔧 Результат инструмента"], None
+                return [f"🔧 Tool result: {tool_name}"], None
+            return ["🔧 Tool result"], None
 
         if payload_type == "result":
             subtype = payload.get("subtype", "success")
@@ -580,7 +580,7 @@ class ClaudeProcessManager(BaseProcessManager):
             usage = payload.get("usage") or {}
             input_tokens = usage.get("input_tokens") or usage.get("inputTokens") or 0
             output_tokens = usage.get("output_tokens") or usage.get("outputTokens") or 0
-            events = [f"🏁 Завершено ({subtype}): {duration_ms}ms"]
+            events = [f"🏁 Done ({subtype}): {duration_ms}ms"]
             if input_tokens or output_tokens:
                 events.append(f"🔢 {input_tokens},{output_tokens}")
             return events, result_text

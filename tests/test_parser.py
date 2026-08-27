@@ -19,7 +19,7 @@ class LogParserTests(unittest.TestCase):
         self.assertTrue(parser.state.is_busy)
         self.assertEqual(parser.state.tool_use_count, 1)
 
-        parser.feed("🏁 Завершено (success): 123ms")
+        parser.feed("🏁 Done (success): 123ms")
         self.assertFalse(parser.state.is_busy)
         self.assertIn("Task complete", parser.state.current_action)
 

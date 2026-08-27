@@ -136,7 +136,7 @@ class FileManager:
             return
 
         items = sorted(directory.iterdir(), key=lambda x: (not x.is_dir(), x.name.lower()))
-        # Ограничиваем количество элементов
+        # Cap the number of entries
         items = items[:50]
 
         for i, item in enumerate(items):
@@ -188,7 +188,7 @@ class FileManager:
             return f"📂 Working directory: <code>{_esc(self.working_dir)}</code>\nNo project selected."
 
         proj = self.current_project
-        # Считаем файлы
+        # Count the files
         try:
             files = list(self.working_dir.rglob("*"))
             total_files = len([f for f in files if f.is_file()])

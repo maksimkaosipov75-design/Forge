@@ -55,7 +55,7 @@ class ProcessManagerPayloadParsingTests(unittest.TestCase):
 
         events, final_text = QwenProcessManager.parse_stream_payload(payload)
 
-        self.assertEqual(events, ["🏁 Завершено (success): 42ms"])
+        self.assertEqual(events, ["🏁 Done (success): 42ms"])
         self.assertEqual(final_text, "final answer")
 
     def test_parse_assistant_thinking_is_truncated(self):
@@ -105,7 +105,7 @@ class ProcessManagerPayloadParsingTests(unittest.TestCase):
 
         events, final_text = ClaudeProcessManager.parse_stream_payload(payload)
 
-        self.assertEqual(events, ["⚙️ Инициализация сессии..."])
+        self.assertEqual(events, ["⚙️ Initializing session..."])
         self.assertIsNone(final_text)
 
     def test_parse_claude_api_retry(self):
@@ -150,7 +150,7 @@ class ProcessManagerPayloadParsingTests(unittest.TestCase):
 
         events, final_text = ClaudeProcessManager.parse_stream_payload(payload)
 
-        self.assertEqual(events, ["🔧 Результат инструмента: read_file"])
+        self.assertEqual(events, ["🔧 Tool result: read_file"])
         self.assertIsNone(final_text)
 
     def test_parse_claude_result_includes_tokens(self):
@@ -164,7 +164,7 @@ class ProcessManagerPayloadParsingTests(unittest.TestCase):
 
         events, final_text = ClaudeProcessManager.parse_stream_payload(payload)
 
-        self.assertEqual(events, ["🏁 Завершено (success): 75ms", "🔢 12,34"])
+        self.assertEqual(events, ["🏁 Done (success): 75ms", "🔢 12,34"])
         self.assertEqual(final_text, "done")
 
     def test_parse_qwen_forge_event_passthrough(self):

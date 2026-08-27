@@ -29,6 +29,10 @@ def _normalize_reasoning(text: str) -> str:
     text = re.sub(r"thinking(?=\s*[A-Z0-9*\-])", "\n", text)
     # If 'thinking' still appears mid-word (lowercase follows), add a newline before it
     # so it at least breaks the run.
+    # The Cyrillic ranges below are matching model output, not producing text.
+    # Models reason in whatever language they were addressed in, and this
+    # normaliser has to put spaces back into their spaceless token streams
+    # either way.
     text = re.sub(r"thinking(?=[a-zа-яё])", "\n", text)
 
     # 2. CamelCase split: insert space between lower→upper transitions

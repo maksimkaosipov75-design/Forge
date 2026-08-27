@@ -153,6 +153,52 @@ class RoleResolutionTests(unittest.TestCase):
         self.assertEqual(container.built, [])
 
 
+class CliProviderAsHelperTests(unittest.TestCase):
+    """A CLI provider is another agent with its own tools. Forge can give it a
+    prompt but cannot take its tools away, so roles defined by a restriction
+    cannot be honoured there."""
+
+    def _service(self, assignment):
+        settings = _StubSettings()
+        settings.DELEGATE_SEARCH = assignment
+        settings.DELEGATE_REVIEW = assignment
+        settings.DELEGATE_IMPLEMENT = assignment
+        return DelegationService(_StubContainer(installed={"devstral:latest"}), settings)
+
+    def test_review_refuses_a_cli_agent(self):
+        resolution = self._service("codex").resolve_role("review")
+        self.assertFalse(resolution.ok)
+        self.assertIn("read-only", resolution.reason)
+        self.assertIn("codex", resolution.reason)
+
+    def test_search_refuses_a_cli_agent(self):
+        resolution = self._service("claude").resolve_role("search")
+        self.assertFalse(resolution.ok)
+        self.assertIn("read-only", resolution.reason)
+
+    def test_implement_accepts_a_cli_agent(self):
+        """implement is defined by what it is asked to do, not by what it may not
+        touch, so a CLI agent can carry it."""
+        resolution = self._service("codex").resolve_role("implement")
+        self.assertTrue(resolution.ok)
+        self.assertEqual(resolution.provider, "codex")
+
+    def test_read_only_roles_still_work_on_api_providers(self):
+        resolution = self._service("local").resolve_role("review")
+        self.assertTrue(resolution.ok)
+
+    def test_every_read_only_role_declares_it(self):
+        """The flag and the tool list must not drift apart: a role with no write
+        tools is making a promise it needs the flag to keep."""
+        writes = {"write_file", "edit_file", "bash"}
+        for name, role in ROLES.items():
+            read_only = not (writes & set(role.allowed_tools))
+            self.assertEqual(
+                read_only, role.requires_restriction,
+                f"{name}: read_only={read_only} but requires_restriction={role.requires_restriction}",
+            )
+
+
 class DescribeHelpersTests(unittest.TestCase):
     """/helpers has to answer honestly on a machine where nothing is available,
     which is the only state the author can currently observe."""

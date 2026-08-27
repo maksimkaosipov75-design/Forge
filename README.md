@@ -224,6 +224,18 @@ Only the first colon separates provider from model, so Ollama tags survive
 intact. Set `DELEGATION_ENABLED=0` to turn it off; the agent then does
 everything itself.
 
+**CLI providers can be helpers, with one limit.** `qwen`, `codex` and `claude`
+are agents in their own right: Forge can hand them a prompt but cannot take
+their tools away. `implement` is fine there — it is defined by what it is asked
+to do. `search` and `review` are not, because they are defined by what they may
+*not* touch, and a reviewer that can edit is not a reviewer. Pointing those two
+at a CLI provider is refused with an explanation rather than run without the
+guarantee.
+
+Run `/helpers` to see what each role resolves to right now, and whether the
+project's checks have been approved. It answers without spending anything, which
+is useful before there is a local model or any API credit to spend.
+
 ## Core Workflow
 
 ### Single-agent run

@@ -29,7 +29,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from core.providers import normalize_provider_name
+from core.providers import is_api_provider, normalize_provider_name
 
 log = logging.getLogger(__name__)
 
@@ -52,6 +52,12 @@ class RoleDefinition:
     summary: str
     allowed_tools: tuple[str, ...]
     system_prompt: str
+    # True when the role means nothing without its tool restriction. A reviewer
+    # that can edit is not a reviewer, and a searcher that can write is not what
+    # the caller asked for. Providers Forge cannot restrict - the CLI agents,
+    # which bring their own tools - are refused for these roles rather than
+    # quietly running without the guarantee.
+    requires_restriction: bool = False
 
 
 READ_ONLY_TOOLS = ("read_file", "list_directory", "glob_files", "search_in_files")
@@ -60,6 +66,7 @@ READ_ONLY_TOOLS = ("read_file", "list_directory", "glob_files", "search_in_files
 ROLES: dict[str, RoleDefinition] = {
     ROLE_SEARCH: RoleDefinition(
         name=ROLE_SEARCH,
+        requires_restriction=True,
         summary="locate things in the codebase and report where they are",
         allowed_tools=READ_ONLY_TOOLS,
         system_prompt=(
@@ -76,6 +83,7 @@ ROLES: dict[str, RoleDefinition] = {
     ),
     ROLE_REVIEW: RoleDefinition(
         name=ROLE_REVIEW,
+        requires_restriction=True,
         summary="check work already done and report what is wrong with it",
         # Deliberately read-only. A reviewer that can also fix what it finds
         # destroys the signal: you can no longer tell whether the work was right
@@ -201,11 +209,22 @@ class DelegationService:
         helper is unavailable is for the main agent to do the work itself.
         Falling back *within* the local provider is fine: it stays free.
         """
+        definition = ROLES.get(role)
         provider, model = self.assignment_for(role)
 
         ready, problem = self._container.provider_is_ready(provider)
         if not ready:
             return Resolution(role, provider, model, ok=False, reason=problem)
+
+        if definition is not None and definition.requires_restriction and not is_api_provider(provider):
+            return Resolution(
+                role, provider, model, ok=False,
+                reason=(
+                    f"the '{role}' role is read-only, and {provider} is a CLI agent whose "
+                    "tools Forge cannot take away. Point this role at a local or "
+                    "OpenRouter model instead"
+                ),
+            )
 
         if provider != "local":
             return Resolution(role, provider, model, ok=True)
@@ -308,6 +327,12 @@ class DelegationService:
         )
         if hasattr(manager, "project_context"):
             manager.project_context = context
+        else:
+            # A CLI agent has no system-message slot Forge can fill, so the role
+            # travels in the prompt instead. Without this the helper was handed a
+            # bare task and no idea what it was supposed to be doing - the
+            # hasattr check silently dropped it.
+            brief = f"{context}\n\n---\n\n{brief}"
         if hasattr(manager, "allowed_tools"):
             manager.allowed_tools = definition.allowed_tools
 

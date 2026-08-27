@@ -58,6 +58,10 @@ class RuntimeContainer:
             "qwen": settings.QWEN_CLI_PATH,
             "codex": settings.CODEX_CLI_PATH,
             "claude": settings.CLAUDE_CLI_PATH,
+            # The binary is `agy`, not the provider name, so this entry is what
+            # keeps provider_is_ready from looking for a command called
+            # "antigravity" and reporting it missing.
+            "antigravity": settings.ANTIGRAVITY_CLI_PATH,
             "openrouter": settings.OPENROUTER_BASE_URL,
             "local": settings.LOCAL_LLM_BASE_URL,
         }

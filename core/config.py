@@ -58,6 +58,7 @@ class Settings:
         self.DELEGATE_SEARCH = os.getenv("DELEGATE_SEARCH", "local")
         self.DELEGATE_REVIEW = os.getenv("DELEGATE_REVIEW", "local")
         self.DELEGATE_IMPLEMENT = os.getenv("DELEGATE_IMPLEMENT", "local")
+        self.ANTIGRAVITY_CLI_PATH = os.getenv("ANTIGRAVITY_CLI_PATH", "agy")
         self.CLAUDE_BYPASS_PERMISSIONS = os.getenv("CLAUDE_BYPASS_PERMISSIONS", "0").strip().lower() in {"1", "true", "yes", "on"}
         self.RATE_LIMIT_MAX_REQUESTS = _get_int_env("RATE_LIMIT_MAX_REQUESTS", 20, minimum=1)
         self.RATE_LIMIT_WINDOW_SECONDS = _get_int_env("RATE_LIMIT_WINDOW_SECONDS", 3600, minimum=1)

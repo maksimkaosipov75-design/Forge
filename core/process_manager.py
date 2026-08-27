@@ -695,6 +695,185 @@ class ClaudeProcessManager(BaseProcessManager):
         return proc.returncode
 
 
+class AntigravityProcessManager(BaseProcessManager):
+    """Run the Antigravity CLI (`agy`) in non-interactive stream-json mode.
+
+    Everything here about the CLI's interface was read off the CLI itself:
+    `agy --help` for the flags and `agy --output-format stream-json` for the
+    envelope. Two things differ from the Claude CLI it otherwise resembles.
+
+    The prompt is the *value* of --print, not a positional argument. Passing it
+    positionally makes agy take the next flag as the prompt and silently ignore
+    the real one; it says so, which is how this was found.
+
+    Events are tagged by an "event" key rather than "type", and the payload sits
+    under a key of the same name:
+
+        {"event": "result", "result": {"status": ..., "response": ..., ...}}
+
+    Only the result event has been observed - the account this was written
+    against is region locked, so a successful turn could not be run. The
+    intermediate events of a real conversation are therefore unknown, and are
+    handled generically rather than guessed at: anything carrying text is shown
+    as text, and anything unrecognised is logged at debug so it can be named
+    later from a real transcript.
+    """
+
+    @staticmethod
+    def _unwrap(payload: dict) -> tuple[str, dict]:
+        """Return (event name, inner payload) for the event-tagged envelope."""
+        name = str(payload.get("event") or "").strip().lower()
+        inner = payload.get(name)
+        if not isinstance(inner, dict):
+            # Some events may carry their fields inline rather than nested.
+            inner = {k: v for k, v in payload.items() if k != "event"}
+        return name, inner
+
+    @classmethod
+    def parse_stream_payload(cls, payload: dict) -> tuple[list[str], Optional[str]]:
+        forge_event = extract_forge_event(payload)
+        if forge_event:
+            event_type = str(forge_event.get("type") or "").strip().lower()
+            text = str(forge_event.get("text") or forge_event.get("message") or "").strip()
+            extra = {k: v for k, v in forge_event.items() if k not in {"type", "text"}}
+            return [encode_forge_event(event_type, text=text, **extra)], (
+                text if event_type == "result" and text else None
+            )
+
+        name, inner = cls._unwrap(payload)
+
+        if name == "result":
+            status = str(inner.get("status") or "").strip()
+            error = str(inner.get("error") or "").strip()
+            if error or status.upper() == "ERROR":
+                return [f"❌ {error or 'Antigravity reported an error'}"], None
+
+            duration_ms = int(float(inner.get("duration_seconds") or 0) * 1000)
+            events = [f"🏁 Done ({status.lower() or 'success'}): {duration_ms}ms"]
+            usage = inner.get("usage") or {}
+            input_tokens = usage.get("input_tokens") or 0
+            output_tokens = usage.get("output_tokens") or 0
+            if input_tokens or output_tokens:
+                events.append(f"🔢 {input_tokens},{output_tokens}")
+            response = str(inner.get("response") or "")
+            return events, response or None
+
+        if name == "error":
+            message = str(inner.get("message") or inner.get("error") or "").strip()
+            if message:
+                return [f"❌ {message}"], None
+
+        # Generic handling for the events that have not been seen. Text is shown,
+        # tool activity is named, everything else is noted for whoever gets to
+        # run this against a live account.
+        text = inner.get("text") or inner.get("content") or inner.get("delta")
+        if isinstance(text, str) and text.strip():
+            return [f"💬 {text}"], None
+
+        tool_name = inner.get("tool_name") or inner.get("name")
+        if isinstance(tool_name, str) and tool_name.strip():
+            return [f"🔧 {tool_name}"], None
+
+        if name:
+            log.debug("Unhandled agy event %r: %s", name, str(inner)[:200])
+        return [], None
+
+    async def send_command(self, text: str, cwd: Path = None):
+        async with self._command_lock:
+            return await self._send_command_impl(text, cwd)
+
+    async def _send_command_impl(self, text: str, cwd: Path = None):
+        if not self._running:
+            raise RuntimeError("Manager not started")
+
+        work_dir = cwd or Path.cwd()
+        args = [self.cli_path, "--output-format", "stream-json"]
+        if self.model_name:
+            args.extend(["--model", self.model_name])
+        effort = {"compact": "medium", "full": "high"}.get(
+            (self.thinking_mode or "").strip().lower()
+        )
+        if effort:
+            args.extend(["--effort", effort])
+        if os.getenv("ANTIGRAVITY_SKIP_PERMISSIONS", "0").strip().lower() in {"1", "true", "yes", "on"}:
+            args.append("--dangerously-skip-permissions")
+        if self._session_active:
+            args.append("--continue")
+        # The prompt has to be the flag's value; see the class docstring.
+        args.append(f"--print={text}")
+
+        log.info("Starting agy stream-json (model=%s) in %s", self.model_name or "default", work_dir)
+
+        proc = await asyncio.create_subprocess_exec(
+            *args,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=str(work_dir),
+        )
+        self._proc = proc
+        log.info("Process started PID=%s, cwd=%s", proc.pid, work_dir)
+
+        seen_output = False
+        while True:
+            try:
+                timeout = self.timeout if seen_output else self.startup_timeout
+                line = await asyncio.wait_for(proc.stdout.readline(), timeout=timeout)
+            except asyncio.TimeoutError:
+                timeout_text = "Startup timeout" if not seen_output else "Timeout"
+                log.error("%s %ss — killing process PID=%s", timeout_text, timeout, proc.pid)
+                proc.kill()
+                await proc.wait()
+                self._proc = None
+                self.mark_failure(f"{timeout_text} after {timeout}s")
+                return -1
+
+            if not line:
+                break
+
+            raw = line.decode("utf-8", errors="replace").strip()
+            if not raw:
+                continue
+            seen_output = True
+
+            try:
+                payload = json.loads(raw)
+            except json.JSONDecodeError:
+                log.debug("Invalid JSON from agy: %s", raw[:200])
+                continue
+
+            events, final_text = self.parse_stream_payload(payload)
+            for event in events:
+                self._notify(event, raw)
+            if final_text and self._final_result_callback:
+                self._final_result_callback(final_text)
+
+        stderr_parts: list[str] = []
+        while True:
+            line = await proc.stderr.readline()
+            if not line:
+                break
+            text_line = line.decode("utf-8", errors="replace").strip()
+            if text_line:
+                stderr_parts.append(text_line)
+                log.info("agy stderr: %s", text_line)
+
+        await proc.wait()
+        self._proc = None
+        self._session_active = proc.returncode == 0
+
+        if proc.returncode != 0 and stderr_parts:
+            self._notify(f"❌ {' '.join(stderr_parts)[:300]}", "")
+            self.mark_failure(" ".join(stderr_parts))
+        elif proc.returncode == 0:
+            self.mark_success()
+        else:
+            self.mark_failure(f"Process exited with code {proc.returncode}")
+
+        log.info("Process exited with code %s", proc.returncode)
+        return proc.returncode
+
+
 def create_process_manager(
     provider: str,
     cli_path: str,
@@ -707,4 +886,6 @@ def create_process_manager(
         return CodexProcessManager(cli_path=cli_path, on_output=on_output, timeout=timeout, provider_name=normalized, model_name=model_name)
     if normalized == "claude":
         return ClaudeProcessManager(cli_path=cli_path, on_output=on_output, timeout=timeout, provider_name=normalized, model_name=model_name)
+    if normalized == "antigravity":
+        return AntigravityProcessManager(cli_path=cli_path, on_output=on_output, timeout=timeout, provider_name=normalized, model_name=model_name)
     return QwenProcessManager(cli_path=cli_path, on_output=on_output, timeout=timeout, provider_name=normalized, model_name=model_name)

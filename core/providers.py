@@ -173,6 +173,57 @@ SUPPORTED_PROVIDERS: dict[str, ProviderDefinition] = {
             ),
         ),
     ),
+    "antigravity": ProviderDefinition(
+        name="antigravity",
+        label="Antigravity",
+        accent_color="green",
+        transport="cli",
+        cli_env_var="ANTIGRAVITY_CLI_PATH",
+        # The binary is `agy`; the product is Antigravity. It fronts Gemini
+        # models and also carries Claude and GPT-OSS ones, so it is not named
+        # after any single family.
+        default_cli_path="agy",
+        specialties=("reasoning", "analysis", "long_context"),
+        capabilities=("streaming", "session_resume", "file_editing", "shell_execution", "tool_use", "thinking"),
+        default_model="gemini-3.5-flash-low",
+        available_models=(
+            ModelDefinition(
+                name="gemini-3.5-flash-low",
+                label="Gemini 3.5 Flash (Low)",
+                capabilities=("fast", "tool_use"),
+                description="Cheapest reasoning effort; the sensible default for helper work.",
+                aliases=("flash", "gemini flash", "3.5 flash"),
+            ),
+            ModelDefinition(
+                name="gemini-3.7-flash-medium",
+                label="Gemini 3.7 Flash (Medium)",
+                capabilities=("fast", "tool_use", "thinking"),
+                description="Newest Flash at moderate effort.",
+                aliases=("3.7 flash", "flash medium"),
+            ),
+            ModelDefinition(
+                name="gemini-3.7-flash-high",
+                label="Gemini 3.7 Flash (High)",
+                capabilities=("reasoning", "tool_use", "thinking"),
+                description="Newest Flash at full effort.",
+                aliases=("flash high",),
+            ),
+            ModelDefinition(
+                name="gemini-3.1-pro-high",
+                label="Gemini 3.1 Pro (High)",
+                capabilities=("reasoning", "thinking", "tool_use"),
+                description="Pro tier for work that needs the reasoning.",
+                aliases=("pro", "gemini pro", "3.1 pro"),
+            ),
+            ModelDefinition(
+                name="gpt-oss-120b-medium",
+                label="GPT-OSS 120B (Medium)",
+                capabilities=("coding", "tool_use"),
+                description="Open-weights model offered through the same CLI.",
+                aliases=("gpt-oss", "oss 120b"),
+            ),
+        ),
+    ),
     "openrouter": ProviderDefinition(
         name="openrouter",
         label="OpenRouter",

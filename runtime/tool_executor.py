@@ -172,6 +172,21 @@ TOOL_DEFINITIONS: list[dict] = [
     {
         "type": "function",
         "function": {
+            "name": "verify",
+            "description": (
+                "Run this project's own checks - its test suite, and any lint or type "
+                "check it defines - and report whether they pass. Use this after making "
+                "changes, instead of assuming the work is correct or asking a model to "
+                "guess. The commands come from the project's files and were approved by "
+                "the user; you cannot choose them. Returns PASS, or FAIL with the output "
+                "of whatever failed."
+            ),
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "ask_user",
             "description": (
                 "Ask the user a question and wait for their answer. "
@@ -441,6 +456,7 @@ class ToolExecutor:
         interaction_callback: "Callable[[str, str], Awaitable[str | None]] | None" = None,
         delegate: "Callable[[str, str], Awaitable[str]] | None" = None,
         allowed_tools: "tuple[str, ...] | None" = None,
+        verify: "Callable[..., Awaitable[str]] | None" = None,
     ):
         self.cwd = Path(cwd).resolve()
         self._notify = notify
@@ -452,6 +468,7 @@ class ToolExecutor:
         # it was never offered should be refused, not obeyed.
         self._delegate = delegate
         self._allowed_tools = tuple(allowed_tools) if allowed_tools else None
+        self._verify = verify
 
     # ------------------------------------------------------------------
     # Dispatch
@@ -463,6 +480,8 @@ class ToolExecutor:
             allowed = ", ".join(self._allowed_tools)
             return f"Error: this agent may not call '{tool_name}'. Available tools: {allowed}."
         try:
+            if tool_name == "verify":
+                return await self._verify_tool()
             if tool_name == "delegate":
                 return await self._delegate_tool(
                     str(tool_args.get("role", "")),
@@ -530,6 +549,21 @@ class ToolExecutor:
             return True
         except ValueError:
             return False
+
+    async def _verify_tool(self) -> str:
+        if self._verify is None:
+            return (
+                "Error: verification is not configured in this run. Run the project's "
+                "checks with bash instead."
+            )
+        # The service is handed the executor's own bash so checks run in the same
+        # shell, working directory and timeout handling as everything else.
+        return await self._verify(
+            self.cwd,
+            self._bash,
+            self._interaction_callback,
+            self._notify,
+        )
 
     async def _delegate_tool(self, role: str, task: str) -> str:
         if self._delegate is None:

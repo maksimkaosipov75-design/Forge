@@ -53,6 +53,7 @@ class RuntimeContainer:
                 self.default_provider = "qwen"
 
         self._delegation = None
+        self._verification = None
         self.provider_paths = {
             "qwen": settings.QWEN_CLI_PATH,
             "codex": settings.CODEX_CLI_PATH,
@@ -94,6 +95,17 @@ class RuntimeContainer:
         stem = self.base_projects_file.stem or "projects"
         suffix = self.base_projects_file.suffix or ".json"
         return self.sessions_root / f"{stem}_{chat_id}{suffix}"
+
+    @property
+    def verification(self):
+        """Approved check commands live beside the sessions, not in the project."""
+        if self._verification is None:
+            from runtime.verification import CheckStore, VerificationService
+
+            self._verification = VerificationService(
+                CheckStore(Path(self.sessions_root) / "approved_checks.json")
+            )
+        return self._verification
 
     @property
     def delegation(self):
@@ -163,6 +175,14 @@ class RuntimeContainer:
                 )
 
             runtime_manager.delegate_callback = _delegate
+
+        if allow_delegation and hasattr(runtime_manager, "verify_callback"):
+            service = self.verification
+
+            async def _verify(cwd, run_command, ask, notify) -> str:
+                return await service.verify(cwd, run_command, ask=ask, notify=notify)
+
+            runtime_manager.verify_callback = _verify
 
         return ProviderRuntime(
             provider=normalized_provider,

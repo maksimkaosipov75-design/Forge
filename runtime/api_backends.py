@@ -98,6 +98,8 @@ class BaseApiBackend:
         # Set when this backend may hand work to helpers. Helpers are built
         # without one, so they cannot delegate in turn.
         self.delegate_callback = None
+        # Set when this backend may run the project's approved checks.
+        self.verify_callback = None
 
     async def start(self):
         self._running = True
@@ -380,6 +382,9 @@ class OpenRouterExecutionBackend(BaseApiBackend):
             ]
         else:
             tools = list(TOOL_DEFINITIONS)
+
+        if getattr(self, "verify_callback", None) is None:
+            tools = [item for item in tools if item.get("function", {}).get("name") != "verify"]
 
         if getattr(self, "delegate_callback", None) is not None:
             from runtime.delegation import DELEGATE_TOOL_DEFINITION
@@ -757,6 +762,7 @@ class OpenRouterExecutionBackend(BaseApiBackend):
                 interaction_callback=self._interaction_callback,
                 delegate=getattr(self, "delegate_callback", None),
                 allowed_tools=getattr(self, "allowed_tools", None),
+                verify=getattr(self, "verify_callback", None),
             )
 
             for _iteration in range(MAX_ITERATIONS):

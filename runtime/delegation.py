@@ -24,6 +24,7 @@ about, and the main agent is already the place where the thread is held.
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -283,6 +284,13 @@ class DelegationService:
         if notify:
             note = f" — {resolution.reason}" if resolution.reason else ""
             notify(f"🤝 delegating to {role} ({resolution.label()}){note}")
+        started = time.monotonic()
+
+        def _done(outcome: str) -> None:
+            # The transcript is the only record of a delegation, so it has to say
+            # how it ended and how long it took, not just that it began.
+            if notify:
+                notify(f"🤝 {role} {outcome} in {time.monotonic() - started:.1f}s")
 
         # allow_delegation=False is the depth limit: without a callback the
         # helper is never offered the delegate tool in the first place.
@@ -307,6 +315,7 @@ class DelegationService:
             await manager.start()
         except Exception as exc:
             log.warning("Helper %s failed to start: %s", role, exc)
+            _done("could not start")
             return f"Error: the '{role}' helper could not start ({exc}). Do the work yourself."
 
         try:
@@ -314,6 +323,7 @@ class DelegationService:
             answer = (runtime.parser.get_full_response() or "").strip()
         except Exception as exc:
             log.warning("Helper %s failed: %s", role, exc)
+            _done("failed")
             return f"Error: the '{role}' helper failed ({exc}). Do the work yourself."
         finally:
             try:
@@ -322,8 +332,10 @@ class DelegationService:
                 log.debug("Helper %s did not stop cleanly: %s", role, exc)
 
         if not answer:
+            _done("returned nothing")
             return f"The '{role}' helper returned nothing. Do the work yourself."
 
+        _done(f"answered ({len(answer)} chars)")
         if len(answer) > MAX_RESULT_CHARS:
             answer = answer[:MAX_RESULT_CHARS] + "\n... (helper output truncated)"
         return answer

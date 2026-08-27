@@ -563,13 +563,23 @@ class OrchestratorService:
 
     @staticmethod
     def build_review_prompt(plan: OrchestrationPlan, task_run: TaskRun) -> str:
+        # Same verdict vocabulary as the review helper role in runtime/delegation.py.
+        # The two critics run in different shapes - this one reviews a finished
+        # multi-agent plan, the helper reviews work in progress - but there should
+        # be one idea of what a verdict is, and one set of words for it.
         parts = [
             "You are the final reviewer for a multi-agent execution plan.",
             f"Original task:\n{plan.prompt}",
-            "Review the result critically. Keep it concise. Report:",
-            "1. Overall verdict",
-            "2. Risks or likely gaps",
-            "3. Recommended next step",
+            "Review the result critically. You are not changing anything; your job is "
+            "to say what is wrong, precisely enough that someone else can fix it.",
+            "Answer in this shape:",
+            "  VERDICT: pass | revise | fail",
+            "  NOTES: what is wrong, one item per line, each pointing at something specific",
+            "  NEXT: the single most useful thing to do now",
+            "pass means you found nothing worth changing. revise means there are specific "
+            "defects listed. fail means the approach itself is wrong.",
+            "Report only what you can point at. An invented objection costs more than a "
+            "missed one, because it sends good work back around the loop.",
         ]
         if task_run.answer_text.strip():
             parts.extend(["Final answer:", task_run.answer_text[:4000]])

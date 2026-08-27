@@ -49,6 +49,15 @@ class Settings:
         self.LOCAL_LLM_ENABLE_TOOLS = os.getenv("LOCAL_LLM_ENABLE_TOOLS", "0").strip().lower() in {"1", "true", "yes", "on"}
         self.LOCAL_LLM_DISABLE_THINKING = os.getenv("LOCAL_LLM_DISABLE_THINKING", "1").strip().lower() in {"1", "true", "yes", "on"}
         self.LOCAL_LLM_ENABLE_STREAMING = os.getenv("LOCAL_LLM_ENABLE_STREAMING", "0").strip().lower() in {"1", "true", "yes", "on"}
+        # Which model answers for each helper role, as provider[:model].
+        # Split on the first colon only, because Ollama model names carry a
+        # tag after one of their own: local:qwen2.5-coder:7b is the
+        # qwen2.5-coder:7b model, not a model called qwen2.5-coder.
+        # Bare 'local' means the local provider's configured default.
+        self.DELEGATION_ENABLED = os.getenv("DELEGATION_ENABLED", "1").strip().lower() in {"1", "true", "yes", "on"}
+        self.DELEGATE_SEARCH = os.getenv("DELEGATE_SEARCH", "local")
+        self.DELEGATE_REVIEW = os.getenv("DELEGATE_REVIEW", "local")
+        self.DELEGATE_IMPLEMENT = os.getenv("DELEGATE_IMPLEMENT", "local")
         self.CLAUDE_BYPASS_PERMISSIONS = os.getenv("CLAUDE_BYPASS_PERMISSIONS", "0").strip().lower() in {"1", "true", "yes", "on"}
         self.RATE_LIMIT_MAX_REQUESTS = _get_int_env("RATE_LIMIT_MAX_REQUESTS", 20, minimum=1)
         self.RATE_LIMIT_WINDOW_SECONDS = _get_int_env("RATE_LIMIT_WINDOW_SECONDS", 3600, minimum=1)

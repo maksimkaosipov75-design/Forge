@@ -439,11 +439,19 @@ class ToolExecutor:
         notify: Callable[[str], None],
         shell: PersistentShell | None = None,
         interaction_callback: "Callable[[str, str], Awaitable[str | None]] | None" = None,
+        delegate: "Callable[[str, str], Awaitable[str]] | None" = None,
+        allowed_tools: "tuple[str, ...] | None" = None,
     ):
         self.cwd = Path(cwd).resolve()
         self._notify = notify
         self._shell = shell  # if set, bash calls run inside the persistent process
         self._interaction_callback = interaction_callback
+        # Set for a helper agent: only these tools may be called, whatever the
+        # model asks for. The advertised tool list is filtered too, so this is a
+        # second line rather than the only one - a model that hallucinates a tool
+        # it was never offered should be refused, not obeyed.
+        self._delegate = delegate
+        self._allowed_tools = tuple(allowed_tools) if allowed_tools else None
 
     # ------------------------------------------------------------------
     # Dispatch
@@ -451,7 +459,15 @@ class ToolExecutor:
 
     async def execute(self, tool_name: str, tool_args: dict) -> str:
         """Dispatch a tool call. Always returns a string (never raises)."""
+        if self._allowed_tools is not None and tool_name not in self._allowed_tools:
+            allowed = ", ".join(self._allowed_tools)
+            return f"Error: this agent may not call '{tool_name}'. Available tools: {allowed}."
         try:
+            if tool_name == "delegate":
+                return await self._delegate_tool(
+                    str(tool_args.get("role", "")),
+                    str(tool_args.get("task", "")),
+                )
             if tool_name == "bash":
                 return await self._bash(
                     tool_args.get("command", ""),
@@ -514,6 +530,13 @@ class ToolExecutor:
             return True
         except ValueError:
             return False
+
+    async def _delegate_tool(self, role: str, task: str) -> str:
+        if self._delegate is None:
+            return (
+                "Error: delegation is not available in this run. Do the work yourself."
+            )
+        return await self._delegate(role, task)
 
     async def _bash(self, command: str, timeout: int = 30) -> str:
         timeout = min(max(timeout, 1), BASH_TIMEOUT_MAX)

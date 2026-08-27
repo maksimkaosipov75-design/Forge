@@ -92,6 +92,12 @@ class BaseApiBackend:
         self._final_result_callback: Optional[Callable[[str], None]] = None
         self._cancel_event = threading.Event()
         self._active_response = None  # urllib response object for the running request
+        # Set when this backend is a helper agent: it may call only these tools,
+        # and the advertised list is narrowed to match. None means the full set.
+        self.allowed_tools: "tuple[str, ...] | None" = None
+        # Set when this backend may hand work to helpers. Helpers are built
+        # without one, so they cannot delegate in turn.
+        self.delegate_callback = None
 
     async def start(self):
         self._running = True
@@ -355,6 +361,32 @@ class OpenRouterExecutionBackend(BaseApiBackend):
     # assistant/tool pairs so the model always knows what it's doing).
     _CONTEXT_CHAR_BUDGET = 80_000
 
+    def _tool_payload(self) -> list[dict]:
+        """The tool list this agent advertises to the model.
+
+        A helper agent is constructed with allowed_tools and gets only those.
+        The delegate tool is appended only when there is somewhere to delegate
+        to, which is how helpers are prevented from spawning helpers: they are
+        built without a delegate callback, so they never see the tool.
+        """
+        from runtime.tool_executor import TOOL_DEFINITIONS
+
+        allowed = getattr(self, "allowed_tools", None)
+        if allowed:
+            allowed_set = set(allowed)
+            tools = [
+                item for item in TOOL_DEFINITIONS
+                if item.get("function", {}).get("name") in allowed_set
+            ]
+        else:
+            tools = list(TOOL_DEFINITIONS)
+
+        if getattr(self, "delegate_callback", None) is not None:
+            from runtime.delegation import DELEGATE_TOOL_DEFINITION
+
+            tools.append(DELEGATE_TOOL_DEFINITION)
+        return tools
+
     def _build_messages(self, prompt: str) -> list[dict]:
         """Build the messages array: optional system context + history + current prompt."""
         messages: list[dict] = []
@@ -457,8 +489,7 @@ class OpenRouterExecutionBackend(BaseApiBackend):
         if self.top_p is not None:
             payload["top_p"] = self.top_p
         if self.tools_enabled:
-            from runtime.tool_executor import TOOL_DEFINITIONS
-            payload["tools"] = TOOL_DEFINITIONS
+            payload["tools"] = self._tool_payload()
             payload["tool_choice"] = "auto"
         body = json.dumps(payload).encode("utf-8")
         req = request.Request(
@@ -724,6 +755,8 @@ class OpenRouterExecutionBackend(BaseApiBackend):
                 notify=self._notify,
                 shell=shell,
                 interaction_callback=self._interaction_callback,
+                delegate=getattr(self, "delegate_callback", None),
+                allowed_tools=getattr(self, "allowed_tools", None),
             )
 
             for _iteration in range(MAX_ITERATIONS):

@@ -52,6 +52,7 @@ class RuntimeContainer:
             else:
                 self.default_provider = "qwen"
 
+        self._delegation = None
         self.provider_paths = {
             "qwen": settings.QWEN_CLI_PATH,
             "codex": settings.CODEX_CLI_PATH,
@@ -94,12 +95,22 @@ class RuntimeContainer:
         suffix = self.base_projects_file.suffix or ".json"
         return self.sessions_root / f"{stem}_{chat_id}{suffix}"
 
+    @property
+    def delegation(self):
+        """Lazily built so importing the container does not pull the roles in."""
+        if self._delegation is None:
+            from runtime.delegation import DelegationService
+
+            self._delegation = DelegationService(self, self.settings)
+        return self._delegation
+
     def build_runtime(
         self,
         provider_name: str,
         provided_manager=None,
         provided_parser=None,
         model_name: str = "",
+        allow_delegation: bool = True,
     ) -> ProviderRuntime:
         runtime_parser = provided_parser or LogParser()
         normalized_provider = normalize_provider_name(provider_name)
@@ -137,6 +148,22 @@ class RuntimeContainer:
                 on_output=lambda line, target_parser=runtime_parser: target_parser.feed(line),
                 model_name=selected_model,
             )
+        # A main agent may hand work to helpers; a helper may not. The callback
+        # is what makes the delegate tool appear at all, so withholding it here
+        # is what keeps delegation one level deep.
+        if allow_delegation and self.settings.DELEGATION_ENABLED and hasattr(runtime_manager, "delegate_callback"):
+            service = self.delegation
+
+            async def _delegate(role: str, task: str, _cwd_source=runtime_manager) -> str:
+                return await service.run(
+                    role,
+                    task,
+                    cwd=getattr(_cwd_source, "_cwd", None) or self.file_mgr.get_working_dir(),
+                    notify=getattr(_cwd_source, "_notify", None),
+                )
+
+            runtime_manager.delegate_callback = _delegate
+
         return ProviderRuntime(
             provider=normalized_provider,
             manager=runtime_manager,

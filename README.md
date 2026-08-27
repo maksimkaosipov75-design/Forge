@@ -182,6 +182,48 @@ LOCAL_LLM_DISABLE_THINKING=1    # adds /no_think for local Qwen3 models by defau
 
 ---
 
+## Helper agents
+
+The agent working on your task can hand a self-contained piece of it to a cheaper
+model rather than doing it itself. It decides when; you do not manage it.
+
+The point is context, not just price. Reading a dozen files to find where
+something is handled costs the expensive model most of its window; a local model
+can do the same reading and answer in three lines. What comes back is the answer,
+not the material it was derived from — so the model holding your task keeps its
+context for the part that needs judgement.
+
+Three roles, differing only in which model runs them, which tools they may call,
+and what they are told they are for:
+
+| Role | For | Tools |
+|---|---|---|
+| `search` | locating things in the codebase | read-only |
+| `review` | checking work already done | read-only |
+| `implement` | carrying out one decided change | read, write, bash |
+
+`review` is read-only on purpose. A reviewer that can also fix what it found
+destroys the signal — you can no longer tell whether the work was right or the
+reviewer quietly rescued it. It reports a verdict and the specifics; the agent
+that asked decides what to do about it.
+
+Helpers cannot delegate in turn. They are built without a delegate callback, so
+the tool is never offered to them: the depth limit is a property of how they are
+constructed rather than a counter someone has to remember to check.
+
+Configure with `DELEGATE_SEARCH`, `DELEGATE_REVIEW` and `DELEGATE_IMPLEMENT`,
+each `provider[:model]`:
+
+```bash
+DELEGATE_SEARCH=local:qwen2.5-coder:7b
+DELEGATE_REVIEW=local:qwen2.5-coder:14b
+DELEGATE_IMPLEMENT=openrouter:qwen/qwen3-coder:free
+```
+
+Only the first colon separates provider from model, so Ollama tags survive
+intact. Set `DELEGATION_ENABLED=0` to turn it off; the agent then does
+everything itself.
+
 ## Core Workflow
 
 ### Single-agent run

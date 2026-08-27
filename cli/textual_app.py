@@ -3288,6 +3288,15 @@ def create_textual_app(container, chat_id: int = 0):
             if command == "/metrics":
                 self._push_output(container.metrics.render_prometheus().replace("[", "\\["))
                 return
+            if command == "/helpers":
+                from runtime.delegation import describe_helpers
+
+                self._push_output(
+                    describe_helpers(container, session.file_mgr.get_working_dir()).replace(
+                        "[", _RICH_OPEN_BRACKET
+                    )
+                )
+                return
             if command == "/todos":
                 self._push_output("\n".join(render_todos_lines(session)))
                 return

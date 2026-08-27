@@ -236,6 +236,20 @@ class VerificationService:
     def __init__(self, store: CheckStore):
         self._store = store
 
+    def describe(self, workspace: Path) -> list[str]:
+        """Lines describing what would run here, for the /helpers command."""
+        approved = self._store.approved_for(workspace)
+        if approved is None:
+            proposed = detect_checks(workspace)
+            if not proposed:
+                return ["  not approved yet, and nothing was detected to propose"]
+            lines = ["  not approved yet. Would propose:"]
+            lines += [f"    {item.label:<6} {item.command}" for item in proposed]
+            return lines
+        if not approved:
+            return ["  declined for this workspace, so nothing is ever run"]
+        return [f"  {item.label:<6} {item.command}" for item in approved]
+
     async def verify(
         self,
         workspace: Path,

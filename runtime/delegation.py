@@ -132,6 +132,48 @@ def parse_assignment(raw: str, fallback_provider: str = "local") -> tuple[str, s
     return normalize_provider_name(provider.strip()), model.strip()
 
 
+@dataclass(frozen=True)
+class Resolution:
+    """Which model will answer for a role, or why none will."""
+
+    role: str
+    provider: str
+    model: str
+    ok: bool
+    reason: str = ""
+
+    def label(self) -> str:
+        return f"{self.provider}:{self.model}" if self.model else self.provider
+
+
+def describe_helpers(container, workspace) -> str:
+    """What the helper roles and the check suite would do right now.
+
+    Resolution touches the local server, so this is a real answer rather than a
+    reading of the configuration file.
+    """
+    lines = ["Roles"]
+    for name in sorted(ROLES):
+        try:
+            resolution = container.delegation.resolve_role(name)
+        except Exception as exc:  # pragma: no cover - depends on the machine
+            lines.append(f"  {name:<10} could not be resolved: {exc}")
+            continue
+        if not resolution.ok:
+            lines.append(f"  {name:<10} unavailable — {resolution.reason}")
+        elif resolution.reason:
+            lines.append(f"  {name:<10} {resolution.label()} — {resolution.reason}")
+        else:
+            lines.append(f"  {name:<10} {resolution.label()}")
+
+    lines += ["", "Checks"]
+    try:
+        lines += container.verification.describe(workspace)
+    except Exception as exc:  # pragma: no cover - depends on the machine
+        lines.append(f"  could not be read: {exc}")
+    return "\n".join(lines)
+
+
 class DelegationService:
     """Runs a helper agent for a role, and returns what it said.
 
@@ -149,6 +191,71 @@ class DelegationService:
         raw = getattr(self._settings, f"DELEGATE_{role.upper()}", "")
         return parse_assignment(raw)
 
+    def resolve_role(self, role: str) -> Resolution:
+        """Turn a configured role into a model that can actually answer.
+
+        Deliberately does not fall back across providers. Sliding from a local
+        model to a hosted one because Ollama happens to be down would spend the
+        user's money to save them a sentence, and the correct answer when a
+        helper is unavailable is for the main agent to do the work itself.
+        Falling back *within* the local provider is fine: it stays free.
+        """
+        provider, model = self.assignment_for(role)
+
+        ready, problem = self._container.provider_is_ready(provider)
+        if not ready:
+            return Resolution(role, provider, model, ok=False, reason=problem)
+
+        if provider != "local":
+            return Resolution(role, provider, model, ok=True)
+
+        # Local models have to be pulled before they can answer, and pulling one
+        # is a multi-gigabyte download nobody asked for. Report instead.
+        #
+        # is_model_installed asks the local server; list_available_models returns
+        # the curated catalogue, whose entries carry no installed flag at all. An
+        # earlier version of this trusted the catalogue and reported every model
+        # as ready while nothing was listening on the port - the kind of false
+        # confidence that turns into a confusing failure later.
+        if model and self._container.local_model_is_installed(model):
+            return Resolution(role, provider, model, ok=True)
+
+        substitute = self._first_installed_local_model()
+        if substitute is None:
+            return Resolution(
+                role, provider, model, ok=False,
+                reason=(
+                    f"no local model is installed, or the server at "
+                    f"{self._settings.LOCAL_LLM_BASE_URL} is not reachable"
+                ),
+            )
+
+        if model:
+            return Resolution(
+                role, provider, substitute, ok=True,
+                reason=f"{model} is not installed; using {substitute} instead",
+            )
+        return Resolution(role, provider, substitute, ok=True)
+
+    def _first_installed_local_model(self) -> "str | None":
+        """The first catalogue model the local server actually has.
+
+        Records are cached inside the catalogue after the first lookup, so
+        asking about several names does not mean several round trips.
+        """
+        try:
+            candidates = [item.name for item in self._container.list_available_models("local")]
+        except Exception as exc:
+            log.debug("Could not list local models: %s", exc)
+            return None
+        for name in candidates:
+            try:
+                if self._container.local_model_is_installed(name):
+                    return name
+            except Exception as exc:
+                log.debug("Could not check whether %s is installed: %s", name, exc)
+        return None
+
     async def run(
         self,
         role: str,
@@ -165,16 +272,17 @@ class DelegationService:
         if not brief:
             return "Error: delegate needs a task description."
 
-        provider, model = self.assignment_for(role)
-        if provider not in self._container.provider_paths:
+        resolution = self.resolve_role(role)
+        if not resolution.ok:
             return (
-                f"Error: the '{role}' helper is configured to use provider '{provider}', "
-                "which is not available. Do the work yourself."
+                f"The '{role}' helper is unavailable: {resolution.reason}. "
+                "Do the work yourself."
             )
+        provider, model = resolution.provider, resolution.model
 
         if notify:
-            label = f"{provider}:{model}" if model else provider
-            notify(f"🤝 delegating to {role} ({label})")
+            note = f" — {resolution.reason}" if resolution.reason else ""
+            notify(f"🤝 delegating to {role} ({resolution.label()}){note}")
 
         # allow_delegation=False is the depth limit: without a callback the
         # helper is never offered the delegate tool in the first place.

@@ -7,6 +7,7 @@ from runtime.delegation import (
     DELEGATE_TOOL_DEFINITION,
     ROLES,
     DelegationService,
+    describe_helpers,
     parse_assignment,
 )
 from runtime.tool_executor import ToolExecutor
@@ -70,16 +71,123 @@ class _StubSettings:
     DELEGATE_SEARCH = "local"
     DELEGATE_REVIEW = "local"
     DELEGATE_IMPLEMENT = "local"
+    LOCAL_LLM_BASE_URL = "http://127.0.0.1:11434/v1"
+
+
+class _Model:
+    def __init__(self, name):
+        self.name = name
 
 
 class _StubContainer:
-    def __init__(self, provider_paths=None):
+    def __init__(self, provider_paths=None, ready=True, ready_reason="", installed=()):
         self.provider_paths = provider_paths if provider_paths is not None else {"local": "local"}
         self.built = []
+        self._ready = ready
+        self._ready_reason = ready_reason
+        self._installed = set(installed)
+        self.catalogue = ["qwen2.5-coder:7b", "devstral:latest", "llama3.1:8b"]
+
+    def provider_is_ready(self, provider):
+        return (self._ready, self._ready_reason)
+
+    def list_available_models(self, provider, refresh=False, tools_only=False):
+        return [_Model(name) for name in self.catalogue]
+
+    def local_model_is_installed(self, name, refresh=False):
+        return name in self._installed
 
     def build_runtime(self, provider, model_name="", allow_delegation=True):
         self.built.append((provider, model_name, allow_delegation))
         raise AssertionError("not expected to build in these tests")
+
+
+class RoleResolutionTests(unittest.TestCase):
+    def test_an_unreachable_provider_is_reported_not_worked_around(self):
+        container = _StubContainer(ready=False, ready_reason="OpenRouter API key is not configured.")
+        service = DelegationService(container, _StubSettings())
+        resolution = service.resolve_role("search")
+        self.assertFalse(resolution.ok)
+        self.assertIn("API key", resolution.reason)
+
+    def test_a_configured_local_model_that_is_installed_is_used(self):
+        container = _StubContainer(installed={"qwen2.5-coder:7b"})
+        settings = _StubSettings()
+        settings.DELEGATE_SEARCH = "local:qwen2.5-coder:7b"
+        resolution = DelegationService(container, settings).resolve_role("search")
+        self.assertTrue(resolution.ok)
+        self.assertEqual(resolution.model, "qwen2.5-coder:7b")
+        self.assertEqual(resolution.reason, "")
+
+    def test_a_missing_local_model_falls_back_within_the_same_provider(self):
+        """Substituting one free local model for another spends nothing."""
+        container = _StubContainer(installed={"devstral:latest"})
+        settings = _StubSettings()
+        settings.DELEGATE_SEARCH = "local:qwen2.5-coder:7b"
+        resolution = DelegationService(container, settings).resolve_role("search")
+        self.assertTrue(resolution.ok)
+        self.assertEqual(resolution.model, "devstral:latest")
+        self.assertIn("not installed", resolution.reason)
+
+    def test_nothing_installed_is_reported_with_the_address_that_was_tried(self):
+        container = _StubContainer(installed=set())
+        resolution = DelegationService(container, _StubSettings()).resolve_role("search")
+        self.assertFalse(resolution.ok)
+        self.assertIn("11434", resolution.reason)
+
+    def test_the_catalogue_is_not_trusted_about_what_is_installed(self):
+        """The curated catalogue lists models the server may not have. Trusting it
+        once made every role report ready while nothing was listening at all."""
+        container = _StubContainer(installed=set())
+        self.assertTrue(container.list_available_models("local"))  # catalogue is non-empty
+        resolution = DelegationService(container, _StubSettings()).resolve_role("search")
+        self.assertFalse(resolution.ok)
+
+    def test_a_hosted_provider_is_never_substituted_for_a_local_one(self):
+        """Sliding to a paid provider because Ollama is down would spend money to
+        save a sentence. The agent is told to do the work itself instead."""
+        container = _StubContainer(installed=set())
+        result = run(DelegationService(container, _StubSettings()).run("search", "find it", Path(".")))
+        self.assertIn("unavailable", result)
+        self.assertIn("yourself", result)
+        self.assertEqual(container.built, [])
+
+
+class DescribeHelpersTests(unittest.TestCase):
+    """/helpers has to answer honestly on a machine where nothing is available,
+    which is the only state the author can currently observe."""
+
+    class _Container(_StubContainer):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            self.delegation = DelegationService(self, _StubSettings())
+
+            class _Verification:
+                @staticmethod
+                def describe(workspace):
+                    return ["  tests  python -m pytest -q"]
+
+            self.verification = _Verification()
+
+    def test_unavailable_roles_say_why(self):
+        text = describe_helpers(self._Container(installed=set()), Path("."))
+        self.assertIn("unavailable", text)
+        self.assertIn("11434", text)
+
+    def test_a_substitution_is_shown_not_hidden(self):
+        container = self._Container(installed={"devstral:latest"})
+        text = describe_helpers(container, Path("."))
+        self.assertIn("devstral:latest", text)
+
+    def test_checks_are_included(self):
+        text = describe_helpers(self._Container(installed=set()), Path("."))
+        self.assertIn("Checks", text)
+        self.assertIn("pytest", text)
+
+    def test_every_role_appears(self):
+        text = describe_helpers(self._Container(installed=set()), Path("."))
+        for name in ROLES:
+            self.assertIn(name, text)
 
 
 class DelegationServiceTests(unittest.TestCase):
@@ -95,10 +203,10 @@ class DelegationServiceTests(unittest.TestCase):
         result = run(self.service.run("search", "   ", Path(".")))
         self.assertIn("needs a task description", result)
 
-    def test_missing_provider_tells_the_agent_to_do_it_itself(self):
-        service = DelegationService(_StubContainer(provider_paths={}), _StubSettings())
+    def test_an_unusable_helper_tells_the_agent_to_do_it_itself(self):
+        service = DelegationService(_StubContainer(installed=set()), _StubSettings())
         result = run(service.run("search", "find the parser", Path(".")))
-        self.assertIn("not available", result)
+        self.assertIn("unavailable", result)
         self.assertIn("yourself", result)
 
     def test_assignment_comes_from_settings(self):

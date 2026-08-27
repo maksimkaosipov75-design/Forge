@@ -32,6 +32,7 @@ COMMAND_SPECS: tuple[CommandSpec, ...] = (
     CommandSpec("/limits", "Status", "Show provider health and rate limits"),
     CommandSpec("/usage", "Status", "Show token usage and task counts"),
     CommandSpec("/metrics", "Status", "Show internal metrics"),
+    CommandSpec("/helpers", "Status", "Show which model answers for each helper role, and the approved checks"),
     CommandSpec("/stats", "Status", "Show per-provider performance stats"),
     CommandSpec("/todos", "Status", "Extract TODOs from the last answer"),
     CommandSpec("/thinking", "Status", "Control reasoning visibility (/thinking off|compact|full)"),

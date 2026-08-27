@@ -251,6 +251,17 @@ class BridgeShell:
             self.leave_home_if_needed()
             self.ui.print_block("Metrics", self.container.metrics.render_prometheus(), border_style="cyan")
             return
+        if command == "/helpers":
+            self.leave_home_if_needed()
+            from runtime.delegation import describe_helpers
+
+            session = self.container.get_session(self.chat_id)
+            self.ui.print_block(
+                "Helpers",
+                describe_helpers(self.container, session.file_mgr.get_working_dir()),
+                border_style="cyan",
+            )
+            return
         if command == "/thinking":
             self.leave_home_if_needed()
             session = self.container.get_session(self.chat_id)
